@@ -1,6 +1,6 @@
 <div align="center">
 
-# 👻 Kiro Gateway
+# 👻 Kiro Gateway (fork of https://github.com/jwadow/kiro-gateway)
 
 **Proxy gateway for Kiro API (Amazon Q Developer / AWS CodeWhisperer)**
 
