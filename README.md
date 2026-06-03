@@ -1,5 +1,7 @@
 # ACP-compliant Kiro Gateway
 
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
+
 This fork pivots `kiro-gateway` away from direct token/API interception and toward an ACP-based architecture aligned with Kiro's stated allowed usage.
 
 ## Allowed usage basis
@@ -180,6 +182,12 @@ Pass these in the request body as gateway extensions (standard clients ignore un
 - Keep all authentication in the official `kiro` CLI — the gateway never touches credentials.
 - Scope `filesystem_roots` to the minimum required directories and keep `write: false` unless the agent genuinely needs to write files.
 - Keep `terminal.allowed_commands` as narrow as possible.
+
+## Support
+
+If this project is useful to you, consider supporting its development:
+
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
 
 ## License
 
