@@ -1,2 +1,26 @@
-# This file has been removed (part of the deleted direct-API backend).
-raise ImportError("kiro.network_errors has been removed. See kiro/exceptions.py.")
+"""Network-level error helpers."""
+from __future__ import annotations
+
+import httpx
+
+
+class NetworkError(Exception):
+    """Transient network failure."""
+
+
+class VpnChangeError(NetworkError):
+    """Network interface changed (VPN reconnect)."""
+
+
+def is_transient(exc: Exception) -> bool:
+    """Return True for errors that may succeed on retry."""
+    return isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.RemoteProtocolError,
+            httpx.ReadTimeout,
+            httpx.WriteTimeout,
+            NetworkError,
+        ),
+    )

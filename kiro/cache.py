@@ -1,15 +1,42 @@
-# -*- coding: utf-8 -*-
-"""
-kiro/cache.py - RETIRED
+"""Simple TTL-aware in-memory cache."""
+from __future__ import annotations
+import time
+from typing import Any, Optional
 
-ModelInfoCache has been removed. Model metadata is now resolved
-statically via kiro/model_resolver.py.
 
-This file is kept as an empty stub so that any direct import of
-`kiro.cache` (e.g., in tests) does not raise an ImportError.
+class TTLCache:
+    """Thread-safe (GIL-protected) TTL cache."""
 
-Do not add new code here.
-"""
+    def __init__(self, ttl: float = 300.0) -> None:
+        self._ttl = ttl
+        self._store: dict[str, tuple[Any, float]] = {}
 
-# No public API — stub only.
-__all__: list = []
+    def get(self, key: str) -> Optional[Any]:
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        value, expires = entry
+        if time.monotonic() > expires:
+            del self._store[key]
+            return None
+        return value
+
+    def set(self, key: str, value: Any, ttl: Optional[float] = None) -> None:
+        t = ttl if ttl is not None else self._ttl
+        self._store[key] = (value, time.monotonic() + t)
+
+    def delete(self, key: str) -> None:
+        self._store.pop(key, None)
+
+    def clear(self) -> None:
+        self._store.clear()
+
+    def __len__(self) -> int:
+        self._evict()
+        return len(self._store)
+
+    def _evict(self) -> None:
+        now = time.monotonic()
+        expired = [k for k, (_, exp) in self._store.items() if now > exp]
+        for k in expired:
+            del self._store[k]
