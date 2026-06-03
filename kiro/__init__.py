@@ -19,7 +19,6 @@ Modules:
     - models_openai / models_anthropic: Pydantic request/response models
     - acp_client: JSON-RPC 2.0 transport to the kiro CLI subprocess
     - shim_service: Orchestration + tool-call round-trips
-    - cache: Model metadata cache
     - converters_*: Format conversion (OpenAI/Anthropic <-> ACP)
     - parsers: AWS SSE stream parsers
     - streaming_*: Response streaming logic
@@ -37,7 +36,7 @@ __author__ = "ankitcharolia"
 # Main components for convenient import
 # NOTE: KiroAuthManager has been removed — authentication is fully delegated
 #       to the kiro CLI subprocess via kiro/acp_client.py.
-from kiro.cache import ModelInfoCache
+# NOTE: ModelInfoCache has been removed — kiro/cache.py is retired.
 from kiro.http_client import KiroHttpClient
 from kiro.routes_openai import router
 from kiro.model_resolver import ModelResolver, normalize_model_name, get_model_id_for_kiro
@@ -87,8 +86,7 @@ __all__ = [
     # Version
     "__version__",
 
-    # Main classes (KiroAuthManager intentionally absent — auth lives in kiro CLI)
-    "ModelInfoCache",
+    # Main classes (KiroAuthManager and ModelInfoCache intentionally absent)
     "KiroHttpClient",
     "ModelResolver",
     "router",
