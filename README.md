@@ -1,5 +1,6 @@
 # ACP-Compliant Kiro Gateway
 
+[![CI](https://github.com/ankitcharolia/kiro-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/ankitcharolia/kiro-gateway/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-ghcr.io%2Fankitcharolia%2Fkiro--gateway-blue?logo=docker)](https://ghcr.io/ankitcharolia/kiro-gateway)
 [![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
@@ -346,13 +347,16 @@ Capability requests from `kiro` CLI are mediated by `CapabilityExecutor`:
 
 ```bash
 # Install test dependencies
-pip install pytest pytest-asyncio httpx
+pip install -e ".[dev]"
 
-# Run the full ACP-compliance + behaviour suite
-pytest tests/unit/ -v
+# Run the full suite
+pytest tests/ -v
 
 # Run compliance checks only
 pytest tests/unit/test_acp_compliance.py tests/unit/test_compliance.py -v
+
+# Run with coverage
+pytest --cov=kiro --cov-report=term-missing
 ```
 
 The test suite verifies:
