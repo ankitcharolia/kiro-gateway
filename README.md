@@ -1,112 +1,256 @@
-# ACP-compliant Kiro Gateway
+# ACP-Compliant Kiro Gateway
 
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
+[![Docker](https://img.shields.io/badge/Docker-ghcr.io%2Fankitcharolia%2Fkiro--gateway-blue?logo=docker)](https://ghcr.io/ankitcharolia/kiro-gateway)
 [![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
 
-This fork pivots `kiro-gateway` away from direct token/API interception and toward an ACP-based architecture aligned with Kiro's stated allowed usage.
+A **fully ACP-compliant** bridge that lets any OpenAI-compatible or Anthropic-compatible AI harness use your **single** Kiro subscription — by routing every request through the official `kiro` CLI, never through reverse-engineered APIs.
 
-## Allowed usage basis
+---
 
-Kiro states that subscriptions may be used with:
-- Kiro IDE
-- Kiro CLI
-- Kiro Web
+## Compliance model
+
+Kiro permits subscriptions to be used with:
+- Kiro IDE, Kiro CLI, Kiro Web
 - ACP-compatible IDEs
-- software-development automation such as reviews during CI/CD
+- Software-development automation (CI/CD reviews, etc.)
 
-Kiro also states that "OpenClaw and similar tools that leverage third-party harnesses" are prohibited.
+This gateway **only** communicates with Kiro through the official `kiro` CLI binary.
+It never calls private HTTP endpoints, never pools accounts, and never circumvents rate limits.
 
-This fork therefore uses **Kiro CLI as the official execution engine** and exposes:
-- an **ACP agent transport** for ACP-compatible IDEs
-- an optional **OpenAI-compatible shim** for tools that can only speak OpenAI APIs
-- an optional **Anthropic-compatible shim** for tools that can only speak Anthropic APIs
+### Full request path
 
-The intended compliance model is:
-
-```text
-ACP client / OpenAI shim client / Anthropic shim client
-                    ↓
-              kiro-gateway
-                    ↓
-               kiro CLI (official)
-                    ↓
-               Kiro service
+```
+OpenCode / Hermes-agent / Kilo Code / Craft-agent
+           (any OpenAI or Anthropic API client)
+                          │
+         ┌────────────────┴─────────────────┐
+         │                                  │
+routes_openai_shim.py          routes_anthropic_shim.py
+  POST /v1/chat/completions       POST /v1/messages
+  GET  /v1/models                 GET  /v1/models
+         │                                  │
+         └────────────────┬─────────────────┘
+                          │
+              ┌───────────▼──────────┐
+              │    shim_service.py   │
+              │ orchestration + tool │
+              │ call round-trips     │
+              └───────────┬──────────┘
+                          │
+              ┌───────────▼──────────┐
+              │    acp_client.py     │
+              │  JSON-RPC 2.0 over   │
+              │       stdio          │
+              └───────────┬──────────┘
+                          │
+              ┌───────────▼──────────┐
+              │     kiro  CLI        │  ← only official binary
+              │  (official, authed)  │
+              └───────────┬──────────┘
+                          │
+              ┌───────────▼──────────┐
+              │    Kiro Backend      │
+              └──────────────────────┘
 ```
 
-## Important note
+> **Single-account enforcement** — the gateway validates at startup that only one kiro CLI session is active at any time (`kiro.compliance.validate_single_account_compliance`). Attempting to spin up parallel accounts raises a hard `ComplianceError`.
 
-This architecture is designed to route all execution through `kiro` CLI instead of private reverse-engineered APIs. Final compliance depends on Kiro's interpretation of whether protocol translation layers on top of their official ACP/CLI surface are acceptable in your context.
+---
 
 ## Modes
 
-### 1. ACP mode
-Use this when your editor already supports ACP.
+### 1. ACP (preferred)
 
-- The gateway exposes ACP JSON-RPC endpoints over HTTP (`/acp/chat`, `/acp/chat/stream`).
-- The gateway creates sessions and forwards prompts to a local `kiro acp` subprocess.
-- Streaming mirrors ACP progress events 1:1 as typed SSE events (`acp_text`, `acp_tool_call`, `acp_thinking`, `acp_done`, `acp_capability`).
-- This is the preferred mode.
+For editors that speak ACP natively.
 
-### 2. OpenAI shim mode
-Use this for tools that only support OpenAI-style chat completions.
+| Endpoint | Description |
+|---|---|
+| `POST /acp/chat` | Non-streaming ACP conversation |
+| `POST /acp/chat/stream` | SSE streaming ACP conversation |
 
-- `GET /v1/models`
-- `POST /v1/chat/completions` — streaming and non-streaming
+### 2. OpenAI shim
 
-Streaming yields tokens as they arrive from kiro-cli with no buffering. Tool-calling is fully supported: `tool_calls` deltas stream correctly and tool results sent back by the caller are forwarded to kiro-cli as a follow-up prompt.
+For tools that only understand the OpenAI API (Cursor, Cline, Continue, OpenCode, Hermes-agent, etc.).
 
-### 3. Anthropic shim mode
-Use this for tools that only support Anthropic message APIs.
+| Endpoint | Description |
+|---|---|
+| `GET /v1/models` | List available models |
+| `POST /v1/chat/completions` | Streaming and non-streaming completions |
 
-- `GET /v1/models`
-- `POST /v1/messages` — streaming and non-streaming
+### 3. Anthropic shim
 
-Streaming follows the Anthropic SSE event taxonomy exactly (`message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`). Tool use blocks (`tool_use` / `input_json_delta`) are streamed correctly and tool results in the user turn are forwarded to kiro-cli.
+For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-agent, etc.).
 
-## Quick start
+| Endpoint | Description |
+|---|---|
+| `GET /v1/models` | List available models |
+| `POST /v1/messages` | Streaming and non-streaming messages |
 
-### Requirements
-- Python 3.11+
-- `kiro` CLI installed and authenticated (`kiro auth login`)
-- local shell access to run `kiro`
+---
 
-### Start
+## Installation
+
+### Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| **Kiro CLI** | Install from [kiro.dev](https://kiro.dev) and run `kiro auth login` |
+| **Python 3.11+** | Required for the bare-metal path only |
+| **Docker** | Required for the container path only |
+
+---
+
+### Option A — Clone and run (bare metal)
 
 ```bash
+# 1. Clone the repository
+git clone https://github.com/ankitcharolia/kiro-gateway.git
+cd kiro-gateway
+
+# 2. Create a Python virtual environment
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Configure environment
 cp .env.example .env
-# edit .env — set PROXY_API_KEY at minimum
+# Open .env and set at minimum:
+#   PROXY_API_KEY=<your-chosen-secret-key>
+#   KIRO_CLI_COMMAND=kiro             # full path if not on $PATH
+
+# 5. Authenticate with Kiro (once)
+kiro auth login
+
+# 6. Start the gateway
 python main.py
+# Gateway is now listening on http://localhost:8000
 ```
 
-### Key env vars
+---
+
+### Option B — Docker (published image)
+
+Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to the GitHub Container Registry on every release.
+
+```bash
+# Pull the latest release
+docker pull ghcr.io/ankitcharolia/kiro-gateway:latest
+
+# Run — mount your kiro credentials so the container can call the CLI
+docker run -d \
+  --name kiro-gateway \
+  -p 8000:8000 \
+  -e PROXY_API_KEY=change-me \
+  -e KIRO_CLI_COMMAND=/usr/local/bin/kiro \
+  -v "${HOME}/.kiro:/root/.kiro:ro" \
+  ghcr.io/ankitcharolia/kiro-gateway:latest
+```
+
+> **Credential mount** — Kiro stores its session tokens in `~/.kiro`. Mounting this directory read-only into the container lets the bundled `kiro` CLI authenticate without re-running `kiro auth login` inside the container.
+
+#### Pinning a specific version
+
+```bash
+docker pull ghcr.io/ankitcharolia/kiro-gateway:v2.1.0
+```
+
+---
+
+### Option C — Docker Compose
+
+```bash
+git clone https://github.com/ankitcharolia/kiro-gateway.git
+cd kiro-gateway
+cp .env.example .env
+# edit .env: set PROXY_API_KEY
+
+docker compose up -d
+```
+
+The included `docker-compose.yml` mounts `~/.kiro` automatically.
+
+---
+
+### Option D — Build the Docker image locally
+
+```bash
+git clone https://github.com/ankitcharolia/kiro-gateway.git
+cd kiro-gateway
+
+docker build -t kiro-gateway:local .
+
+docker run -d \
+  --name kiro-gateway \
+  -p 8000:8000 \
+  -e PROXY_API_KEY=change-me \
+  -v "${HOME}/.kiro:/root/.kiro:ro" \
+  kiro-gateway:local
+```
+
+---
+
+## Configuration
+
+All settings are read from environment variables (or a `.env` file).
 
 ```env
-PROXY_API_KEY=change-me
-KIRO_CLI_COMMAND=kiro
+# ── Required ──────────────────────────────────────────────────────────
+PROXY_API_KEY=change-me          # Secret key clients must send as Bearer / x-api-key
+
+# ── CLI path ──────────────────────────────────────────────────────────
+KIRO_CLI_COMMAND=kiro            # Override if kiro is not on $PATH
+
+# ── Feature flags ─────────────────────────────────────────────────────
 ACP_ENABLED=true
 OPENAI_SHIM_ENABLED=true
 ANTHROPIC_SHIM_ENABLED=true
+
+# ── Server ────────────────────────────────────────────────────────────
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
+
+# ── Compliance ────────────────────────────────────────────────────────
+COMPLIANCE_MODE=true             # Enforces single-account; set false only for development
 ```
 
-## Supported clients
+---
+
+## Client setup
+
+### OpenAI-compatible clients
+
+_(Cursor, Cline, Continue, OpenCode, Hermes-agent, …)_
+
+| Setting | Value |
+|---|---|
+| Base URL | `http://localhost:8000/v1` |
+| API Key | value of `PROXY_API_KEY` |
+| Model | `claude-sonnet-4-5` (or any Kiro-supported model) |
+
+### Anthropic-compatible clients
+
+_(Claude Code, Kilo Code, Craft-agent, …)_
+
+| Setting | Value |
+|---|---|
+| Base URL | `http://localhost:8000` |
+| API Key header | `x-api-key: <PROXY_API_KEY>` |
+| Model | `claude-sonnet-4-5` |
 
 ### Native ACP clients
-Any editor/application that supports ACP over HTTP can connect directly.
 
-### OpenAI-compatible clients (Cursor, Cline, Continue, etc.)
-Set:
-- Base URL: `http://localhost:8000/v1`
-- API key: value of `PROXY_API_KEY`
+Point your ACP client at:
+```
+http://localhost:8000/acp/chat         # non-streaming
+http://localhost:8000/acp/chat/stream  # SSE streaming
+```
 
-### Anthropic-compatible clients (Claude Code, Kilo Code, etc.)
-Set:
-- Base URL: `http://localhost:8000`
-- Header: `x-api-key: <PROXY_API_KEY>`
+---
 
-## Streaming
-
-All three modes stream tokens in real time. Events are forwarded from kiro-cli as they arrive — there is no response buffering.
+## Streaming event map
 
 | ACP event | OpenAI SSE | Anthropic SSE |
 |---|---|---|
@@ -116,79 +260,119 @@ All three modes stream tokens in real time. Events are forwarded from kiro-cli a
 | `done` | `[DONE]` + `finish_reason` | `message_delta` + `message_stop` |
 | `error` | error chunk + `[DONE]` | `error` event |
 
-## Tool calling
+---
 
-Both shims support the full tool-call round-trip:
+## Tool-call round-trips
 
-1. kiro-cli emits a `tool_call` ACP event during streaming.
-2. The shim translates it to the caller's format (OpenAI `function_call` / Anthropic `tool_use` block) and streams it.
-3. The caller executes the tool and sends back results (`role: "tool"` message in OpenAI / `tool_result` content block in Anthropic).
-4. The gateway injects the results into a follow-up `session/prompt` so kiro-cli sees them and continues the completion.
+Both shims support the full tool-call cycle:
+
+1. `kiro` CLI emits a `tool_call` ACP event during streaming.
+2. The shim translates it to the caller's format (`function_call` / `tool_use`) and streams it.
+3. The caller executes the tool and sends back results.
+4. The gateway injects results into a follow-up `session/prompt` so `kiro` CLI continues.
 
 Parallel tool calls are supported in the OpenAI shim via index-tracked `tool_calls` delta chunks.
 
-## Filesystem and terminal capability mediation
+---
 
-kiro-cli may request filesystem or terminal access during a session. The gateway handles these transparently via `CapabilityExecutor`:
+## Filesystem & terminal sandboxing
 
-| Capability request | What happens |
+Capability requests from `kiro` CLI are mediated by `CapabilityExecutor`:
+
+| Capability | Behaviour |
 |---|---|
-| `capability/readFile` | Reads file if path is within a configured `filesystem_roots` entry with `read: true`. Max 10 MB. |
-| `capability/writeFile` | Writes file if path is within a root with `write: true`. Creates parent directories. |
-| `capability/listDirectory` | Lists directory entries (name, type, size, URI). |
-| `capability/runCommand` | Runs command if it is in the `terminal.allowed_commands` whitelist. Enforces timeout. |
-
-For **non-ACP callers** (OpenAI/Anthropic shims), capability requests are handled automatically by the built-in executor. Capability handling runs concurrently with the token stream — it never blocks or interrupts tokens reaching the client.
-
-For **native ACP callers** (`/acp/chat/stream`), capability requests are forwarded as `acp_capability` SSE events so the rich client can handle them directly.
-
-### Configuring filesystem roots and terminal
-
-Pass these in the request body as gateway extensions (standard clients ignore unknown fields):
+| `capability/readFile` | Allowed only within configured `filesystem_roots` with `read: true`. Max 10 MB. |
+| `capability/writeFile` | Allowed only within roots with `write: true`. Creates parent dirs. |
+| `capability/listDirectory` | Lists entries (name, type, size, URI) within allowed roots. |
+| `capability/runCommand` | Executes only commands in `terminal.allowed_commands`. Enforces timeout. |
 
 ```json
 {
   "model": "claude-sonnet-4-5",
-  "messages": [...],
+  "messages": [{ "role": "user", "content": "Review my code" }],
   "filesystem_roots": [
-    { "uri": "file:///home/user/project", "name": "project", "read": true, "write": true }
+    { "uri": "file:///home/user/project", "name": "project", "read": true, "write": false }
   ],
   "terminal": {
-    "allowed_commands": ["git", "npm", "python"],
+    "allowed_commands": ["git", "npm"],
     "working_directory": "/home/user/project",
     "timeout_seconds": 30
   }
 }
 ```
 
-## Architecture
+---
 
-### Core components
+## Architecture reference
 
-| Component | Purpose |
-|---|---|
-| `kiro/acp_client.py` | Runs `kiro` CLI in ACP mode; exchanges JSON-RPC 2.0 over stdio; routes progress events and capability requests to per-session queues |
-| `kiro/acp_models.py` | Pydantic models for all ACP request/response/notification types |
-| `kiro/capability_executor.py` | Handles `readFile`, `writeFile`, `listDirectory`, `runCommand` for non-ACP callers with path/command sandboxing |
-| `kiro/shim_service.py` | Shared orchestration: streaming, tool-call round-trips, capability mediation, session lifecycle |
-| `kiro/routes_acp.py` | Native ACP-over-HTTP endpoints (`/acp/chat`, `/acp/chat/stream`) |
-| `kiro/routes_openai_shim.py` | OpenAI-to-ACP translation (`/v1/chat/completions`, `/v1/models`) |
-| `kiro/routes_anthropic_shim.py` | Anthropic-to-ACP translation (`/v1/messages`, `/v1/models`) |
+| Component | File | Purpose |
+|---|---|---|
+| ACP bridge | `kiro/acp_client.py` | Spawns `kiro` CLI; exchanges JSON-RPC 2.0 over stdio; routes events to per-session queues |
+| ACP models | `kiro/acp_models.py` | Pydantic models for all ACP types |
+| Capability sandbox | `kiro/capability_executor.py` | readFile / writeFile / listDirectory / runCommand with path + command sandboxing |
+| Orchestration | `kiro/shim_service.py` | Streaming, tool-call round-trips, capability mediation, session lifecycle |
+| ACP routes | `kiro/routes_acp.py` | `/acp/chat`, `/acp/chat/stream` |
+| OpenAI shim | `kiro/routes_openai_shim.py` | `/v1/chat/completions`, `/v1/models` |
+| Anthropic shim | `kiro/routes_anthropic_shim.py` | `/v1/messages`, `/v1/models` |
+| Compliance guard | `kiro/compliance.py` | Single-account enforcement at startup |
 
-## Recommended usage
+---
 
-- Prefer **ACP-native IDEs** whenever possible — they get the full event stream without translation overhead.
-- Use the OpenAI/Anthropic shims for clients that cannot yet speak ACP natively.
-- Keep all authentication in the official `kiro` CLI — the gateway never touches credentials.
-- Scope `filesystem_roots` to the minimum required directories and keep `write: false` unless the agent genuinely needs to write files.
+## Running tests
+
+```bash
+# Install test dependencies
+pip install pytest pytest-asyncio httpx
+
+# Run the full ACP-compliance + behaviour suite
+pytest tests/unit/ -v
+
+# Run compliance checks only
+pytest tests/unit/test_acp_compliance.py tests/unit/test_compliance.py -v
+```
+
+The test suite verifies:
+- All removed direct-API modules raise `ImportError`
+- `main.py` mounts only ACP-backed routers
+- `acp_client.py` uses subprocess stdio, not HTTP
+- No private Kiro API URLs appear in source files
+- Single-account `ComplianceError` is raised for 2+ sessions
+- OpenAI + Anthropic shim endpoints return spec-compliant responses
+- `CapabilityExecutor` sandbox enforces path + command boundaries
+
+---
+
+## Docker image release process
+
+Images are built and pushed automatically by GitHub Actions on every `v*` tag.
+
+```bash
+# Create and push a release tag
+git tag v2.1.0
+git push origin v2.1.0
+# → CI builds linux/amd64 + linux/arm64 and pushes:
+#     ghcr.io/ankitcharolia/kiro-gateway:v2.1.0
+#     ghcr.io/ankitcharolia/kiro-gateway:latest
+```
+
+---
+
+## Recommended practices
+
+- Prefer **ACP-native IDEs** whenever available — zero translation overhead.
+- Keep `filesystem_roots` scoped to the project directory and `write: false` unless the agent needs to create files.
 - Keep `terminal.allowed_commands` as narrow as possible.
+- Never share `PROXY_API_KEY` — treat it like any API secret.
+- All Kiro authentication lives in the `kiro` CLI. The gateway never touches credentials.
+
+---
 
 ## Support
 
-If this project is useful to you, consider supporting its development:
+If this project is useful, consider supporting it:
 
 [![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
 
 ## License
 
-AGPL-3.0, preserving upstream license requirements.
+AGPL-3.0 — preserving upstream license requirements.
