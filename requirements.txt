@@ -4,9 +4,12 @@ uvicorn[standard]
 httpx
 loguru
 python-dotenv
+pydantic-settings
 tiktoken
 
 # Testing dependencies
 pytest
 pytest-asyncio
+pytest-cov
+anyio
 hypothesis
