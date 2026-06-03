@@ -53,7 +53,7 @@ Made with ❤️ by [@Jwadow](https://github.com/jwadow)
 |---------|-------------|
 | 🔌 **OpenAI-compatible API** | Works with any OpenAI-compatible tool |
 | 🔌 **Anthropic-compatible API** | Native `/v1/messages` endpoint |
-| 🔀 **Multi-Account Support** | Intelligent failover between multiple accounts |
+| 🔒 **Compliance Mode** | Single-account enforced; rate limits surfaced to caller |
 | 🌐 **VPN/Proxy Support** | HTTP/SOCKS5 proxy for restricted networks |
 | 🧠 **Extended Thinking** | Reasoning is exclusive to our project |
 | 👁️ **Vision Support** | Send images to model |
@@ -109,7 +109,7 @@ The server will be available at `http://localhost:8000`
 
 ## ⚙️ Configuration
 
-> 💡 **Advanced users:** Looking for multi-account support? See [Account System](#-account-system-advanced) below.
+> 💡 **Single-account only:** This fork enforces single-account personal use. See [Compliance](#-compliance) and [COMPLIANCE.md](COMPLIANCE.md).
 
 ### Option 1: JSON Credentials File (Kiro IDE / Enterprise)
 
@@ -264,82 +264,31 @@ If you need to manually extract the refresh token (e.g., for debugging), you can
 
 ---
 
-## 🔀 Account System (Advanced)
+## 🔑 Credential Configuration (credentials.json)
 
-Account System is a way to manage multiple Kiro accounts with automatic failover. In the future, this system will replace `.env` file for credential configuration, but currently it's optional and intended for those who want to use multiple accounts.
+> ⚠️ **Single-account only.** `ACCOUNT_SYSTEM=true` (multi-account mode) is **disabled** in this fork to comply with AWS/Kiro terms of service. Only one credential entry is permitted. See [COMPLIANCE.md](COMPLIANCE.md).
 
-### Why You Need This
+The gateway supports an optional `credentials.json` file as a structured alternative to `.env` for credential configuration. **Only one entry is allowed.**
 
-If you have multiple Kiro accounts, the gateway can automatically switch between them when account is temporarily unavailable.
+### Supported Entry Types
 
-The system works with a single account too — just without switching.
-
-### How to Enable
-
-Add to your `.env`:
-
-```env
-ACCOUNT_SYSTEM=true
-```
-
-**What happens:**
-- On first startup, your credentials from `.env` are automatically migrated to `credentials.json` (one-time)
-- After that, all account and region settings from `.env` are ignored
-- Account management only through `credentials.json`
-
-<details>
-<summary>📄 Configuration Examples</summary>
-
-**Single account:**
 ```json
 [
   {
     "type": "json",
-    "path": "~/.aws/sso/cache/kiro-auth-token.json"
+    "path": "~/.aws/sso/cache/kiro-auth-token.json",
+    "comment": "Kiro IDE credentials (recommended)"
   }
 ]
 ```
 
-**Multiple accounts:**
-```json
-[
-  {
-    "type": "json",
-    "path": "~/.aws/sso/cache/kiro-auth-token.json"
-  },
-  {
-    "type": "sqlite",
-    "path": "~/.local/share/kiro-cli/data.sqlite3"
-  },
-  {
-    "type": "refresh_token",
-    "refresh_token": "eyJhbGc...",
-    "profile_arn": "arn:aws:codewhisperer:us-east-1:..."
-  }
-]
-```
+Other valid `type` values: `"sqlite"` (kiro-cli DB), `"refresh_token"` (direct token).
 
-**Folder with files:**
-```json
-[
-  {
-    "type": "json",
-    "path": "C:\\MyAccs\\kiro67"
-  }
-]
-```
+For optional per-account region overrides (`profile_arn`, `region`, `api_region`), see [`credentials.json.example`](credentials.json.example).
 
-The gateway will scan all files in the folder and add them as separate accounts.
+### Rate Limits
 
-</details>
-
-### How Failover Works
-
-When one account returns an error (429 rate limit, 402 quota exceeded), the gateway automatically tries the next account from the list. If an account fails several times in a row, the gateway temporarily stops using it and periodically checks if it has recovered.
-
-For a single account, failover doesn't work — you get the original error from Kiro API.
-
-For complete configuration examples (including per-account region settings), see [`credentials.json.example`](credentials.json.example).
+Rate-limit errors (`429`, `402`, `403`) from Kiro are **returned directly to the caller** — they are not retried on another account, as that would circumvent quota enforcement.
 
 ---
 
@@ -359,515 +308,272 @@ cp .env.example .env
 # 2. Run with docker-compose
 docker-compose up -d
 
-# 3. Check status
+# 3. View logs
 docker-compose logs -f
-curl http://localhost:8000/health
+
+# 4. Stop
+docker-compose down
 ```
 
-### Docker Run (Without Compose)
-
-<details>
-<summary>🔹 Using Environment Variables</summary>
+### Manual Docker Build
 
 ```bash
-docker run -d \
-  -p 8000:8000 \
-  -e PROXY_API_KEY="my-super-secret-password-123" \
-  -e REFRESH_TOKEN="your_refresh_token" \
-  --name kiro-gateway \
-  ghcr.io/jwadow/kiro-gateway:latest
-```
-
-</details>
-
-<details>
-<summary>🔹 Using Credentials File</summary>
-
-**Linux/macOS:**
-```bash
-docker run -d \
-  -p 8000:8000 \
-  -v ~/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro \
-  -e KIRO_CREDS_FILE=/home/kiro/.aws/sso/cache/kiro-auth-token.json \
-  -e PROXY_API_KEY="my-super-secret-password-123" \
-  --name kiro-gateway \
-  ghcr.io/jwadow/kiro-gateway:latest
-```
-
-**Windows (PowerShell):**
-```powershell
-docker run -d `
-  -p 8000:8000 `
-  -v ${HOME}/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro `
-  -e KIRO_CREDS_FILE=/home/kiro/.aws/sso/cache/kiro-auth-token.json `
-  -e PROXY_API_KEY="my-super-secret-password-123" `
-  --name kiro-gateway `
-  ghcr.io/jwadow/kiro-gateway:latest
-```
-
-</details>
-
-<details>
-<summary>🔹 Using .env File</summary>
-
-```bash
-docker run -d -p 8000:8000 --env-file .env --name kiro-gateway ghcr.io/jwadow/kiro-gateway:latest
-```
-
-</details>
-
-### Docker Compose Configuration
-
-Edit `docker-compose.yml` and uncomment volume mounts for your OS:
-
-```yaml
-volumes:
-  # Kiro IDE credentials (choose your OS)
-  - ~/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro              # Linux/macOS
-  # - ${USERPROFILE}/.aws/sso/cache:/home/kiro/.aws/sso/cache:ro  # Windows
-  
-  # kiro-cli database (choose your OS)
-  - ~/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli  # Linux/macOS
-  # - ${USERPROFILE}/.local/share/kiro-cli:/home/kiro/.local/share/kiro-cli  # Windows
-  
-  # Debug logs (optional)
-  - ./debug_logs:/app/debug_logs
-```
-
-### Management Commands
-
-```bash
-docker-compose logs -f      # View logs
-docker-compose restart      # Restart
-docker-compose down         # Stop
-docker-compose pull && docker-compose up -d  # Update
-```
-
-<details>
-<summary>🔧 Building from Source</summary>
-
-```bash
+# Build image
 docker build -t kiro-gateway .
-docker run -d -p 8000:8000 --env-file .env kiro-gateway
+
+# Run container
+docker run -d \
+  --name kiro-gateway \
+  -p 8000:8000 \
+  -v $(pwd)/.env:/app/.env \
+  kiro-gateway
 ```
 
-</details>
+### Configuration for Docker
+
+You have two options for Docker credentials:
+
+**Option 1: Mount credentials directory (recommended)**
+```yaml
+# In docker-compose.yml:
+volumes:
+  - ~/.aws/sso/cache:/root/.aws/sso/cache:ro
+```
+
+**Option 2: Environment variables**
+```yaml
+# In docker-compose.yml:
+environment:
+  - REFRESH_TOKEN=${REFRESH_TOKEN}
+  - PROXY_API_KEY=${PROXY_API_KEY}
+```
 
 ---
 
-## 🌐 VPN/Proxy Support
+## 🔌 Client Setup
 
-**For users in China, corporate networks, or regions with connectivity issues to AWS services.**
-
-The gateway supports routing all Kiro API requests through a VPN or proxy server. This is essential if you experience connection problems to AWS endpoints or need to use a corporate proxy.
-
-### Configuration
-
-Add to your `.env` file:
-
-```env
-# HTTP proxy
-VPN_PROXY_URL=http://127.0.0.1:7890
-
-# SOCKS5 proxy
-VPN_PROXY_URL=socks5://127.0.0.1:1080
-
-# With authentication (corporate proxies)
-VPN_PROXY_URL=http://username:password@proxy.company.com:8080
-
-# Without protocol (defaults to http://)
-VPN_PROXY_URL=192.168.1.100:8080
-```
-
-### Supported Protocols
-
-- ✅ **HTTP** — Standard proxy protocol
-- ✅ **HTTPS** — Secure proxy connections
-- ✅ **SOCKS5** — Advanced proxy protocol (common in VPN software)
-- ✅ **Authentication** — Username/password embedded in URL
-
-### When You Need This
-
-| Situation | Solution |
-|-----------|----------|
-| Connection timeouts to AWS | Use VPN/proxy to route traffic |
-| Corporate network restrictions | Configure your company's proxy |
-| Regional connectivity issues | Use a VPN service with proxy support |
-| Privacy requirements | Route through your own proxy server |
-
-### Popular VPN Software with Proxy Support
-
-Most VPN clients provide a local proxy server you can use:
-- **Sing-box** — Modern VPN client with HTTP/SOCKS5 proxy
-- **Clash** — Usually runs on `http://127.0.0.1:7890`
-- **V2Ray** — Configurable SOCKS5/HTTP proxy
-- **Shadowsocks** — SOCKS5 proxy support
-- **Corporate VPN** — Check your IT department for proxy settings
-
-Leave `VPN_PROXY_URL` empty (default) if you don't need proxy support.
-
----
-
-## 📡 API Reference
-
-### Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Health check |
-| `/health` | GET | Detailed health check |
-| `/v1/models` | GET | List available models |
-| `/v1/chat/completions` | POST | OpenAI Chat Completions API |
-| `/v1/messages` | POST | Anthropic Messages API |
-
----
-
-## 💡 Usage Examples
-
-### OpenAI API
-
-<details>
-<summary>🔹 Simple cURL Request</summary>
+### Claude Code
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer my-super-secret-password-123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4-5",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": true
-  }'
+claude config set -g apiUrl http://localhost:8000
+claude config set -g apiKey your-proxy-api-key
 ```
 
-> **Note:** Replace `my-super-secret-password-123` with the `PROXY_API_KEY` you set in your `.env` file.
+### Cursor IDE
 
-</details>
+Settings → Models → Add model → Set base URL to `http://localhost:8000/v1`
 
-<details>
-<summary>🔹 Streaming Request</summary>
+### Cline / Roo Code
 
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer my-super-secret-password-123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4-5",
-    "messages": [
-      {"role": "system", "content": "You are a helpful assistant."},
-      {"role": "user", "content": "What is 2+2?"}
-    ],
-    "stream": true
-  }'
+Provider: OpenAI Compatible  
+Base URL: `http://localhost:8000/v1`  
+API Key: your PROXY_API_KEY value
+
+### Continue (VSCode extension)
+
+```json
+{
+  "models": [
+    {
+      "title": "Claude Sonnet 4.5",
+      "provider": "openai",
+      "model": "claude-sonnet-4-5",
+      "apiBase": "http://localhost:8000/v1",
+      "apiKey": "your-proxy-api-key"
+    }
+  ]
+}
 ```
 
-</details>
-
-<details>
-<summary>🛠️ With Tool Calling</summary>
-
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer my-super-secret-password-123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4-5",
-    "messages": [{"role": "user", "content": "What is the weather in London?"}],
-    "tools": [{
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "description": "Get weather for a location",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "location": {"type": "string", "description": "City name"}
-          },
-          "required": ["location"]
-        }
-      }
-    }]
-  }'
-```
-
-</details>
-
-<details>
-<summary>🐍 Python OpenAI SDK</summary>
+### Python (OpenAI SDK)
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8000/v1",
-    api_key="my-super-secret-password-123"  # Your PROXY_API_KEY from .env
+    api_key="your-proxy-api-key"
 )
 
 response = client.chat.completions.create(
     model="claude-sonnet-4-5",
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Hello!"}
-    ],
-    stream=True
+    messages=[{"role": "user", "content": "Hello!"}]
 )
-
-for chunk in response:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="")
+print(response.choices[0].message.content)
 ```
 
-</details>
-
-<details>
-<summary>🦜 LangChain</summary>
-
-```python
-from langchain_openai import ChatOpenAI
-
-llm = ChatOpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="my-super-secret-password-123",  # Your PROXY_API_KEY from .env
-    model="claude-sonnet-4-5"
-)
-
-response = llm.invoke("Hello, how are you?")
-print(response.content)
-```
-
-</details>
-
-### Anthropic API
-
-<details>
-<summary>🔹 Simple cURL Request</summary>
-
-```bash
-curl http://localhost:8000/v1/messages \
-  -H "x-api-key: my-super-secret-password-123" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4-5",
-    "max_tokens": 1024,
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
-
-> **Note:** Anthropic API uses `x-api-key` header instead of `Authorization: Bearer`. Both are supported.
-
-</details>
-
-<details>
-<summary>🔹 With System Prompt</summary>
-
-```bash
-curl http://localhost:8000/v1/messages \
-  -H "x-api-key: my-super-secret-password-123" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4-5",
-    "max_tokens": 1024,
-    "system": "You are a helpful assistant.",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
-
-> **Note:** In Anthropic API, `system` is a separate field, not a message.
-
-</details>
-
-<details>
-<summary>📡 Streaming</summary>
-
-```bash
-curl http://localhost:8000/v1/messages \
-  -H "x-api-key: my-super-secret-password-123" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4-5",
-    "max_tokens": 1024,
-    "stream": true,
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
-
-</details>
-
-<details>
-<summary>🐍 Python Anthropic SDK</summary>
+### Python (Anthropic SDK)
 
 ```python
 import anthropic
 
 client = anthropic.Anthropic(
-    api_key="my-super-secret-password-123",  # Your PROXY_API_KEY from .env
-    base_url="http://localhost:8000"
+    base_url="http://localhost:8000",
+    api_key="your-proxy-api-key"
 )
 
-# Non-streaming
-response = client.messages.create(
+message = client.messages.create(
     model="claude-sonnet-4-5",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
-print(response.content[0].text)
-
-# Streaming
-with client.messages.stream(
-    model="claude-sonnet-4-5",
-    max_tokens=1024,
-    messages=[{"role": "user", "content": "Hello!"}]
-) as stream:
-    for text in stream.text_stream:
-        print(text, end="", flush=True)
+print(message.content[0].text)
 ```
+
+---
+
+## 📖 API Reference
+
+### OpenAI-Compatible Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/chat/completions` | POST | Chat completions |
+| `/v1/models` | GET | List available models |
+| `/v1/models/{model}` | GET | Get model details |
+
+### Anthropic-Compatible Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/messages` | POST | Messages API |
+| `/v1/models` | GET | List available models |
+
+### Health Check
+
+```bash
+curl http://localhost:8000/health
+```
+
+### Authentication
+
+All requests require the `PROXY_API_KEY` as a Bearer token:
+
+```bash
+curl -H "Authorization: Bearer your-proxy-api-key" http://localhost:8000/v1/models
+```
+
+---
+
+## 🧠 Extended Thinking
+
+Extended thinking (reasoning) is supported for models that have this capability. Enable it by setting the `thinking` parameter:
+
+```python
+response = client.chat.completions.create(
+    model="claude-sonnet-4-5",
+    messages=[{"role": "user", "content": "Solve this step by step: ..."}],
+    extra_body={"thinking": {"type": "enabled", "budget_tokens": 10000}}
+)
+```
+
+---
+
+## 🔍 Web Search
+
+Web search is supported when the model has this capability:
+
+```python
+response = client.chat.completions.create(
+    model="claude-sonnet-4-5",
+    messages=[{"role": "user", "content": "What's the latest news about AI?"}],
+    extra_body={"tools": [{"type": "web_search"}]}
+)
+```
+
+---
+
+## 📊 Supported Models
+
+The gateway exposes all models available in your Kiro account. Use `/v1/models` to get the current list:
+
+```bash
+curl -H "Authorization: Bearer your-proxy-api-key" http://localhost:8000/v1/models
+```
+
+Model names are normalized automatically — use any format:
+- `claude-sonnet-4-5`
+- `claude-sonnet-4.5`  
+- `claude-sonnet-4-5-20250929`
+- `anthropic.claude-sonnet-4-5-v1`
+
+All resolve to the same model.
+
+---
+
+## 🛡️ Compliance
+
+This fork enforces **single-account personal use** to operate within the spirit of the [AWS Acceptable Use Policy](https://aws.amazon.com/aup/) and Kiro's terms of service.
+
+| Rule | Status |
+|------|--------|
+| `ACCOUNT_SYSTEM=true` blocked | ✅ Enforced at startup |
+| `credentials.json` >1 entry blocked | ✅ Enforced at startup |
+| 429/402/403 surfaced to caller | ✅ No cross-account retry |
+| Single-subscription requirement | ✅ Documented |
+
+See [COMPLIANCE.md](COMPLIANCE.md) for the full policy.
+
+---
+
+## 🔧 Advanced Configuration
+
+### Environment Variables Reference
+
+<details>
+<summary>📋 Full .env reference</summary>
+
+See [`.env.example`](.env.example) for all available options with descriptions.
+
+Key variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PROXY_API_KEY` | (required) | Password for your gateway |
+| `KIRO_CREDS_FILE` | - | Path to Kiro JSON credentials |
+| `REFRESH_TOKEN` | - | Direct refresh token |
+| `KIRO_CLI_DB_FILE` | - | Path to kiro-cli SQLite DB |
+| `SERVER_HOST` | `0.0.0.0` | Server bind address |
+| `SERVER_PORT` | `8000` | Server port |
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `VPN_PROXY_URL` | - | HTTP/SOCKS5 proxy URL |
+| `STREAMING_READ_TIMEOUT` | `300` | Streaming timeout (seconds) |
 
 </details>
 
----
+### VPN / Proxy
 
-## 🔧 Debugging
-
-Debug logging is **disabled by default**. To enable, add to your `.env`:
+For restricted networks, set `VPN_PROXY_URL` in your `.env`:
 
 ```env
-# Debug logging mode:
-# - off: disabled (default)
-# - errors: save logs only for failed requests (4xx, 5xx) - recommended for troubleshooting
-# - all: save logs for every request (overwrites on each request)
-DEBUG_MODE=errors
+VPN_PROXY_URL="socks5://user:pass@proxy.example.com:1080"
+# or
+VPN_PROXY_URL="http://proxy.example.com:8080"
 ```
-
-### Debug Modes
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `off` | Disabled (default) | Production |
-| `errors` | Save logs only for failed requests (4xx, 5xx) | **Recommended for troubleshooting** |
-| `all` | Save logs for every request | Development/debugging |
-
-### Debug Files
-
-When enabled, requests are logged to the `debug_logs/` folder:
-
-| File | Description |
-|------|-------------|
-| `request_body.json` | Incoming request from client (OpenAI format) |
-| `kiro_request_body.json` | Request sent to Kiro API |
-| `response_stream_raw.txt` | Raw stream from Kiro |
-| `response_stream_modified.txt` | Transformed stream (OpenAI format) |
-| `app_logs.txt` | Application logs for the request |
-| `error_info.json` | Error details (only on errors) |
-
----
-
-## 🔧 Troubleshooting
-
-### Connection Issues
-
-**Error: "Name or service not known" or DNS resolution failed**
-
-The Q API endpoint may not be publicly resolvable in your region. Use a VPN or proxy:
-
-```env
-VPN_PROXY_URL=http://127.0.0.1:7890
-```
-
-See [VPN/Proxy Support](#-vpnproxy-support) for details.
-
----
-
-**Error: "503 Service Unavailable" through proxy**
-
-The Q API endpoint exists in specific regions only. Try a different region:
-
-```env
-KIRO_API_REGION="eu-central-1"  # or us-east-1
-```
-
-Commonly reachable regions: `us-east-1`, `eu-central-1`
-
----
-
-**OIDC works but Q API fails**
-
-Your SSO region may differ from the Q API region. The gateway auto-detects this from credentials, but you can override:
-
-```env
-KIRO_API_REGION="eu-central-1"
-```
-
----
-
-## 📜 License
-
-This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
-
-This means:
-- ✅ You can use, modify, and distribute this software
-- ✅ You can use it for commercial purposes
-- ⚠️ **You must disclose source code** when you distribute the software
-- ⚠️ **Network use is distribution** — if you run a modified version on a server and let others interact with it, you must make the source code available to them
-- ⚠️ Modifications must be released under the same license
-
-See the [LICENSE](LICENSE) file for the full license text.
-
-### Why AGPL-3.0?
-
-AGPL-3.0 ensures that improvements to this software benefit the entire community. If you modify this gateway and deploy it as a service, you must share your improvements with your users.
-
-### Contributor License Agreement (CLA)
-
-By submitting a contribution to this project, you agree to the terms of our [Contributor License Agreement (CLA)](CLA.md). This ensures that:
-- You have the right to submit the contribution
-- You grant the maintainer rights to use and relicense your contribution
-- The project remains legally protected
 
 ---
 
 ## 💖 Support the Project
 
-<div align="center">
+If this project helps you, consider supporting the original author:
 
-<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Smilies/Smiling%20Face%20with%20Hearts.png" alt="Love" width="80" />
+- ⭐ **Star the repo** — helps others discover it
+- 💖 **Sponsor @Jwadow** — [GitHub Sponsors](https://github.com/sponsors/jwadow)
 
-**If this project saved you time or money, consider supporting it!**
+---
 
-Every contribution helps keep this project alive and growing
+## 🤝 Contributing
 
-<br>
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a PR.
 
-### 🤑 Donate
+---
 
-[**☕ One-time Support**](https://paypal.me/ankitcharolia)
+## 📄 License
 
-<br>
-
-### 🪙 Or send crypto
-
-| Currency | Network | Address |
-|:--------:|:-------:|:--------|
-| **USDT** | TRC20 | `TSVtgRc9pkC1UgcbVeijBHjFmpkYHDRu26` |
-| **BTC** | Bitcoin | `12GZqxqpcBsqJ4Vf1YreLqwoMGvzBPgJq6` |
-| **ETH** | Ethereum | `0xc86eab3bba3bbaf4eb5b5fff8586f1460f1fd395` |
-| **SOL** | Solana | `9amykF7KibZmdaw66a1oqYJyi75fRqgdsqnG66AK3jvh` |
-| **TON** | TON | `UQBVh8T1H3GI7gd7b-_PPNnxHYYxptrcCVf3qQk5v41h3QTM` |
-
-</div>
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
 
 ---
 
 ## ⚠️ Disclaimer
 
 This project is not affiliated with, endorsed by, or sponsored by Amazon Web Services (AWS), Anthropic, or Kiro IDE. Use at your own risk and in compliance with the terms of service of the underlying APIs.
-
----
-
-<div align="center">
-
-**[⬆ Back to Top](#-kiro-gateway)**
-
-</div>
