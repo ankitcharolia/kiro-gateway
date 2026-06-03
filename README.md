@@ -21,37 +21,37 @@ It never calls private HTTP endpoints, never pools accounts, and never circumven
 ### Full request path
 
 ```
-OpenCode / Hermes-agent / Kilo Code / Craft-agent
-           (any OpenAI or Anthropic API client)
-                          │
-         ┌────────────────┴─────────────────┐
-         │                                  │
-routes_openai_shim.py          routes_anthropic_shim.py
-  POST /v1/chat/completions       POST /v1/messages
-  GET  /v1/models                 GET  /v1/models
-         │                                  │
-         └────────────────┬─────────────────┘
-                          │
-              ┌───────────▼──────────┐
-              │    shim_service.py   │
-              │ orchestration + tool │
-              │ call round-trips     │
-              └───────────┬──────────┘
-                          │
-              ┌───────────▼──────────┐
-              │    acp_client.py     │
-              │  JSON-RPC 2.0 over   │
-              │       stdio          │
-              └───────────┬──────────┘
-                          │
-              ┌───────────▼──────────┐
-              │     kiro  CLI        │  ← only official binary
-              │  (official, authed)  │
-              └───────────┬──────────┘
-                          │
-              ┌───────────▼──────────┐
-              │    Kiro Backend      │
-              └──────────────────────┘
+OpenCode / Hermes-agent / Kilo Code / Craft-agent / OpenClaw
+              (any OpenAI or Anthropic API client)
+                             │
+            ┌────────────────┴─────────────────┐
+            │                                  │
+   routes_openai_shim.py          routes_anthropic_shim.py
+     POST /v1/chat/completions       POST /v1/messages
+     GET  /v1/models                 GET  /v1/models
+            │                                  │
+            └────────────────┬─────────────────┘
+                             │
+                 ┌───────────▼──────────┐
+                 │    shim_service.py   │
+                 │ orchestration + tool │
+                 │ call round-trips     │
+                 └───────────┬──────────┘
+                             │
+                 ┌───────────▼──────────┐
+                 │    acp_client.py     │
+                 │  JSON-RPC 2.0 over   │
+                 │       stdio          │
+                 └───────────┬──────────┘
+                             │
+                 ┌───────────▼──────────┐
+                 │     kiro  CLI        │  ← only official binary
+                 │  (official, authed)  │
+                 └───────────┬──────────┘
+                             │
+                 ┌───────────▼──────────┐
+                 │    Kiro Backend      │
+                 └──────────────────────┘
 ```
 
 > **Single-account enforcement** — the gateway validates at startup that only one kiro CLI session is active at any time (`kiro.compliance.validate_single_account_compliance`). Attempting to spin up parallel accounts raises a hard `ComplianceError`.
@@ -71,7 +71,7 @@ For editors that speak ACP natively.
 
 ### 2. OpenAI shim
 
-For tools that only understand the OpenAI API (Cursor, Cline, Continue, OpenCode, Hermes-agent, etc.).
+For tools that only understand the OpenAI API (Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, …).
 
 | Endpoint | Description |
 |---|---|
@@ -80,7 +80,7 @@ For tools that only understand the OpenAI API (Cursor, Cline, Continue, OpenCode
 
 ### 3. Anthropic shim
 
-For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-agent, etc.).
+For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-agent, OpenClaw, …).
 
 | Endpoint | Description |
 |---|---|
@@ -222,7 +222,7 @@ COMPLIANCE_MODE=true             # Enforces single-account; set false only for d
 
 ### OpenAI-compatible clients
 
-_(Cursor, Cline, Continue, OpenCode, Hermes-agent, …)_
+_(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, …)_
 
 | Setting | Value |
 |---|---|
@@ -232,13 +232,37 @@ _(Cursor, Cline, Continue, OpenCode, Hermes-agent, …)_
 
 ### Anthropic-compatible clients
 
-_(Claude Code, Kilo Code, Craft-agent, …)_
+_(Claude Code, Kilo Code, Craft-agent, OpenClaw, …)_
 
 | Setting | Value |
 |---|---|
 | Base URL | `http://localhost:8000` |
 | API Key header | `x-api-key: <PROXY_API_KEY>` |
 | Model | `claude-sonnet-4-5` |
+
+### OpenClaw — quick setup
+
+OpenClaw supports both OpenAI and Anthropic API modes. Use the OpenAI shim for maximum compatibility:
+
+```json
+{
+  "provider": "openai",
+  "base_url": "http://localhost:8000/v1",
+  "api_key": "<PROXY_API_KEY>",
+  "model": "claude-sonnet-4-5"
+}
+```
+
+Or use the Anthropic shim if OpenClaw is configured with an Anthropic provider:
+
+```json
+{
+  "provider": "anthropic",
+  "base_url": "http://localhost:8000",
+  "api_key": "<PROXY_API_KEY>",
+  "model": "claude-sonnet-4-5"
+}
+```
 
 ### Native ACP clients
 
