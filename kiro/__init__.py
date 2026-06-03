@@ -1,50 +1,42 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
-# Copyright (C) 2025 Jwadow
+# https://github.com/ankitcharolia/kiro-gateway
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
+# Licensed under the GNU Affero General Public License v3.0
+# See LICENSE for details.
 
 """
-Kiro Gateway - Proxy for Kiro API.
+Kiro Gateway - ACP-compliant proxy for the Kiro CLI.
 
-This package provides a modular architecture for proxying
-OpenAI API requests to Kiro (AWS CodeWhisperer).
+This package translates OpenAI / Anthropic API requests into
+ACP (JSON-RPC 2.0 over stdio) calls forwarded to the official
+kiro CLI subprocess.  Authentication is fully delegated to the
+kiro CLI; no credentials are stored or managed here.
 
 Modules:
     - config: Configuration and constants
-    - models: Pydantic models for OpenAI API
-    - auth: Kiro authentication manager
+    - models_openai / models_anthropic: Pydantic request/response models
+    - acp_client: JSON-RPC 2.0 transport to the kiro CLI subprocess
+    - shim_service: Orchestration + tool-call round-trips
     - cache: Model metadata cache
-    - utils: Helper utilities
-    - converters: OpenAI <-> Kiro format conversion
+    - converters_*: Format conversion (OpenAI/Anthropic <-> ACP)
     - parsers: AWS SSE stream parsers
-    - streaming: Response streaming logic
+    - streaming_*: Response streaming logic
     - http_client: HTTP client with retry logic
-    - routes: FastAPI routes
+    - routes_openai / routes_anthropic: FastAPI route handlers
+    - compliance: Single-account enforcement
     - exceptions: Exception handlers
 """
 
 # Version is imported from config.py — the single source of truth
-# This allows changing the version in only one place
 from kiro.config import APP_VERSION as __version__
 
-__author__ = "Jwadow"
+__author__ = "ankitcharolia"
 
 # Main components for convenient import
-from kiro.auth import KiroAuthManager
+# NOTE: KiroAuthManager has been removed — authentication is fully delegated
+#       to the kiro CLI subprocess via kiro/acp_client.py.
 from kiro.cache import ModelInfoCache
 from kiro.http_client import KiroHttpClient
 from kiro.routes_openai import router
@@ -94,43 +86,42 @@ from kiro.exceptions import (
 __all__ = [
     # Version
     "__version__",
-    
-    # Main classes
-    "KiroAuthManager",
+
+    # Main classes (KiroAuthManager intentionally absent — auth lives in kiro CLI)
     "ModelInfoCache",
     "KiroHttpClient",
     "ModelResolver",
     "router",
-    
+
     # Configuration
     "PROXY_API_KEY",
     "REGION",
     "HIDDEN_MODELS",
     "APP_VERSION",
-    
+
     # Model resolution
     "normalize_model_name",
     "get_model_id_for_kiro",
-    
+
     # Models
     "ChatCompletionRequest",
     "ChatMessage",
     "OpenAIModel",
     "ModelList",
-    
+
     # Converters
     "build_kiro_payload",
     "extract_text_content",
     "merge_adjacent_messages",
-    
+
     # Parsers
     "AwsEventStreamParser",
     "parse_bracket_tool_calls",
-    
+
     # Streaming
     "stream_kiro_to_openai",
     "collect_stream_response",
-    
+
     # Exceptions
     "validation_exception_handler",
     "sanitize_validation_errors",
