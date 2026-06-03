@@ -22,10 +22,14 @@ Modules:
     - converters_*: Format conversion (OpenAI/Anthropic <-> ACP)
     - parsers: AWS SSE stream parsers
     - streaming_*: Response streaming logic
-    - http_client: HTTP client with retry logic
     - routes_openai / routes_anthropic: FastAPI route handlers
     - compliance: Single-account enforcement
     - exceptions: Exception handlers
+
+NOTE: kiro.http_client (KiroHttpClient) has been permanently removed.
+Direct Kiro API access is not compliant with the ACP architecture.
+All inference traffic must flow through kiro/acp_client.py via the
+official kiro CLI subprocess (JSON-RPC 2.0 over stdio).
 """
 
 # Version is imported from config.py — the single source of truth
@@ -33,11 +37,7 @@ from kiro.config import APP_VERSION as __version__
 
 __author__ = "ankitcharolia"
 
-# Main components for convenient import
-# NOTE: KiroAuthManager has been removed — authentication is fully delegated
-#       to the kiro CLI subprocess via kiro/acp_client.py.
-# NOTE: ModelInfoCache has been removed — kiro/cache.py is retired.
-from kiro.http_client import KiroHttpClient
+# Main route + model resolution
 from kiro.routes_openai import router
 from kiro.model_resolver import ModelResolver, normalize_model_name, get_model_id_for_kiro
 
@@ -86,8 +86,9 @@ __all__ = [
     # Version
     "__version__",
 
-    # Main classes (KiroAuthManager and ModelInfoCache intentionally absent)
-    "KiroHttpClient",
+    # Main classes
+    # NOTE: KiroHttpClient intentionally absent — removed for ACP compliance.
+    #       Use kiro.acp_client.ACPClient for all inference traffic.
     "ModelResolver",
     "router",
 
