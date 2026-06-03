@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 
 # Kiro Gateway
-# https://github.com/jwadow/kiro-gateway
+# https://github.com/ankitcharolia/kiro-gateway
+# Fork of https://github.com/jwadow/kiro-gateway by Jwadow
 # Copyright (C) 2025 Jwadow
 #
 # This program is free software: you can redistribute it and/or modify
@@ -20,20 +21,25 @@
 """
 Kiro Gateway - OpenAI-compatible interface for Kiro API.
 
-Application entry point. Creates FastAPI app and connects routes.
+SINGLE-ACCOUNT COMPLIANCE MODE
+-------------------------------
+This gateway enforces single-account personal use:
+  - Only one credential source is permitted.
+  - Rate-limit (429/402/403) errors are surfaced to the caller.
+  - Multi-account failover is disabled.
 
 Usage:
     # Using default settings (host: 0.0.0.0, port: 8000)
     python main.py
-    
+
     # With CLI arguments (highest priority)
     python main.py --port 9000
     python main.py --host 127.0.0.1 --port 9000
-    
+
     # With environment variables (medium priority)
     SERVER_PORT=9000 python main.py
-    
-    # Using uvicorn directly (uvicorn handles its own CLI args)
+
+    # Using uvicorn directly
     uvicorn main:app --host 0.0.0.0 --port 8000
 
 Priority: CLI args > Environment variables > Default values
@@ -88,6 +94,7 @@ from kiro.routes_openai import router as openai_router
 from kiro.routes_anthropic import router as anthropic_router
 from kiro.exceptions import validation_exception_handler
 from kiro.debug_middleware import DebugLoggerMiddleware
+from kiro.compliance import validate_single_account_compliance, log_compliance_banner
 
 
 # --- Loguru Configuration ---
@@ -103,104 +110,73 @@ logger.add(
 class InterceptHandler(logging.Handler):
     """
     Intercepts logs from standard logging and redirects them to loguru.
-    
-    This allows capturing logs from uvicorn, FastAPI and other libraries
-    that use standard logging instead of loguru.
-    
+
     Also filters out noisy shutdown-related exceptions (CancelledError, KeyboardInterrupt)
     that are normal during Ctrl+C but uvicorn logs as ERROR.
     """
-    
-    # Exceptions that are normal during shutdown and should not be logged as errors
+
     SHUTDOWN_EXCEPTIONS = (
         "CancelledError",
         "KeyboardInterrupt",
         "asyncio.exceptions.CancelledError",
     )
-    
+
     def emit(self, record: logging.LogRecord) -> None:
-        # Filter out shutdown-related exceptions that uvicorn logs as ERROR
-        # These are normal during Ctrl+C and don't need to spam the console
         if record.exc_info:
             exc_type = record.exc_info[0]
             if exc_type is not None:
                 exc_name = exc_type.__name__
                 if exc_name in self.SHUTDOWN_EXCEPTIONS:
-                    # Suppress the full traceback, just log a simple message
                     logger.info("Server shutdown in progress...")
                     return
-        
-        # Also filter by message content for cases where exc_info is not set
+
         msg = record.getMessage()
         if any(exc in msg for exc in self.SHUTDOWN_EXCEPTIONS):
             return
-        
-        # Get the corresponding loguru level
+
         try:
             level = logger.level(record.levelname).name
         except ValueError:
             level = record.levelno
-        
-        # Find the caller frame for correct source display
+
         frame, depth = logging.currentframe(), 2
         while frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
-        
+
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
 def setup_logging_intercept():
-    """
-    Configures log interception from standard logging to loguru.
-    
-    Intercepts logs from:
-    - uvicorn (access logs, error logs)
-    - uvicorn.error
-    - uvicorn.access
-    - fastapi
-    """
-    # List of loggers to intercept
     loggers_to_intercept = [
         "uvicorn",
         "uvicorn.error",
         "uvicorn.access",
         "fastapi",
     ]
-    
     for logger_name in loggers_to_intercept:
         logging_logger = logging.getLogger(logger_name)
         logging_logger.handlers = [InterceptHandler()]
         logging_logger.propagate = False
 
 
-# Configure uvicorn/fastapi log interception
 setup_logging_intercept()
 
 
 # ==================================================================================================
 # VPN/Proxy Configuration
 # ==================================================================================================
-# Must be set BEFORE creating any httpx clients (including in lifespan)
-# httpx automatically picks up HTTP_PROXY, HTTPS_PROXY, ALL_PROXY from environment
-
 if VPN_PROXY_URL:
-    # Normalize URL - add http:// if no scheme specified
     proxy_url_with_scheme = VPN_PROXY_URL if "://" in VPN_PROXY_URL else f"http://{VPN_PROXY_URL}"
-    
-    # Set environment variables for httpx to pick up automatically
     os.environ['HTTP_PROXY'] = proxy_url_with_scheme
     os.environ['HTTPS_PROXY'] = proxy_url_with_scheme
     os.environ['ALL_PROXY'] = proxy_url_with_scheme
-    
-    # Exclude localhost from proxy to avoid routing local requests through it
     no_proxy_hosts = os.environ.get("NO_PROXY", "")
     local_hosts = "127.0.0.1,localhost"
     if no_proxy_hosts:
         os.environ["NO_PROXY"] = f"{no_proxy_hosts},{local_hosts}"
     else:
         os.environ["NO_PROXY"] = local_hosts
-    
     logger.info(f"Proxy configured: {proxy_url_with_scheme}")
     logger.debug(f"NO_PROXY: {os.environ['NO_PROXY']}")
 
@@ -208,57 +184,66 @@ if VPN_PROXY_URL:
 # --- Configuration Validation ---
 def validate_configuration() -> None:
     """
-    Validates that required configuration is present.
-    
-    Priority:
-    1. credentials.json (Account System) - if exists, skip legacy validation
-    2. Legacy .env variables (REFRESH_TOKEN, KIRO_CREDS_FILE, KIRO_CLI_DB_FILE)
-    
-    Checks:
-    - Either credentials.json exists OR legacy variables are configured
-    - Supports both .env file (local) and environment variables (Docker)
-    
+    Validates that required configuration is present and compliant.
+
+    Single-account compliance is enforced here:
+    - credentials.json must contain at most ONE account entry.
+    - ACCOUNT_SYSTEM multi-account mode is blocked.
+
     Raises:
-        SystemExit: If critical configuration is missing
+        SystemExit: If critical configuration is missing.
+        RuntimeError: If compliance rules are violated.
     """
-    # Priority 1: Check if credentials.json exists (Account System)
-    # If it exists, legacy .env validation is skipped
+    # --- Compliance: block multi-account credentials.json ---
+    validate_single_account_compliance(ACCOUNTS_CONFIG_FILE)
+
+    # --- Block ACCOUNT_SYSTEM=true (multi-account mode) ---
+    if ACCOUNT_SYSTEM:
+        logger.error("")
+        logger.error("=" * 64)
+        logger.error("  COMPLIANCE ERROR: ACCOUNT_SYSTEM=true is disabled")
+        logger.error("=" * 64)
+        logger.error("")
+        logger.error("  Multi-account mode (ACCOUNT_SYSTEM=true) has been disabled")
+        logger.error("  in this fork to comply with AWS/Kiro terms of service.")
+        logger.error("")
+        logger.error("  kiro-gateway is for single-account personal use only.")
+        logger.error("  Remove ACCOUNT_SYSTEM from your .env or set it to false.")
+        logger.error("")
+        logger.error("=" * 64)
+        raise RuntimeError(
+            "Compliance: ACCOUNT_SYSTEM=true is not permitted. "
+            "This gateway supports single-account use only."
+        )
+
     from kiro.config import ACCOUNTS_CONFIG_FILE
     creds_json_path = Path(ACCOUNTS_CONFIG_FILE)
-    
+
     if creds_json_path.exists():
         logger.debug(f"Found {ACCOUNTS_CONFIG_FILE}, skipping legacy .env validation")
         return
-    
-    # Priority 2: credentials.json doesn't exist - validate legacy .env variables
+
     errors = []
-    
-    # Check if .env file exists (optional - can use environment variables)
     env_file = Path(".env")
-    
-    # Check for credentials (from .env or environment variables)
+
     has_refresh_token = bool(REFRESH_TOKEN)
     has_creds_file = bool(KIRO_CREDS_FILE)
     has_cli_db = bool(KIRO_CLI_DB_FILE)
-    
-    # Check if creds file actually exists
+
     if KIRO_CREDS_FILE:
         creds_path = Path(KIRO_CREDS_FILE).expanduser()
         if not creds_path.exists():
             has_creds_file = False
             logger.warning(f"KIRO_CREDS_FILE not found: {KIRO_CREDS_FILE}")
-    
-    # Check if CLI database file actually exists
+
     if KIRO_CLI_DB_FILE:
         cli_db_path = Path(KIRO_CLI_DB_FILE).expanduser()
         if not cli_db_path.exists():
             has_cli_db = False
             logger.warning(f"KIRO_CLI_DB_FILE not found: {KIRO_CLI_DB_FILE}")
-    
-    # If no credentials found, show helpful error
+
     if not has_refresh_token and not has_creds_file and not has_cli_db:
         if not env_file.exists():
-            # No .env file and no environment variables
             errors.append(
                 "No Kiro credentials configured!\n"
                 "\n"
@@ -267,40 +252,34 @@ def validate_configuration() -> None:
                 "   cp .env.example .env\n"
                 "\n"
                 "2. Edit .env and configure your credentials:\n"
-                "   2.1. Set you super-secret password as PROXY_API_KEY\n"
-                "   2.2. Set your Kiro credentials:\n"
-                "      - Option 1: KIRO_CREDS_FILE to your Kiro credentials JSON file\n"
-                "      - Option 2: REFRESH_TOKEN from Kiro IDE traffic\n"
-                "      - Option 3: KIRO_CLI_DB_FILE to kiro-cli SQLite database\n"
-                "\n"
-                "Or use environment variables (for Docker):\n"
-                "   docker run -e PROXY_API_KEY=\"...\" -e REFRESH_TOKEN=\"...\" ...\n"
+                "   2.1. Set a secure password as PROXY_API_KEY\n"
+                "   2.2. Set your Kiro credentials (one of):\n"
+                "      - KIRO_CREDS_FILE=~/.aws/sso/cache/kiro-auth-token.json\n"
+                "      - REFRESH_TOKEN=your_refresh_token\n"
+                "      - KIRO_CLI_DB_FILE=~/.local/share/kiro-cli/data.sqlite3\n"
                 "\n"
                 "See README.md for detailed instructions."
             )
         else:
-            # .env exists but no credentials configured
             errors.append(
                 "No Kiro credentials configured!\n"
                 "\n"
-                "   Configure one of the following in your .env file:\n"
+                "   Configure ONE of the following in your .env file:\n"
                 "\n"
-                "Set you super-secret password as PROXY_API_KEY\n"
                 "   PROXY_API_KEY=\"my-super-secret-password-123\"\n"
                 "\n"
                 "   Option 1 (Recommended): JSON credentials file\n"
-                "      KIRO_CREDS_FILE=\"path/to/your/kiro-credentials.json\"\n"
+                "      KIRO_CREDS_FILE=\"~/.aws/sso/cache/kiro-auth-token.json\"\n"
                 "\n"
                 "   Option 2: Refresh token\n"
                 "      REFRESH_TOKEN=\"your_refresh_token_here\"\n"
                 "\n"
-                "   Option 3: kiro-cli SQLite database (AWS SSO)\n"
+                "   Option 3: kiro-cli SQLite database\n"
                 "      KIRO_CLI_DB_FILE=\"~/.local/share/kiro-cli/data.sqlite3\"\n"
                 "\n"
                 "   See README.md for how to obtain credentials."
             )
-    
-    # Print errors and exit if any
+
     if errors:
         logger.error("")
         logger.error("=" * 60)
@@ -312,8 +291,6 @@ def validate_configuration() -> None:
         logger.error("=" * 60)
         logger.error("")
         raise RuntimeError("Configuration validation failed")
-    
-    # Note: Credential loading details are logged by KiroAuthManager
 
 
 # --- Lifespan Manager ---
@@ -321,30 +298,25 @@ def validate_configuration() -> None:
 async def lifespan(app: FastAPI):
     """
     Manages the application lifecycle.
-    
-    Creates and initializes:
-    - Shared HTTP client with connection pooling
-    - KiroAuthManager for token management
-    - ModelInfoCache for model caching
-    
-    The shared HTTP client is used by all requests to reduce memory usage
-    and enable connection reuse. This is especially important for handling
-    concurrent requests efficiently (fixes issue #24).
+
+    Single-account compliance is enforced here: if credentials.json
+    was modified to contain multiple accounts after startup validation,
+    a final check is run before any requests are served.
     """
     logger.info("Starting application... Creating state managers.")
-    
-    # Create shared HTTP client with connection pooling
-    # This reduces memory usage and enables connection reuse across requests
-    # Limits: max 100 total connections, max 20 keep-alive connections
+
+    # Final compliance guard before serving requests
+    validate_single_account_compliance(ACCOUNTS_CONFIG_FILE)
+    log_compliance_banner()
+
     limits = httpx.Limits(
         max_connections=100,
         max_keepalive_connections=20,
-        keepalive_expiry=30.0  # Close idle connections after 30 seconds
+        keepalive_expiry=30.0
     )
-    # Timeout configuration for streaming (long read timeout for model "thinking")
     timeout = httpx.Timeout(
         connect=30.0,
-        read=STREAMING_READ_TIMEOUT,  # 300 seconds for streaming
+        read=STREAMING_READ_TIMEOUT,
         write=30.0,
         pool=30.0
     )
@@ -354,178 +326,113 @@ async def lifespan(app: FastAPI):
         follow_redirects=True
     )
     logger.info("Shared HTTP client created with connection pooling")
-    
+
     # ==============================================================================
-    # Legacy Fallback: .env → credentials.json
+    # Build credentials.json from .env (single-entry, legacy mode always)
+    # ACCOUNT_SYSTEM=true is blocked by validate_configuration().
+    # We always recreate credentials.json from the single .env credential.
     # ==============================================================================
     creds_path = Path(ACCOUNTS_CONFIG_FILE)
-    
-    # Check if we have legacy .env credentials
+
     has_refresh_token = bool(REFRESH_TOKEN)
     has_creds_file = bool(KIRO_CREDS_FILE) and Path(KIRO_CREDS_FILE).expanduser().exists()
     has_cli_db = bool(KIRO_CLI_DB_FILE) and Path(KIRO_CLI_DB_FILE).expanduser().exists()
-    
-    # Helper function to add optional per-account overrides from .env
+
     def _add_env_overrides(entry: dict) -> None:
-        """Add optional per-account overrides from .env (only if set)"""
         profile_arn = os.getenv("PROFILE_ARN")
         if profile_arn:
             entry["profile_arn"] = profile_arn
-        
         region = os.getenv("KIRO_REGION")
         if region:
             entry["region"] = region
-        
         api_region = os.getenv("KIRO_API_REGION")
         if api_region:
             entry["api_region"] = api_region
-    
-    if ACCOUNT_SYSTEM:
-        # Account system enabled: create credentials.json ONCE (migration)
-        if not creds_path.exists():
-            if has_refresh_token or has_creds_file or has_cli_db:
-                logger.info("credentials.json not found, creating from .env (one-time migration)")
-                credentials = []
-                
-                # Priority: SQLite DB > JSON file > environment variables (same as KiroAuthManager)
-                if has_cli_db:
-                    entry = {
-                        "type": "sqlite",
-                        "path": KIRO_CLI_DB_FILE
-                    }
-                    _add_env_overrides(entry)
-                    credentials.append(entry)
-                elif has_creds_file:
-                    entry = {
-                        "type": "json",
-                        "path": KIRO_CREDS_FILE
-                    }
-                    _add_env_overrides(entry)
-                    credentials.append(entry)
-                elif has_refresh_token:
-                    entry = {
-                        "type": "refresh_token",
-                        "refresh_token": REFRESH_TOKEN
-                    }
-                    _add_env_overrides(entry)
-                    credentials.append(entry)
-            
-                # Save credentials.json
-                with open(creds_path, 'w', encoding='utf-8') as f:
-                    json.dump(credentials, f, indent=2, ensure_ascii=False)
-                
-                logger.info("Created credentials.json from .env (one-time migration)")
-    else:
-        # Legacy mode: ALWAYS recreate credentials.json from .env
-        if has_refresh_token or has_creds_file or has_cli_db:
-            logger.debug("Legacy mode: recreating credentials.json from .env")
-            credentials = []
-            
-            # Priority: SQLite DB > JSON file > environment variables (same as KiroAuthManager)
-            if has_cli_db:
-                entry = {
-                    "type": "sqlite",
-                    "path": KIRO_CLI_DB_FILE
-                }
-                _add_env_overrides(entry)
-                credentials.append(entry)
-            elif has_creds_file:
-                entry = {
-                    "type": "json",
-                    "path": KIRO_CREDS_FILE
-                }
-                _add_env_overrides(entry)
-                credentials.append(entry)
-            elif has_refresh_token:
-                entry = {
-                    "type": "refresh_token",
-                    "refresh_token": REFRESH_TOKEN
-                }
-                _add_env_overrides(entry)
-                credentials.append(entry)
-            
-            # Save credentials.json (overwrite if exists)
-            with open(creds_path, 'w', encoding='utf-8') as f:
-                json.dump(credentials, f, indent=2, ensure_ascii=False)
-            
-            logger.debug("credentials.json recreated from .env (legacy mode)")
-    
+
+    if has_refresh_token or has_creds_file or has_cli_db:
+        logger.debug("Rebuilding credentials.json from single .env credential")
+        credentials = []
+
+        # Priority: SQLite DB > JSON file > refresh token (single entry only)
+        if has_cli_db:
+            entry = {"type": "sqlite", "path": KIRO_CLI_DB_FILE}
+            _add_env_overrides(entry)
+            credentials.append(entry)
+        elif has_creds_file:
+            entry = {"type": "json", "path": KIRO_CREDS_FILE}
+            _add_env_overrides(entry)
+            credentials.append(entry)
+        elif has_refresh_token:
+            entry = {"type": "refresh_token", "refresh_token": REFRESH_TOKEN}
+            _add_env_overrides(entry)
+            credentials.append(entry)
+
+        # Safety: enforce single-entry before writing
+        if len(credentials) > 1:
+            credentials = credentials[:1]
+            logger.warning("Compliance: truncated credentials to single entry.")
+
+        with open(creds_path, 'w', encoding='utf-8') as f:
+            json.dump(credentials, f, indent=2, ensure_ascii=False)
+
+        logger.debug("credentials.json written (single account, compliant mode)")
+
     # ==============================================================================
-    # Create AccountManager
+    # Create AccountManager (single account)
     # ==============================================================================
     app.state.account_manager = AccountManager(
         credentials_file=ACCOUNTS_CONFIG_FILE,
         state_file=ACCOUNTS_STATE_FILE
     )
-    
-    # Load credentials and state
+
     await app.state.account_manager.load_credentials()
     await app.state.account_manager.load_state()
-    
-    # Store account_system flag
-    app.state.account_system = ACCOUNT_SYSTEM
-    
-    # ==============================================================================
-    # Initialize first working account (blocking)
-    # ==============================================================================
+
+    # Compliance guard: reject if AccountManager loaded multiple accounts
     all_accounts = list(app.state.account_manager._accounts.keys())
-    
+    if len(all_accounts) > 1:
+        raise RuntimeError(
+            f"Compliance: AccountManager loaded {len(all_accounts)} accounts. "
+            "Only 1 account is permitted. Check credentials.json."
+        )
+
+    app.state.account_system = False  # Multi-account system always disabled
+
     if not all_accounts:
         logger.error("No accounts configured in credentials.json")
         raise RuntimeError("No accounts configured in credentials.json")
-    
-    # Determine start index from state.json
-    start_index = app.state.account_manager._current_account_index
-    
-    # Try to initialize accounts (full circle)
-    initialized = False
-    
-    for i in range(len(all_accounts)):
-        current_index = (start_index + i) % len(all_accounts)
-        account_id = all_accounts[current_index]
-        
-        logger.info(f"Attempting to initialize account: {account_id}")
-        
-        success = await app.state.account_manager._initialize_account(account_id)
-        
-        if success:
-            logger.info(f"Successfully initialized account: {account_id}")
-            initialized = True
-            break
-        else:
-            logger.warning(f"Failed to initialize account: {account_id}")
-    
-    if not initialized:
-        logger.error("Failed to initialize any account. Check your credentials.")
-        raise RuntimeError("Failed to initialize any account")
-    
-    # Save initial state
+
+    account_id = all_accounts[0]
+    logger.info(f"Initializing single account: {account_id}")
+
+    success = await app.state.account_manager._initialize_account(account_id)
+    if not success:
+        logger.error(f"Failed to initialize account: {account_id}. Check your credentials.")
+        raise RuntimeError("Failed to initialize account")
+
+    logger.info(f"Account initialized successfully: {account_id}")
+
     await app.state.account_manager._save_state()
-    
-    # Start background task for periodic state saving
+
     save_task = asyncio.create_task(
         app.state.account_manager.save_state_periodically()
     )
-    
-    logger.info("Account system initialized successfully")
-    
+
+    logger.info("Gateway started in single-account compliance mode.")
+
     yield
-    
-    # Graceful shutdown
+
     logger.info("Shutting down application...")
-    
-    # Cancel background task
+
     save_task.cancel()
     try:
         await save_task
     except asyncio.CancelledError:
         pass
-    
-    # Final state save
+
     await app.state.account_manager._save_state()
     logger.info("Final state saved")
-    
-    # Close HTTP client
+
     try:
         await app.state.http_client.aclose()
         logger.info("Shared HTTP client closed")
@@ -543,20 +450,16 @@ app = FastAPI(
 
 
 # --- CORS Middleware ---
-# Allow CORS for all origins to support browser clients
-# and tools that send preflight OPTIONS requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
 # --- Debug Logger Middleware ---
-# Initializes debug logging BEFORE Pydantic validation
-# This allows capturing validation errors (422) in debug logs
 app.add_middleware(DebugLoggerMiddleware)
 
 
@@ -565,16 +468,11 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
 
 # --- Route Registration ---
-# OpenAI-compatible API: /v1/models, /v1/chat/completions
 app.include_router(openai_router)
-
-# Anthropic-compatible API: /v1/messages
 app.include_router(anthropic_router)
 
 
 # --- Uvicorn log config ---
-# Minimal configuration for redirecting uvicorn logs to loguru.
-# Uses InterceptHandler which intercepts logs and passes them to loguru.
 UVICORN_LOG_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -592,15 +490,6 @@ UVICORN_LOG_CONFIG = {
 
 
 def parse_cli_args() -> argparse.Namespace:
-    """
-    Parse command-line arguments for server configuration.
-    
-    CLI arguments have the highest priority, overriding both
-    environment variables and default values.
-    
-    Returns:
-        Parsed arguments namespace with host and port values
-    """
     parser = argparse.ArgumentParser(
         description=f"{APP_TITLE} - {APP_DESCRIPTION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -615,53 +504,38 @@ Examples:
   python main.py --port 9000              # Override port only
   python main.py --host 127.0.0.1         # Local connections only
   python main.py -H 0.0.0.0 -p 8080       # Short form
-  
+
   SERVER_PORT=9000 python main.py         # Via environment
   uvicorn main:app --port 9000            # Via uvicorn directly
         """
     )
-    
+
     parser.add_argument(
         "-H", "--host",
         type=str,
-        default=None,  # None means "use env or default"
+        default=None,
         metavar="HOST",
         help=f"Server host address (default: {DEFAULT_SERVER_HOST}, env: SERVER_HOST)"
     )
-    
+
     parser.add_argument(
         "-p", "--port",
         type=int,
-        default=None,  # None means "use env or default"
+        default=None,
         metavar="PORT",
         help=f"Server port (default: {DEFAULT_SERVER_PORT}, env: SERVER_PORT)"
     )
-    
+
     parser.add_argument(
         "-v", "--version",
         action="version",
         version=f"%(prog)s {APP_VERSION}"
     )
-    
+
     return parser.parse_args()
 
 
 def resolve_server_config(args: argparse.Namespace) -> tuple[str, int]:
-    """
-    Resolve final server configuration using priority hierarchy.
-    
-    Priority (highest to lowest):
-    1. CLI arguments (--host, --port)
-    2. Environment variables (SERVER_HOST, SERVER_PORT)
-    3. Default values (0.0.0.0:8000)
-    
-    Args:
-        args: Parsed CLI arguments
-        
-    Returns:
-        Tuple of (host, port) with resolved values
-    """
-    # Host resolution: CLI > ENV > Default
     if args.host is not None:
         final_host = args.host
         host_source = "CLI argument"
@@ -671,8 +545,7 @@ def resolve_server_config(args: argparse.Namespace) -> tuple[str, int]:
     else:
         final_host = DEFAULT_SERVER_HOST
         host_source = "default"
-    
-    # Port resolution: CLI > ENV > Default
+
     if args.port is not None:
         final_port = args.port
         port_source = "CLI argument"
@@ -682,23 +555,14 @@ def resolve_server_config(args: argparse.Namespace) -> tuple[str, int]:
     else:
         final_port = DEFAULT_SERVER_PORT
         port_source = "default"
-    
-    # Log configuration sources for transparency
+
     logger.debug(f"Host: {final_host} (from {host_source})")
     logger.debug(f"Port: {final_port} (from {port_source})")
-    
+
     return final_host, final_port
 
 
 def print_startup_banner(host: str, port: int) -> None:
-    """
-    Print a startup banner with server information.
-    
-    Args:
-        host: Server host address
-        port: Server port
-    """
-    # ANSI color codes
     GREEN = "\033[92m"
     CYAN = "\033[96m"
     YELLOW = "\033[93m"
@@ -706,13 +570,13 @@ def print_startup_banner(host: str, port: int) -> None:
     BOLD = "\033[1m"
     DIM = "\033[2m"
     RESET = "\033[0m"
-    
-    # Determine display URL
+
     display_host = "localhost" if host == "0.0.0.0" else host
     url = f"http://{display_host}:{port}"
-    
+
     print()
     print(f"  {WHITE}{BOLD}👻 {APP_TITLE} v{APP_VERSION}{RESET}")
+    print(f"  {DIM}Single-account compliance mode enabled{RESET}")
     print()
     print(f"  {WHITE}Server running at:{RESET}")
     print(f"  {GREEN}{BOLD}➜  {url}{RESET}")
@@ -721,8 +585,8 @@ def print_startup_banner(host: str, port: int) -> None:
     print(f"  {DIM}Health Check:  {url}/health{RESET}")
     print()
     print(f"  {DIM}{'─' * 48}{RESET}")
-    print(f"  {WHITE}💬 Found a bug? Need help? Have questions?{RESET}")
-    print(f"  {YELLOW}➜  https://github.com/jwadow/kiro-gateway/issues{RESET}")
+    print(f"  {WHITE}Requires a valid personal Kiro subscription.{RESET}")
+    print(f"  {DIM}Multi-account mode is disabled for ToS compliance.{RESET}")
     print(f"  {DIM}{'─' * 48}{RESET}")
     print()
 
@@ -730,25 +594,15 @@ def print_startup_banner(host: str, port: int) -> None:
 # --- Entry Point ---
 if __name__ == "__main__":
     import uvicorn
-    
-    # Parse CLI arguments first (handles --version, --help without requiring config)
+
     args = parse_cli_args()
-    
-    # Run configuration validation before starting server
     validate_configuration()
-    
-    # Warn about suboptimal timeout configuration
     _warn_timeout_configuration()
-    
-    # Resolve final configuration with priority hierarchy
     final_host, final_port = resolve_server_config(args)
-    
-    # Print startup banner
     print_startup_banner(final_host, final_port)
-    
+
     logger.info(f"Starting Uvicorn server on {final_host}:{final_port}...")
-    
-    # Use string reference to avoid double module import
+
     uvicorn.run(
         "main:app",
         host=final_host,
