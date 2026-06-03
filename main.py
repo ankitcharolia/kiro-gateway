@@ -41,7 +41,7 @@ from kiro.shim_service import ShimService
 logger.remove()
 logger.add(
     sys.stderr,
-    level=settings.LOG_LEVEL,
+    level="INFO",
     colorize=True,
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | "
            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
@@ -146,7 +146,7 @@ if __name__ == "__main__":
     port = args.port or settings.SERVER_PORT
 
     print()
-    print(f"  \033[1m\033[97m👻 Kiro Gateway v2.0.0 (ACP mode)\033[0m")
+    print(f"  \033[1m\033[97m\U0001f47b Kiro Gateway v2.0.0 (ACP mode)\033[0m")
     print(f"  \033[2mAll completions route through kiro-cli — ToS compliant.\033[0m")
     print()
     print(f"  \033[97mServer: \033[92m\033[1mhttp://{'localhost' if host == '0.0.0.0' else host}:{port}\033[0m")
