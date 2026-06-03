@@ -90,7 +90,7 @@ jobs:
           echo "Cleaned up test artifacts (credentials.json, state.json)"
       
       - name: Build Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
@@ -153,7 +153,7 @@ jobs:
       
       - name: Build and push Docker image
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64  # Multi-arch support (x86_64 and ARM64)
