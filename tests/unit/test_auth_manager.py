@@ -1688,6 +1688,58 @@ class TestKiroAuthManagerSsoRegionSeparation:
             print("Verification: Only one request was made...")
             assert mock_client.post.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_do_aws_sso_oidc_refresh_logs_invalid_grant_remediation_hint(self):
+        """
+        What it does: Verifies invalid_grant logs actionable remediation guidance.
+        Purpose: Help users recover quickly from expired/invalid AWS SSO refresh tokens.
+        """
+        print("Setup: Creating KiroAuthManager with AWS SSO credentials...")
+        manager = KiroAuthManager(
+            refresh_token="stale_refresh_token",
+            client_id="test_client_id",
+            client_secret="test_client_secret",
+            region="eu-central-1"
+        )
+
+        print("Setup: Mocking AWS OIDC invalid_grant response...")
+        mock_error_response = AsyncMock()
+        mock_error_response.status_code = 400
+        mock_error_response.text = '{"error":"invalid_grant","error_description":"Invalid refresh token provided"}'
+        mock_error_response.json = Mock(return_value={
+            "error": "invalid_grant",
+            "error_description": "Invalid refresh token provided"
+        })
+        mock_error_response.raise_for_status = Mock(
+            side_effect=httpx.HTTPStatusError(
+                "400 Bad Request",
+                request=Mock(),
+                response=mock_error_response
+            )
+        )
+
+        with patch('kiro.auth.httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_error_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_class.return_value = mock_client
+
+            with patch('kiro.auth.logger.error') as mock_logger_error:
+                print("Action: Calling _do_aws_sso_oidc_refresh (expecting invalid_grant)...")
+                with pytest.raises(httpx.HTTPStatusError):
+                    await manager._do_aws_sso_oidc_refresh()
+
+                print("Verification: Remediation hint logged...")
+                logged_messages = [
+                    call.args[0] for call in mock_logger_error.call_args_list if call.args
+                ]
+                joined_logs = "\n".join(logged_messages)
+
+                assert "invalid_grant" in joined_logs
+                assert "kiro-cli login" in joined_logs
+                assert "KIRO_CLI_DB_FILE" in joined_logs
+
 
 # =============================================================================
 # Tests for is_token_expired() method

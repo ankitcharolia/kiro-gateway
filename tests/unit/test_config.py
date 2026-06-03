@@ -583,6 +583,9 @@ class TestFallbackModelsConfig:
         print("Verification: Contains at least one Claude model...")
         has_claude = any("claude" in mid.lower() for mid in model_ids)
         assert has_claude, "No Claude models in fallback list"
+
+        print("Verification: Contains claude-opus-4.8...")
+        assert "claude-opus-4.8" in model_ids
     
     def test_fallback_models_use_dot_format(self):
         """

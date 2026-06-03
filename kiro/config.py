@@ -30,8 +30,12 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables from current working directory (legacy behavior).
 load_dotenv()
+
+# Project root and .env path used for targeted fallback reads.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_DOTENV_PATH = PROJECT_ROOT / ".env"
 
 
 def _get_raw_env_value(var_name: str, env_file: str = ".env") -> Optional[str]:
@@ -75,6 +79,41 @@ def _get_raw_env_value(var_name: str, env_file: str = ".env") -> Optional[str]:
         pass
     
     return None
+
+
+def _get_env_with_project_fallback(var_name: str, default: str = "") -> str:
+    """
+    Read environment variable with fallback to project-root .env file.
+
+    Priority:
+    1) Process environment (os.getenv)
+    2) Current working directory .env (raw read)
+    3) Project root .env (raw read)
+    4) Default value
+
+    This is used for auth-related variables so launching the gateway from outside
+    repo root still picks up credentials from project .env.
+
+    Args:
+        var_name: Environment variable name
+        default: Default value if variable is not found
+
+    Returns:
+        Resolved variable value
+    """
+    env_value = os.getenv(var_name)
+    if env_value:
+        return env_value
+
+    raw_cwd = _get_raw_env_value(var_name)
+    if raw_cwd:
+        return raw_cwd
+
+    raw_project = _get_raw_env_value(var_name, str(PROJECT_DOTENV_PATH))
+    if raw_project:
+        return raw_project
+
+    return default
 
 # ==================================================================================================
 # Server Settings
@@ -125,10 +164,10 @@ VPN_PROXY_URL: str = os.getenv("VPN_PROXY_URL", "")
 # ==================================================================================================
 
 # Refresh token for updating access token
-REFRESH_TOKEN: str = os.getenv("REFRESH_TOKEN", "")
+REFRESH_TOKEN: str = _get_env_with_project_fallback("REFRESH_TOKEN", "")
 
 # Profile ARN for AWS CodeWhisperer
-PROFILE_ARN: str = os.getenv("PROFILE_ARN", "")
+PROFILE_ARN: str = _get_env_with_project_fallback("PROFILE_ARN", "")
 
 # AWS SSO/auth region (default us-east-1)
 # This region is used for OIDC token refresh endpoint: https://oidc.{region}.amazonaws.com/token
@@ -144,19 +183,19 @@ PROFILE_ARN: str = os.getenv("PROFILE_ARN", "")
 #
 # For manual override of API region, use KIRO_API_REGION environment variable.
 # See: https://github.com/jwadow/kiro-gateway/issues/132
-REGION: str = os.getenv("KIRO_REGION", "us-east-1")
+REGION: str = _get_env_with_project_fallback("KIRO_REGION", "us-east-1")
 
 # Path to credentials file (optional, alternative to .env)
 # Read directly from .env to avoid escape sequence issues on Windows
 # (e.g., \a in path D:\Projects\adolf is interpreted as bell character)
-_raw_creds_file = _get_raw_env_value("KIRO_CREDS_FILE") or os.getenv("KIRO_CREDS_FILE", "")
+_raw_creds_file = _get_env_with_project_fallback("KIRO_CREDS_FILE", "")
 # Normalize path for cross-platform compatibility
 KIRO_CREDS_FILE: str = str(Path(_raw_creds_file)) if _raw_creds_file else ""
 
 # Path to kiro-cli SQLite database (optional, for AWS SSO OIDC authentication)
 # Default location: ~/.local/share/kiro-cli/data.sqlite3 (Linux/macOS)
 # or ~/.local/share/amazon-q/data.sqlite3 (amazon-q-developer-cli)
-_raw_cli_db_file = _get_raw_env_value("KIRO_CLI_DB_FILE") or os.getenv("KIRO_CLI_DB_FILE", "")
+_raw_cli_db_file = _get_env_with_project_fallback("KIRO_CLI_DB_FILE", "")
 KIRO_CLI_DB_FILE: str = str(Path(_raw_cli_db_file)) if _raw_cli_db_file else ""
 
 # Disable SQLite write-back (read-only mode)
@@ -275,18 +314,8 @@ HIDDEN_FROM_LIST: List[str] = ["auto"]
 # - Update gateway regularly to get the latest model list
 FALLBACK_MODELS: List[Dict[str, str]] = [
     {"modelId": "auto"},
-    {"modelId": "claude-sonnet-4"},
-    {"modelId": "claude-sonnet-4.5"},
     {"modelId": "claude-sonnet-4.6"},
-    {"modelId": "claude-haiku-4.5"},
-    {"modelId": "claude-opus-4.5"},
-    {"modelId": "claude-opus-4.6"},
-    {"modelId": "claude-opus-4.7"},
-    {"modelId": "deepseek-3.2"},
-    {"modelId": "glm-5"},
-    {"modelId": "minimax-m2.1"},
-    {"modelId": "minimax-m2.5"},
-    {"modelId": "qwen3-coder-next"},
+    {"modelId": "claude-opus-4.8"},
 ]
 
 # ==================================================================================================

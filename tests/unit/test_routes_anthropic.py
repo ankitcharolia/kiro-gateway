@@ -2108,6 +2108,332 @@ class TestMessagesNativeWebSearchAccountSelection:
         print("✅ Native WebSearch uses get_first_account() (no failover)")
 
 
+class TestMessagesBuilderIdProfileArnBehavior:
+    """Regression tests for profileArn handling with Builder ID accounts."""
+
+    def test_legacy_mode_skips_profile_arn_for_aws_sso_oidc(
+        self,
+        test_client,
+        valid_proxy_api_key,
+    ):
+        """
+        What it does: Verifies legacy mode omits profileArn for AWS_SSO_OIDC auth.
+        Purpose: Prevent 403 errors caused by sending profileArn for Builder ID accounts.
+        """
+        print("Setup: Legacy mode with AWS_SSO_OIDC account...")
+        from kiro.auth import AuthType
+
+        auth_manager = MagicMock()
+        auth_manager.auth_type = AuthType.AWS_SSO_OIDC
+        auth_manager.profile_arn = None
+        auth_manager.api_host = "https://api.example.com"
+
+        account = MagicMock()
+        account.id = "legacy-account"
+        account.auth_manager = auth_manager
+        account.model_cache = MagicMock()
+        account.model_resolver = MagicMock()
+
+        test_client.app.state.account_system = False
+        test_client.app.state.account_manager = AsyncMock()
+        test_client.app.state.account_manager.get_first_account = MagicMock(return_value=account)
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+
+        with patch("kiro.routes_anthropic.anthropic_to_kiro", return_value={"ok": True}) as mock_convert, \
+             patch("kiro.routes_anthropic.collect_anthropic_response", new=AsyncMock(return_value={"id": "msg_1"})), \
+             patch("kiro.http_client.KiroHttpClient.request_with_retry", new=AsyncMock(return_value=mock_response)), \
+             patch("kiro.http_client.KiroHttpClient.close", new=AsyncMock(return_value=None)):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        print(f"Status: {response.status_code}")
+        assert response.status_code == 200
+
+        print("Checking: anthropic_to_kiro received empty profile_arn...")
+        assert mock_convert.call_args.args[2] == ""
+
+    def test_failover_mode_skips_profile_arn_for_aws_sso_oidc(
+        self,
+        test_client,
+        valid_proxy_api_key,
+    ):
+        """
+        What it does: Verifies failover mode omits profileArn for AWS_SSO_OIDC auth.
+        Purpose: Ensure both account-system code paths handle Builder ID correctly.
+        """
+        print("Setup: Failover mode with AWS_SSO_OIDC account...")
+        from kiro.auth import AuthType
+
+        auth_manager = MagicMock()
+        auth_manager.auth_type = AuthType.AWS_SSO_OIDC
+        auth_manager.profile_arn = None
+        auth_manager.api_host = "https://api.example.com"
+
+        account = MagicMock()
+        account.id = "failover-account"
+        account.auth_manager = auth_manager
+        account.model_cache = MagicMock()
+        account.model_resolver = MagicMock()
+
+        mock_account_manager = AsyncMock()
+        mock_account_manager._accounts = {"failover-account": account}
+        mock_account_manager.get_next_account = AsyncMock(return_value=account)
+        mock_account_manager.report_success = AsyncMock(return_value=None)
+
+        test_client.app.state.account_system = True
+        test_client.app.state.account_manager = mock_account_manager
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+
+        with patch("kiro.routes_anthropic.anthropic_to_kiro", return_value={"ok": True}) as mock_convert, \
+             patch("kiro.routes_anthropic.collect_anthropic_response", new=AsyncMock(return_value={"id": "msg_1"})), \
+             patch("kiro.http_client.KiroHttpClient.request_with_retry", new=AsyncMock(return_value=mock_response)), \
+             patch("kiro.http_client.KiroHttpClient.close", new=AsyncMock(return_value=None)):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        print(f"Status: {response.status_code}")
+        assert response.status_code == 200
+
+        print("Checking: anthropic_to_kiro received empty profile_arn...")
+        assert mock_convert.call_args.args[2] == ""
+
+    def test_legacy_mode_includes_profile_arn_for_aws_sso_oidc_when_present(
+        self,
+        test_client,
+        valid_proxy_api_key,
+    ):
+        """
+        What it does: Verifies legacy mode sends profileArn for AWS_SSO_OIDC when available.
+        Purpose: Prevent profileArn-required 400 errors on enterprise SSO accounts.
+        """
+        print("Setup: Legacy mode with AWS_SSO_OIDC account that has profileArn...")
+        from kiro.auth import AuthType
+
+        expected_profile_arn = "arn:aws:codewhisperer:us-east-1:123456789:profile/enterprise"
+
+        auth_manager = MagicMock()
+        auth_manager.auth_type = AuthType.AWS_SSO_OIDC
+        auth_manager.profile_arn = expected_profile_arn
+        auth_manager.api_host = "https://api.example.com"
+
+        account = MagicMock()
+        account.id = "legacy-account"
+        account.auth_manager = auth_manager
+        account.model_cache = MagicMock()
+        account.model_resolver = MagicMock()
+
+        test_client.app.state.account_system = False
+        test_client.app.state.account_manager = AsyncMock()
+        test_client.app.state.account_manager.get_first_account = MagicMock(return_value=account)
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+
+        with patch("kiro.routes_anthropic.anthropic_to_kiro", return_value={"ok": True}) as mock_convert, \
+             patch("kiro.routes_anthropic.collect_anthropic_response", new=AsyncMock(return_value={"id": "msg_1"})), \
+             patch("kiro.http_client.KiroHttpClient.request_with_retry", new=AsyncMock(return_value=mock_response)), \
+             patch("kiro.http_client.KiroHttpClient.close", new=AsyncMock(return_value=None)):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        print(f"Status: {response.status_code}")
+        assert response.status_code == 200
+
+        print("Checking: anthropic_to_kiro received account profile_arn...")
+        assert mock_convert.call_args.args[2] == expected_profile_arn
+
+    def test_failover_mode_includes_profile_arn_for_aws_sso_oidc_when_present(
+        self,
+        test_client,
+        valid_proxy_api_key,
+    ):
+        """
+        What it does: Verifies failover mode sends profileArn for AWS_SSO_OIDC when available.
+        Purpose: Ensure both account-system paths avoid profileArn-required 400 errors.
+        """
+        print("Setup: Failover mode with AWS_SSO_OIDC account that has profileArn...")
+        from kiro.auth import AuthType
+
+        expected_profile_arn = "arn:aws:codewhisperer:us-east-1:123456789:profile/enterprise"
+
+        auth_manager = MagicMock()
+        auth_manager.auth_type = AuthType.AWS_SSO_OIDC
+        auth_manager.profile_arn = expected_profile_arn
+        auth_manager.api_host = "https://api.example.com"
+
+        account = MagicMock()
+        account.id = "failover-account"
+        account.auth_manager = auth_manager
+        account.model_cache = MagicMock()
+        account.model_resolver = MagicMock()
+
+        mock_account_manager = AsyncMock()
+        mock_account_manager._accounts = {"failover-account": account}
+        mock_account_manager.get_next_account = AsyncMock(return_value=account)
+        mock_account_manager.report_success = AsyncMock(return_value=None)
+
+        test_client.app.state.account_system = True
+        test_client.app.state.account_manager = mock_account_manager
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+
+        with patch("kiro.routes_anthropic.anthropic_to_kiro", return_value={"ok": True}) as mock_convert, \
+             patch("kiro.routes_anthropic.collect_anthropic_response", new=AsyncMock(return_value={"id": "msg_1"})), \
+             patch("kiro.http_client.KiroHttpClient.request_with_retry", new=AsyncMock(return_value=mock_response)), \
+             patch("kiro.http_client.KiroHttpClient.close", new=AsyncMock(return_value=None)):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        print(f"Status: {response.status_code}")
+        assert response.status_code == 200
+
+        print("Checking: anthropic_to_kiro received account profile_arn...")
+        assert mock_convert.call_args.args[2] == expected_profile_arn
+
+    def test_legacy_mode_uses_profile_arn_env_fallback_for_aws_sso_oidc(
+        self,
+        test_client,
+        valid_proxy_api_key,
+    ):
+        """
+        What it does: Verifies legacy mode uses PROFILE_ARN fallback for AWS_SSO_OIDC.
+        Purpose: Support SSO token cache files that do not include profileArn.
+        """
+        print("Setup: Legacy mode AWS_SSO_OIDC without account profileArn, with env PROFILE_ARN...")
+        from kiro.auth import AuthType
+
+        expected_profile_arn = "arn:aws:codewhisperer:eu-central-1:123456789:profile/from-env"
+
+        auth_manager = MagicMock()
+        auth_manager.auth_type = AuthType.AWS_SSO_OIDC
+        auth_manager.profile_arn = None
+        auth_manager.api_host = "https://api.example.com"
+
+        account = MagicMock()
+        account.id = "legacy-account"
+        account.auth_manager = auth_manager
+        account.model_cache = MagicMock()
+        account.model_resolver = MagicMock()
+
+        test_client.app.state.account_system = False
+        test_client.app.state.account_manager = AsyncMock()
+        test_client.app.state.account_manager.get_first_account = MagicMock(return_value=account)
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+
+        with patch("kiro.routes_anthropic.PROFILE_ARN", expected_profile_arn), \
+             patch("kiro.routes_anthropic.anthropic_to_kiro", return_value={"ok": True}) as mock_convert, \
+             patch("kiro.routes_anthropic.collect_anthropic_response", new=AsyncMock(return_value={"id": "msg_1"})), \
+             patch("kiro.http_client.KiroHttpClient.request_with_retry", new=AsyncMock(return_value=mock_response)), \
+             patch("kiro.http_client.KiroHttpClient.close", new=AsyncMock(return_value=None)):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        print(f"Status: {response.status_code}")
+        assert response.status_code == 200
+
+        print("Checking: anthropic_to_kiro received env profile_arn fallback...")
+        assert mock_convert.call_args.args[2] == expected_profile_arn
+
+    def test_failover_mode_uses_profile_arn_env_fallback_for_aws_sso_oidc(
+        self,
+        test_client,
+        valid_proxy_api_key,
+    ):
+        """
+        What it does: Verifies failover mode uses PROFILE_ARN fallback for AWS_SSO_OIDC.
+        Purpose: Ensure both account-system paths support SSO token files without profileArn.
+        """
+        print("Setup: Failover mode AWS_SSO_OIDC without account profileArn, with env PROFILE_ARN...")
+        from kiro.auth import AuthType
+
+        expected_profile_arn = "arn:aws:codewhisperer:eu-central-1:123456789:profile/from-env"
+
+        auth_manager = MagicMock()
+        auth_manager.auth_type = AuthType.AWS_SSO_OIDC
+        auth_manager.profile_arn = None
+        auth_manager.api_host = "https://api.example.com"
+
+        account = MagicMock()
+        account.id = "failover-account"
+        account.auth_manager = auth_manager
+        account.model_cache = MagicMock()
+        account.model_resolver = MagicMock()
+
+        mock_account_manager = AsyncMock()
+        mock_account_manager._accounts = {"failover-account": account}
+        mock_account_manager.get_next_account = AsyncMock(return_value=account)
+        mock_account_manager.report_success = AsyncMock(return_value=None)
+
+        test_client.app.state.account_system = True
+        test_client.app.state.account_manager = mock_account_manager
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+
+        with patch("kiro.routes_anthropic.PROFILE_ARN", expected_profile_arn), \
+             patch("kiro.routes_anthropic.anthropic_to_kiro", return_value={"ok": True}) as mock_convert, \
+             patch("kiro.routes_anthropic.collect_anthropic_response", new=AsyncMock(return_value={"id": "msg_1"})), \
+             patch("kiro.http_client.KiroHttpClient.request_with_retry", new=AsyncMock(return_value=mock_response)), \
+             patch("kiro.http_client.KiroHttpClient.close", new=AsyncMock(return_value=None)):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        print(f"Status: {response.status_code}")
+        assert response.status_code == 200
+
+        print("Checking: anthropic_to_kiro received env profile_arn fallback...")
+        assert mock_convert.call_args.args[2] == expected_profile_arn
+
+
 # ==================================================================================================
 # Tests for /v1/messages/count_tokens endpoint
 # ==================================================================================================

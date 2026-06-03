@@ -173,8 +173,9 @@ KIRO_CREDS_FILE="~/.aws/sso/cache/your-sso-cache-file.json"
 # Password to protect YOUR proxy server
 PROXY_API_KEY="my-super-secret-password-123"
 
-# Note: PROFILE_ARN is NOT needed for AWS SSO (Builder ID and corporate accounts)
-# The gateway will work without it
+# Note: For AWS SSO, PROFILE_ARN is optional in many setups.
+# Builder ID usually works without it, but some corporate/enterprise setups require it.
+# If you get a "profileArn required" error, set PROFILE_ARN explicitly.
 ```
 
 <details>
@@ -193,7 +194,7 @@ AWS SSO credentials files (from `~/.aws/sso/cache/`) contain:
 }
 ```
 
-**Note:** AWS SSO (Builder ID and corporate accounts) users do NOT need `profileArn`. The gateway will work without it (if specified, it will be ignored).
+**Note:** For AWS SSO users, `profileArn` is optional in many setups. Builder ID often works without it. Some corporate/enterprise setups require it; if you get `profileArn required`, set `PROFILE_ARN`.
 
 </details>
 
@@ -222,8 +223,9 @@ KIRO_CLI_DB_FILE="~/.local/share/kiro-cli/data.sqlite3"
 # Password to protect YOUR proxy server
 PROXY_API_KEY="my-super-secret-password-123"
 
-# Note: PROFILE_ARN is NOT needed for AWS SSO (Builder ID and corporate accounts)
-# The gateway will work without it
+# Note: For AWS SSO, PROFILE_ARN is optional in many setups.
+# Builder ID usually works without it, but some corporate/enterprise setups require it.
+# If you get a "profileArn required" error, set PROFILE_ARN explicitly.
 ```
 
 <details>

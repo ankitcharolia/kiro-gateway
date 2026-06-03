@@ -837,6 +837,13 @@ class KiroAuthManager:
                     error_desc = error_json.get("error_description", "no description")
                     logger.error(f"AWS SSO OIDC error details: error={error_code}, "
                                  f"description={error_desc}")
+                    if error_code == "invalid_grant":
+                        logger.error(
+                            "AWS SSO refresh token is invalid/expired. "
+                            "Please run 'kiro-cli login' to refresh credentials. "
+                            "If this persists, prefer SQLite mode by setting KIRO_CLI_DB_FILE "
+                            "to your kiro-cli database path."
+                        )
                 except Exception:
                     pass  # Body wasn't JSON, already logged as text
                 response.raise_for_status()

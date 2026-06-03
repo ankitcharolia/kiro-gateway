@@ -323,8 +323,13 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
             conversation_id = generate_conversation_id()
             
             # Build payload for Kiro
-            # profileArn is required by runtime.kiro.dev for all auth types
-            profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
+            # For AWS_SSO_OIDC, include profileArn when available from account or env.
+            # Builder ID usually has no profileArn and should omit it.
+            # See: https://github.com/jwadow/kiro-gateway/issues/168
+            if auth_manager.auth_type == AuthType.AWS_SSO_OIDC:
+                profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
+            else:
+                profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
             
             try:
                 kiro_payload = build_kiro_payload(
@@ -571,8 +576,13 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     conversation_id = generate_conversation_id()
     
     # Build payload for Kiro
-    # profileArn is required by runtime.kiro.dev for all auth types
-    profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
+    # For AWS_SSO_OIDC, include profileArn when available from account or env.
+    # Builder ID usually has no profileArn and should omit it.
+    # See: https://github.com/jwadow/kiro-gateway/issues/168
+    if auth_manager.auth_type == AuthType.AWS_SSO_OIDC:
+        profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
+    else:
+        profile_arn_for_payload = auth_manager.profile_arn or PROFILE_ARN or ""
     
     try:
         kiro_payload = build_kiro_payload(
