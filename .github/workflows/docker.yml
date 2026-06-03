@@ -83,6 +83,13 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix={{branch}}-
             type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=kiro-gateway
+            org.opencontainers.image.description=ACP-compliant gateway for Kiro — OpenAI and Anthropic compatible shims over kiro CLI
+            org.opencontainers.image.url=https://github.com/ankitcharolia/kiro-gateway
+            org.opencontainers.image.source=https://github.com/ankitcharolia/kiro-gateway
+            org.opencontainers.image.licenses=AGPL-3.0
+            org.opencontainers.image.vendor=ankitcharolia
       
       - name: Clean up test artifacts
         run: |
@@ -125,7 +132,7 @@ jobs:
             test -d /app/kiro && \
             test -w /app && \
             touch /app/test.tmp && rm /app/test.tmp && \
-            echo '✓ File structure and write permissions OK'
+            echo '\u2713 File structure and write permissions OK'
           "
           
           # Test 2: Python imports (verifies all dependencies installed)
@@ -140,7 +147,7 @@ jobs:
           import httpx
           import loguru
           import uvicorn
-          print('✓ All critical imports OK')
+          print('\u2713 All critical imports OK')
           "
           
           # Test 3: CLI works (verifies entry point)
@@ -148,7 +155,7 @@ jobs:
           
           echo ""
           echo "========================================="
-          echo "✓ Docker image tests passed"
+          echo "\u2713 Docker image tests passed"
           echo "========================================="
       
       - name: Build and push Docker image
@@ -156,13 +163,25 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64  # Multi-arch support (x86_64 and ARM64)
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      
+
+      - name: Make GHCR package public
+        if: github.event_name != 'pull_request'
+        run: |
+          curl -fsSL \
+            -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/user/packages/container/kiro-gateway/visibility" \
+            -d '{"visibility":"public"}'
+          echo "\u2713 GHCR package visibility set to public"
+
       - name: Image digest
         if: github.event_name != 'pull_request'
         run: echo ${{ steps.meta.outputs.digest }}
