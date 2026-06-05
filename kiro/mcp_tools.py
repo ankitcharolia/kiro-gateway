@@ -1,84 +1,43 @@
-"""Inject MCP (Model Context Protocol) server tool definitions into ACP requests."""
+"""MCP tool-call helpers and utility functions."""
 from __future__ import annotations
 
-import json
-import logging
-from pathlib import Path
+import secrets
+import string
 from typing import Any, Dict, List, Optional
 
-from .acp_models import ACPRequest, ACPTool
 
-logger = logging.getLogger(__name__)
+def generate_random_id(prefix: str = "tool", length: int = 8) -> str:
+    """Return a short random alphanumeric ID.
+
+    Example: ``"tool_a3f8b2c1"``
+    """
+    alphabet = string.ascii_lowercase + string.digits
+    suffix = "".join(secrets.choice(alphabet) for _ in range(length))
+    return f"{prefix}_{suffix}"
 
 
-def _load_tools_from_file(path: Path) -> List[ACPTool]:
-    """Load tool definitions from a JSON file."""
-    try:
-        data = json.loads(path.read_text())
-        tools: List[ACPTool] = []
-        entries = data if isinstance(data, list) else data.get("tools", [])
-        for entry in entries:
-            tools.append(
-                ACPTool(
-                    name=entry["name"],
-                    description=entry.get("description"),
-                    input_schema=entry.get("input_schema") or entry.get("parameters") or {},
-                )
-            )
-        return tools
-    except Exception as exc:
-        logger.warning("Failed to load MCP tools from %s: %s", path, exc)
+def build_tool_result(
+    tool_use_id: str,
+    content: Any,
+    is_error: bool = False,
+) -> Dict[str, Any]:
+    """Build an Anthropic-style tool_result content block."""
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": content if isinstance(content, str) else str(content),
+        "is_error": is_error,
+    }
+
+
+def extract_tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract tool_use blocks from an assistant message's content list."""
+    content = message.get("content", [])
+    if isinstance(content, str):
         return []
+    return [block for block in content if isinstance(block, dict) and block.get("type") == "tool_use"]
 
 
-def load_mcp_tools(tools_path: Optional[str] = None) -> List[ACPTool]:
-    """
-    Load MCP tool definitions.
-
-    Looks for tools in (in order):
-      1. *tools_path* if explicitly provided
-      2. ``~/.kiro/mcp_tools.json``
-      3. ``./mcp_tools.json`` in the CWD
-    """
-    candidates: List[Path] = []
-    if tools_path:
-        candidates.append(Path(tools_path).expanduser())
-    candidates.append(Path.home() / ".kiro" / "mcp_tools.json")
-    candidates.append(Path("mcp_tools.json"))
-
-    for path in candidates:
-        if path.exists():
-            tools = _load_tools_from_file(path)
-            if tools:
-                logger.info("Loaded %d MCP tools from %s", len(tools), path)
-                return tools
-    return []
-
-
-def inject_mcp_tools(
-    acp_request: ACPRequest,
-    mcp_tools: List[ACPTool],
-    deduplicate: bool = True,
-) -> ACPRequest:
-    """
-    Merge *mcp_tools* into *acp_request.tools*, avoiding duplicates by name.
-
-    The request's existing tools take precedence — MCP tools are appended
-    so that explicitly user-supplied tools always appear first.
-    """
-    if not mcp_tools:
-        return acp_request
-
-    existing = list(acp_request.tools or [])
-    if deduplicate:
-        existing_names = {t.name for t in existing}
-        new_tools = [t for t in mcp_tools if t.name not in existing_names]
-    else:
-        new_tools = list(mcp_tools)
-
-    if not new_tools:
-        return acp_request
-
-    acp_request.tools = existing + new_tools
-    logger.debug("Injected %d MCP tools into request (total: %d)", len(new_tools), len(acp_request.tools))
-    return acp_request
+def has_tool_calls(message: Dict[str, Any]) -> bool:
+    """Return True if the message contains at least one tool_use block."""
+    return bool(extract_tool_calls(message))

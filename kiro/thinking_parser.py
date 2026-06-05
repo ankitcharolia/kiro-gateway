@@ -1,67 +1,61 @@
-"""Extract and inject extended-thinking blocks in ACP / Anthropic payloads."""
+"""Utilities for parsing <thinking> blocks from model output."""
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
-from .acp_models import ACPContentBlock, ACPTextBlock, ACPThinkingBlock
-
-# Matches <thinking>...</thinking> produced by some Kiro builds
-_THINKING_RE = re.compile(
-    r"<thinking>(.*?)</thinking>",
-    re.DOTALL,
-)
-# Matches generic <thinking>...</thinking>
-_THINKING_GENERIC_RE = re.compile(
-    r"<thinking>(.*?)</thinking>",
-    re.DOTALL,
-)
+_THINK_RE = re.compile(r"<thinking>(.*?)</thinking>", re.DOTALL)
 
 
-def extract_thinking_from_text(text: str) -> Tuple[Optional[str], str]:
+@dataclass
+class ParsedThinking:
+    thinking: str
+    remaining_text: str
+
+
+def extract_thinking(text: str) -> ParsedThinking:
+    """Extract the first ``<thinking>`` block from *text*.
+
+    Returns a :class:`ParsedThinking` with the thinking content and the
+    remaining text with the block removed.
     """
-    Strip thinking XML tags from a raw text response.
-
-    Returns:
-        (thinking_content, cleaned_text)
-    """
-    thinking_parts: List[str] = []
-
-    def _collect(m: re.Match) -> str:
-        thinking_parts.append(m.group(1).strip())
-        return ""
-
-    cleaned = _THINKING_RE.sub(_collect, text)
-    cleaned = _THINKING_GENERIC_RE.sub(_collect, cleaned)
-    cleaned = cleaned.strip()
-    thinking = "\n".join(thinking_parts) if thinking_parts else None
-    return thinking, cleaned
+    m = _THINK_RE.search(text)
+    if m:
+        thinking = m.group(1).strip()
+        remaining = (text[: m.start()] + text[m.end() :]).strip()
+        return ParsedThinking(thinking=thinking, remaining_text=remaining)
+    return ParsedThinking(thinking="", remaining_text=text)
 
 
-def split_content_blocks(
-    blocks: List[ACPContentBlock],
-) -> Tuple[List[ACPThinkingBlock], List[ACPContentBlock]]:
-    """Separate thinking blocks from all other content blocks."""
-    thinking: List[ACPThinkingBlock] = []
-    rest: List[ACPContentBlock] = []
-    for b in blocks:
-        if getattr(b, "type", None) == "thinking":
-            thinking.append(b)  # type: ignore[arg-type]
-        else:
-            rest.append(b)
-    return thinking, rest
+def strip_thinking(text: str) -> str:
+    """Remove all ``<thinking>`` … ``</thinking>`` blocks from *text*."""
+    return _THINK_RE.sub("", text).strip()
 
 
-def inject_thinking_block(
-    blocks: List[ACPContentBlock],
-    thinking_text: str,
-    signature: Optional[str] = None,
-) -> List[ACPContentBlock]:
-    """Prepend a thinking block to a content block list."""
-    tb = ACPThinkingBlock(type="thinking", thinking=thinking_text, signature=signature)
-    return [tb, *blocks]
+def has_thinking(text: str) -> bool:
+    """Return True if *text* contains at least one ``<thinking>`` block."""
+    return bool(_THINK_RE.search(text))
 
 
-def needs_thinking_stripping(raw_text: str) -> bool:
-    """Quick check whether raw_text contains any thinking XML tags."""
-    return bool(_THINKING_RE.search(raw_text) or _THINKING_GENERIC_RE.search(raw_text))
+# ---------------------------------------------------------------------------
+# Class-based API (used by shim_service and tests)
+# ---------------------------------------------------------------------------
+
+class ThinkingParser:
+    """Stateless wrapper around the module-level parsing functions."""
+
+    @staticmethod
+    def extract(text: str) -> ParsedThinking:
+        """Alias for :func:`extract_thinking`."""
+        return extract_thinking(text)
+
+    @staticmethod
+    def strip(text: str) -> str:
+        """Alias for :func:`strip_thinking`."""
+        return strip_thinking(text)
+
+    @staticmethod
+    def has_thinking(text: str) -> bool:
+        """Alias for :func:`has_thinking`."""
+        return has_thinking(text)

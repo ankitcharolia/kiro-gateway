@@ -1,92 +1,57 @@
-"""Retry-on-context-overflow with progressive message truncation."""
+"""Heuristics for detecting and recovering from context-window truncation."""
 from __future__ import annotations
 
-import logging
-from typing import Any, Callable, Coroutine, List, Optional, TypeVar
+from typing import Any, Dict, List, Optional
 
-from .truncation_state import truncate_messages, TruncationState, MIN_MESSAGES_TO_KEEP
-
-logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
-
-# HTTP / ACP status codes that indicate a context-length overflow
-_OVERFLOW_SIGNALS = {
-    "context_length_exceeded",
-    "max_tokens_exceeded",
-    "prompt_too_long",
-    "context_window_exceeded",
-}
-
-MAX_RECOVERY_ATTEMPTS = 4
+# Stop reasons that indicate the model ran out of context rather than
+# finishing naturally.
+_TRUNCATION_STOP_REASONS = {"max_tokens", "length"}
 
 
-def _is_overflow_error(exc: Exception) -> bool:
-    """Heuristic: does this exception look like a context-overflow?"""
-    msg = str(exc).lower()
-    return any(sig in msg for sig in _OVERFLOW_SIGNALS)
+def is_truncated_response(response: Dict[str, Any]) -> bool:
+    """Return True if *response* looks like it was cut short by the context limit."""
+    stop_reason = response.get("stop_reason") or response.get("finish_reason", "")
+    return stop_reason in _TRUNCATION_STOP_REASONS
 
 
-async def with_truncation_recovery(
-    messages: List[Any],
-    system: Optional[str],
-    model: Optional[str],
-    invoke: Callable[..., Coroutine[Any, Any, T]],
-    context_window: int = 180_000,
-    output_reserve: int = 8_192,
-) -> tuple[T, TruncationState]:
+def should_inject_recovery(
+    messages: List[Dict[str, Any]],
+    max_input_tokens: int,
+    current_token_estimate: int,
+) -> bool:
+    """Return True if a recovery / summarisation injection is warranted.
+
+    A recovery is triggered when the estimated token count exceeds
+    90 % of *max_input_tokens* and there are enough messages to truncate.
     """
-    Call *invoke(messages, system)* and, if a context-overflow error occurs,
-    progressively truncate *messages* and retry up to MAX_RECOVERY_ATTEMPTS times.
+    if len(messages) < 4:  # too short to be worth compressing
+        return False
+    threshold = int(max_input_tokens * 0.90)
+    return current_token_estimate >= threshold
 
-    Args:
-        messages:       List of ACP/dict messages for this request.
-        system:         System prompt string (or None).
-        model:          Model name for token-counting heuristics.
-        invoke:         Async callable ``(messages, system) -> response``.
-        context_window: Max input token budget.
-        output_reserve: Tokens reserved for model output.
 
-    Returns:
-        Tuple of (response, final_truncation_state).
+def build_recovery_message(summary: str) -> Dict[str, Any]:
+    """Build a synthetic user message that injects a conversation summary."""
+    return {
+        "role": "user",
+        "content": (
+            "[System: The conversation history has been summarised to fit within "
+            f"the context window.]\n\nSummary of prior context:\n{summary}"
+        ),
+    }
+
+
+def truncate_messages_to_fit(
+    messages: List[Dict[str, Any]],
+    max_messages: int = 20,
+) -> List[Dict[str, Any]]:
+    """Return at most *max_messages* messages, keeping the system prompt and
+    the most recent turns.
     """
-    working_messages = list(messages)
-    cumulative_state = TruncationState(original_count=len(messages), current_count=len(messages))
+    if len(messages) <= max_messages:
+        return messages
 
-    for attempt in range(MAX_RECOVERY_ATTEMPTS + 1):
-        try:
-            result = await invoke(working_messages, system)
-            cumulative_state.current_count = len(working_messages)
-            cumulative_state.truncated_count = len(messages) - len(working_messages)
-            cumulative_state.was_truncated = cumulative_state.truncated_count > 0
-            return result, cumulative_state
-
-        except Exception as exc:
-            if not _is_overflow_error(exc):
-                raise
-
-            if len(working_messages) <= MIN_MESSAGES_TO_KEEP:
-                logger.error(
-                    "Context overflow even with minimal message history (%d messages). "
-                    "Cannot truncate further.",
-                    len(working_messages),
-                )
-                raise
-
-            logger.warning(
-                "Context overflow on attempt %d/%d — truncating messages (currently %d).",
-                attempt + 1, MAX_RECOVERY_ATTEMPTS, len(working_messages),
-            )
-            # Reduce context window by 20% per retry to force more aggressive truncation
-            adjusted_window = int(context_window * (0.8 ** (attempt + 1)))
-            working_messages, state = truncate_messages(
-                working_messages,
-                system=system,
-                model=model,
-                context_window=adjusted_window,
-                output_reserve=output_reserve,
-            )
-            cumulative_state.truncation_rounds += state.truncation_rounds
-
-    # Should be unreachable
-    raise RuntimeError("Exceeded maximum truncation recovery attempts")
+    # Preserve leading system message if present.
+    if messages and messages[0].get("role") == "system":
+        return [messages[0]] + messages[-(max_messages - 1) :]
+    return messages[-max_messages:]

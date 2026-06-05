@@ -1,110 +1,79 @@
-"""Pre-flight payload validation and sanitisation."""
+"""Payload validation and trimming guards."""
 from __future__ import annotations
 
-import logging
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import HTTPException
-
-from .model_resolver import get_capabilities, resolve_model
-
-logger = logging.getLogger(__name__)
-
-# Hard limits
-_MAX_STOP_SEQUENCES = 4
-_MAX_TOOLS = 128
-_ABSOLUTE_MAX_TOKENS = 64_000
+from .tokenizer import count_message_tokens
 
 
-def guard_openai_request(req: Any) -> None:
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PayloadTrimStats:
+    """Statistics about a trim operation performed by :func:`trim_messages`."""
+    original_message_count: int = 0
+    trimmed_message_count: int = 0
+    original_token_estimate: int = 0
+    trimmed_token_estimate: int = 0
+    messages_removed: int = 0
+
+    @property
+    def was_trimmed(self) -> bool:
+        return self.messages_removed > 0
+
+
+# ---------------------------------------------------------------------------
+# Guards
+# ---------------------------------------------------------------------------
+
+def trim_messages(
+    messages: List[Dict[str, Any]],
+    max_input_tokens: int,
+    preserve_system: bool = True,
+) -> Tuple[List[Dict[str, Any]], PayloadTrimStats]:
+    """Trim *messages* so that the estimated token count is below *max_input_tokens*.
+
+    Returns the (possibly shortened) message list and a :class:`PayloadTrimStats`.
     """
-    Validate and sanitise an OpenAI ChatCompletionRequest in-place.
-    Raises HTTPException(422) for unrecoverable issues.
-    """
-    model_id = resolve_model(getattr(req, "model", "") or "")
-    cap = get_capabilities(model_id)
+    stats = PayloadTrimStats(
+        original_message_count=len(messages),
+        original_token_estimate=count_message_tokens(messages),
+    )
 
-    # --- thinking + tools mutual exclusion ---
-    thinking = getattr(req, "thinking", None)
-    tools = getattr(req, "tools", None)
-    if thinking and tools:
-        logger.warning(
-            "Request has both thinking and tools enabled; disabling tools per Kiro constraint."
-        )
-        req.tools = None
+    if stats.original_token_estimate <= max_input_tokens:
+        stats.trimmed_message_count = len(messages)
+        stats.trimmed_token_estimate = stats.original_token_estimate
+        return messages, stats
 
-    # --- thinking requires a supporting model ---
-    if thinking and not cap.supports_thinking:
-        logger.warning(
-            "Model %s does not support thinking; stripping thinking config.", model_id
-        )
-        req.thinking = None
+    # Separate system message if present
+    result: List[Dict[str, Any]] = []
+    system_msg: Optional[Dict[str, Any]] = None
+    rest = list(messages)
 
-    # --- max_tokens clamp ---
-    max_tokens = getattr(req, "max_tokens", None)
-    if max_tokens is None or max_tokens <= 0:
-        req.max_tokens = min(4_096, cap.max_output_tokens)
-    elif max_tokens > cap.max_output_tokens:
-        logger.warning(
-            "max_tokens %d exceeds model cap %d; clamping.", max_tokens, cap.max_output_tokens
-        )
-        req.max_tokens = cap.max_output_tokens
+    if preserve_system and rest and rest[0].get("role") == "system":
+        system_msg = rest.pop(0)
 
-    # --- stop sequences ---
-    stop = getattr(req, "stop", None)
-    if isinstance(stop, list) and len(stop) > _MAX_STOP_SEQUENCES:
-        logger.warning("Truncating stop sequences from %d to %d.", len(stop), _MAX_STOP_SEQUENCES)
-        req.stop = stop[:_MAX_STOP_SEQUENCES]
+    # Drop oldest non-system messages until we fit
+    while rest and count_message_tokens(
+        ([system_msg] if system_msg else []) + rest
+    ) > max_input_tokens:
+        rest.pop(0)
+        stats.messages_removed += 1
 
-    # --- tool count ---
-    if tools and len(tools) > _MAX_TOOLS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Too many tools: {len(tools)} exceeds maximum of {_MAX_TOOLS}.",
-        )
+    result = ([system_msg] if system_msg else []) + rest
+    stats.trimmed_message_count = len(result)
+    stats.trimmed_token_estimate = count_message_tokens(result)
+    return result, stats
 
 
-def guard_anthropic_request(req: Any) -> None:
-    """
-    Validate and sanitise an AnthropicRequest in-place.
-    Raises HTTPException(422) for unrecoverable issues.
-    """
-    model_id = resolve_model(getattr(req, "model", "") or "")
-    cap = get_capabilities(model_id)
-
-    thinking = getattr(req, "thinking", None)
-    tools = getattr(req, "tools", None)
-
-    if thinking and tools:
-        logger.warning(
-            "Anthropic request has both thinking and tools; disabling tools per Kiro constraint."
-        )
-        req.tools = None
-
-    if thinking and not cap.supports_thinking:
-        logger.warning(
-            "Model %s does not support thinking; stripping thinking config.", model_id
-        )
-        req.thinking = None
-
-    max_tokens = getattr(req, "max_tokens", None)
-    if not max_tokens or max_tokens <= 0:
-        req.max_tokens = min(4_096, cap.max_output_tokens)
-    elif max_tokens > cap.max_output_tokens:
-        logger.warning(
-            "max_tokens %d exceeds model cap %d; clamping.", max_tokens, cap.max_output_tokens
-        )
-        req.max_tokens = cap.max_output_tokens
-
-    stop_seqs = getattr(req, "stop_sequences", None)
-    if isinstance(stop_seqs, list) and len(stop_seqs) > _MAX_STOP_SEQUENCES:
-        logger.warning(
-            "Truncating stop_sequences from %d to %d.", len(stop_seqs), _MAX_STOP_SEQUENCES
-        )
-        req.stop_sequences = stop_seqs[:_MAX_STOP_SEQUENCES]
-
-    if tools and len(tools) > _MAX_TOOLS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Too many tools: {len(tools)} exceeds maximum of {_MAX_TOOLS}.",
-        )
+def validate_max_tokens(
+    requested: Optional[int],
+    hard_limit: int = 8192,
+) -> int:
+    """Clamp *requested* max_tokens to *hard_limit*."""
+    if requested is None:
+        return hard_limit
+    return min(requested, hard_limit)
