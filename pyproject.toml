@@ -25,6 +25,24 @@ dev = [
     "mypy>=1.10",
 ]
 
+# ---------------------------------------------------------------------------
+# Hatchling build config
+# The project is called "kiro-gateway" but the importable package lives in
+# the "kiro/" directory.  Without this section hatchling looks for a
+# "kiro_gateway/" directory (the normalised name) and fails.
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["kiro"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "kiro/",
+    "main.py",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
