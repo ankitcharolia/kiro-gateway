@@ -1,37 +1,43 @@
-"""Response body parsers for ACP / Kiro backend messages."""
+"""Unified request body parsers for OpenAI and Anthropic API surfaces."""
 from __future__ import annotations
-import json
-from typing import Any
+
+from typing import Any, Dict
+
+from fastapi import Request, HTTPException
+
+from .models_openai import ChatCompletionRequest
+from .models_anthropic import AnthropicRequest
 
 
-def parse_json_safe(raw: str | bytes) -> Any:
-    """Parse JSON without raising; returns None on failure."""
+async def parse_openai_request(request: Request) -> ChatCompletionRequest:
+    """Parse and validate an incoming OpenAI-compatible chat request."""
     try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
+    try:
+        return ChatCompletionRequest(**body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Request validation error: {exc}")
 
 
-def extract_text_content(blocks: list[dict[str, Any]]) -> str:
-    """Concatenate all text blocks from an Anthropic content list."""
-    parts: list[str] = []
-    for block in blocks:
-        if isinstance(block, dict) and block.get("type") == "text":
-            parts.append(block.get("text") or "")
-    return "".join(parts)
+async def parse_anthropic_request(request: Request) -> AnthropicRequest:
+    """Parse and validate an incoming Anthropic-compatible messages request."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
+    try:
+        return AnthropicRequest(**body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Request validation error: {exc}")
 
 
-def extract_tool_calls(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Extract tool_use blocks and normalise to OpenAI tool_call format."""
-    result: list[dict[str, Any]] = []
-    for block in blocks:
-        if isinstance(block, dict) and block.get("type") == "tool_use":
-            result.append({
-                "id": block.get("id", ""),
-                "type": "function",
-                "function": {
-                    "name": block.get("name", ""),
-                    "arguments": json.dumps(block.get("input", {})),
-                },
-            })
-    return result
+def extract_stream_flag(body: Dict[str, Any]) -> bool:
+    """Safely extract the stream flag from a raw request body dict."""
+    return bool(body.get("stream", False))
+
+
+def extract_model(body: Dict[str, Any], default: str = "claude-sonnet-4-5") -> str:
+    """Extract the model name from a raw request body dict."""
+    return str(body.get("model") or default)

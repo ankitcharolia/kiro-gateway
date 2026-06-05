@@ -1,71 +1,113 @@
-"""In-memory cache for truncation detection state."""
+"""Sliding-window message truncation with token-budget tracking."""
 from __future__ import annotations
-import hashlib
+
+import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
+
+from .tokenizer import count_tokens, count_messages_tokens
+
+logger = logging.getLogger(__name__)
+
+# Default context window budgets (input tokens)
+DEFAULT_CONTEXT_WINDOW = 180_000
+# Reserve this many tokens for the model's output
+OUTPUT_RESERVE = 8_192
+# Minimum messages to keep regardless of token budget (system + latest user)
+MIN_MESSAGES_TO_KEEP = 2
 
 
 @dataclass
-class ToolTruncationEntry:
-    tool_call_id: str
-    tool_name: str
-    truncation_info: dict[str, Any]
+class TruncationState:
+    """Tracks how many messages have been truncated and the current token budget."""
+    original_count: int = 0
+    current_count: int = 0
+    truncated_count: int = 0
+    input_tokens_estimated: int = 0
+    was_truncated: bool = False
+    truncation_rounds: int = 0
 
 
-@dataclass
-class ContentTruncationEntry:
-    message_hash: str
-    truncation_info: dict[str, Any] = field(default_factory=dict)
+def _message_to_text(msg: Any) -> str:
+    """Extract plain text from an ACP or dict message for token counting."""
+    content = getattr(msg, "content", None)
+    if content is None and isinstance(msg, dict):
+        content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(block.get("text", ""))
+            else:
+                parts.append(getattr(block, "text", "") or "")
+        return " ".join(parts)
+    return str(content or "")
 
 
-_tool_truncations: dict[str, ToolTruncationEntry] = {}
-_content_truncations: dict[str, ContentTruncationEntry] = {}
+def estimate_conversation_tokens(
+    messages: List[Any],
+    system: Optional[str] = None,
+    model: Optional[str] = None,
+) -> int:
+    """Estimate total token usage for a conversation."""
+    total = 0
+    if system:
+        total += count_tokens(system, model)
+    for msg in messages:
+        total += count_tokens(_message_to_text(msg), model) + 4
+    return total
 
 
-def _content_hash(content: str) -> str:
-    return hashlib.sha256(content[:500].encode()).hexdigest()[:16]
+def truncate_messages(
+    messages: List[Any],
+    system: Optional[str] = None,
+    model: Optional[str] = None,
+    context_window: int = DEFAULT_CONTEXT_WINDOW,
+    output_reserve: int = OUTPUT_RESERVE,
+) -> tuple[List[Any], TruncationState]:
+    """
+    Truncate messages to fit within the available context window.
 
+    Strategy:
+      1. Always keep the system prompt (passed separately).
+      2. Always keep the last message (latest user turn).
+      3. Remove oldest non-system messages first until the budget is met.
 
-def save_tool_truncation(
-    tool_call_id: str,
-    tool_name: str,
-    truncation_info: dict[str, Any],
-) -> None:
-    _tool_truncations[tool_call_id] = ToolTruncationEntry(
-        tool_call_id=tool_call_id,
-        tool_name=tool_name,
-        truncation_info=truncation_info,
-    )
+    Returns the (possibly-shortened) message list and a TruncationState.
+    """
+    budget = context_window - output_reserve
+    state = TruncationState(original_count=len(messages), current_count=len(messages))
 
+    system_tokens = count_tokens(system or "", model)
+    budget -= system_tokens
 
-def get_tool_truncation(tool_call_id: str) -> Optional[ToolTruncationEntry]:
-    return _tool_truncations.pop(tool_call_id, None)
+    if len(messages) <= MIN_MESSAGES_TO_KEEP:
+        state.input_tokens_estimated = estimate_conversation_tokens(messages, system, model)
+        return messages, state
 
+    working = list(messages)
+    rounds = 0
 
-def save_content_truncation(
-    content: str,
-    truncation_info: Optional[dict[str, Any]] = None,
-) -> str:
-    h = _content_hash(content)
-    _content_truncations[h] = ContentTruncationEntry(
-        message_hash=h,
-        truncation_info=truncation_info or {},
-    )
-    return h
+    while len(working) > MIN_MESSAGES_TO_KEEP:
+        estimated = sum(count_tokens(_message_to_text(m), model) + 4 for m in working)
+        if estimated <= budget:
+            break
+        # Drop oldest message (index 0 is earliest non-system turn)
+        working.pop(0)
+        rounds += 1
 
+    state.current_count = len(working)
+    state.truncated_count = len(messages) - len(working)
+    state.was_truncated = state.truncated_count > 0
+    state.truncation_rounds = rounds
+    state.input_tokens_estimated = sum(count_tokens(_message_to_text(m), model) + 4 for m in working)
 
-def get_content_truncation(content: str) -> Optional[ContentTruncationEntry]:
-    h = _content_hash(content)
-    return _content_truncations.get(h)
+    if state.was_truncated:
+        logger.info(
+            "Truncated %d messages (%d -> %d) to fit context window of %d tokens",
+            state.truncated_count, state.original_count, state.current_count, context_window,
+        )
 
-
-def clear_all() -> None:
-    _tool_truncations.clear()
-    _content_truncations.clear()
-
-
-def get_cache_stats() -> dict[str, int]:
-    return {
-        "tool_truncations": len(_tool_truncations),
-        "content_truncations": len(_content_truncations),
-    }
+    return working, state
