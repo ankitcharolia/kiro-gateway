@@ -7,6 +7,15 @@ from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+
+class ACPUsage(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+# ---------------------------------------------------------------------------
 # Tool-use / tool-result blocks
 # ---------------------------------------------------------------------------
 
@@ -58,7 +67,7 @@ class ACPMessage(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Request / Response
+# Request
 # ---------------------------------------------------------------------------
 
 class ACPRequest(BaseModel):
@@ -68,10 +77,23 @@ class ACPRequest(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# Response
+# ---------------------------------------------------------------------------
+
 class ACPResponse(BaseModel):
-    jsonrpc: Literal["2.0"] = "2.0"
-    id: Union[str, int]
-    result: Optional[Any] = None
+    """Full ACP message response (non-streaming)."""
+    id: str
+    type: Literal["message"] = "message"
+    role: Literal["assistant"] = "assistant"
+    model: str = ""
+    content: List[ACPContentBlock] = Field(default_factory=list)
+    stop_reason: Optional[str] = None
+    stop_sequence: Optional[str] = None
+    usage: ACPUsage = Field(default_factory=ACPUsage)
+
+    # JSON-RPC envelope fields (optional — present when wrapping a raw RPC response)
+    jsonrpc: Optional[str] = None
     error: Optional[Dict[str, Any]] = None
 
 

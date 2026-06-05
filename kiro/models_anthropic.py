@@ -60,6 +60,17 @@ AnthropicContentBlock = Union[
 
 
 # ---------------------------------------------------------------------------
+# Tool definition
+# ---------------------------------------------------------------------------
+
+class AnthropicTool(BaseModel):
+    """A tool definition as accepted by the Anthropic /v1/messages endpoint."""
+    name: str
+    description: Optional[str] = None
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # Message request / response
 # ---------------------------------------------------------------------------
 
@@ -73,7 +84,7 @@ class AnthropicRequest(BaseModel):
     messages: List[AnthropicMessage]
     max_tokens: int = 8192
     system: Optional[str] = None
-    tools: Optional[List[Dict[str, Any]]] = None
+    tools: Optional[List[AnthropicTool]] = None
     tool_choice: Optional[Any] = None
     stream: bool = False
     temperature: Optional[float] = None
