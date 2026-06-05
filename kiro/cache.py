@@ -1,42 +1,55 @@
-"""Simple TTL-aware in-memory cache."""
+"""Model info cache."""
 from __future__ import annotations
 import time
 from typing import Any, Optional
 
+from kiro.config import DEFAULT_MAX_INPUT_TOKENS
 
-class TTLCache:
-    """Thread-safe (GIL-protected) TTL cache."""
 
-    def __init__(self, ttl: float = 300.0) -> None:
-        self._ttl = ttl
-        self._store: dict[str, tuple[Any, float]] = {}
+class ModelInfoCache:
+    """In-memory cache for Kiro model metadata."""
 
-    def get(self, key: str) -> Optional[Any]:
-        entry = self._store.get(key)
+    def __init__(self, cache_ttl: float = 300.0) -> None:
+        self._cache_ttl = cache_ttl
+        self._store: dict[str, dict[str, Any]] = {}
+        self._last_update: Optional[float] = None
+
+    @property
+    def last_update_time(self) -> Optional[float]:
+        return self._last_update
+
+    @property
+    def size(self) -> int:
+        return len(self._store)
+
+    def is_empty(self) -> bool:
+        return len(self._store) == 0
+
+    async def update(self, models: list[dict[str, Any]]) -> None:
+        self._store = {m["modelId"]: m for m in models if "modelId" in m}
+        self._last_update = time.time()
+
+    def get(self, model_id: str) -> Optional[dict[str, Any]]:
+        return self._store.get(model_id)
+
+    def get_all(self) -> list[dict[str, Any]]:
+        return list(self._store.values())
+
+    def get_max_input_tokens(self, model_id: str) -> int:
+        entry = self._store.get(model_id)
         if entry is None:
-            return None
-        value, expires = entry
-        if time.monotonic() > expires:
-            del self._store[key]
-            return None
-        return value
+            return DEFAULT_MAX_INPUT_TOKENS
+        limits = entry.get("tokenLimits") or {}
+        val = limits.get("maxInputTokens")
+        if val is None:
+            return DEFAULT_MAX_INPUT_TOKENS
+        return int(val)
 
-    def set(self, key: str, value: Any, ttl: Optional[float] = None) -> None:
-        t = ttl if ttl is not None else self._ttl
-        self._store[key] = (value, time.monotonic() + t)
-
-    def delete(self, key: str) -> None:
-        self._store.pop(key, None)
+    def is_stale(self) -> bool:
+        if self._last_update is None:
+            return True
+        return (time.time() - self._last_update) > self._cache_ttl
 
     def clear(self) -> None:
         self._store.clear()
-
-    def __len__(self) -> int:
-        self._evict()
-        return len(self._store)
-
-    def _evict(self) -> None:
-        now = time.monotonic()
-        expired = [k for k, (_, exp) in self._store.items() if now > exp]
-        for k in expired:
-            del self._store[k]
+        self._last_update = None

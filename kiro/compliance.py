@@ -1,21 +1,11 @@
-# -*- coding: utf-8 -*-
-"""
-kiro-gateway compliance enforcement.
+"""kiro-gateway compliance enforcement."""
+from __future__ import annotations
 
-This module enforces single-account usage to ensure kiro-gateway
-operates within the spirit of the Kiro / AWS ToS:
-
-  - Only ONE credential source is permitted at a time.
-  - Multi-account failover is disabled: rate limit errors (429, 402, 403)
-    are surfaced directly to the caller, not retried on another account.
-  - This gateway is intended for personal, single-subscription use only.
-
-See: https://aws.amazon.com/aup/ and https://kiro.dev/terms
-"""
-
-import json
-from pathlib import Path
 from loguru import logger
+
+
+class ComplianceError(RuntimeError):
+    """Raised when a compliance policy is violated."""
 
 
 COMPLIANCE_BANNER = """
@@ -33,56 +23,25 @@ COMPLIANCE_BANNER = """
 """
 
 
-def validate_single_account_compliance(credentials_file: str) -> None:
+def validate_single_account_compliance(session_count: int = 1) -> None:
     """
-    Validates that credentials.json contains exactly ONE account entry.
-
-    Multi-account configurations are blocked because cycling through accounts
-    on rate-limit errors (429/402) circumvents AWS/Kiro quota enforcement,
-    which violates the Acceptable Use Policy.
+    Validate that at most one Kiro CLI session is in use.
 
     Args:
-        credentials_file: Path to credentials.json
+        session_count: Number of simultaneous active sessions / accounts.
 
     Raises:
-        RuntimeError: If more than one account entry is found.
+        ComplianceError: If session_count > 1.
     """
-    creds_path = Path(credentials_file)
-    if not creds_path.exists():
-        return  # No file yet — will be created from .env, single-entry by design
-
-    try:
-        with open(creds_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, IOError) as e:
-        logger.warning(f"Could not read {credentials_file} for compliance check: {e}")
-        return
-
-    if not isinstance(data, list):
-        return  # Unexpected format — let AccountManager handle it
-
-    if len(data) > 1:
-        logger.error("")
-        logger.error("=" * 64)
-        logger.error("  COMPLIANCE ERROR: Multi-account mode is disabled")
-        logger.error("=" * 64)
-        logger.error("")
-        logger.error(f"  Found {len(data)} account entries in {credentials_file}.")
-        logger.error("")
-        logger.error("  kiro-gateway is designed for SINGLE-ACCOUNT personal use only.")
-        logger.error("  Cycling through multiple accounts to bypass rate limits")
-        logger.error("  violates the AWS Acceptable Use Policy and Kiro ToS.")
-        logger.error("")
-        logger.error("  Fix: Keep only ONE entry in credentials.json.")
-        logger.error("")
-        logger.error("=" * 64)
-        raise RuntimeError(
-            "Compliance violation: credentials.json contains multiple accounts. "
-            "Only a single account entry is permitted. "
+    if session_count > 1:
+        raise ComplianceError(
+            f"Compliance violation: {session_count} simultaneous sessions detected. "
+            "Only a single Kiro account/session is permitted. "
+            "Multi-account credential pooling circumvents quota enforcement and "
+            "violates the AWS Acceptable Use Policy and Kiro ToS. "
             "See README.md for details."
         )
-
-    logger.debug("Compliance check passed: single account entry confirmed.")
+    logger.debug(f"Compliance check passed: session_count={session_count}")
 
 
 def log_compliance_banner() -> None:
