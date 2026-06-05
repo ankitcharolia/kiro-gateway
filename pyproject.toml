@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiro-gateway"
@@ -21,6 +21,7 @@ dev = [
     "pytest-cov>=5.0",
     "httpx>=0.27",
     "anyio[trio]>=4.3",
+    "tiktoken>=0.7",
 ]
 
 [tool.setuptools.packages.find]
