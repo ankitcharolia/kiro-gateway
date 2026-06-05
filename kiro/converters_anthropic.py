@@ -1,57 +1,143 @@
-"""Convert between internal and Anthropic wire formats."""
+"""Convert between Anthropic-compatible API shapes and ACP messages."""
 from __future__ import annotations
+
 import json
-import time
-from typing import Any
+import uuid
+from typing import Any, Dict, List, Optional, Union
 
-from kiro.converters_core import normalise_content
+from .acp_models import (
+    ACPRequest,
+    ACPMessage,
+    ACPResponse,
+    ACPTextBlock,
+    ACPToolUseBlock,
+    ACPToolResult,
+    ACPThinkingBlock,
+    ACPTool,
+)
+from .converters_core import (
+    ANTHROPIC_TO_ACP_ROLE,
+    map_role,
+    normalise_content,
+    convert_tools,
+    extract_thinking,
+    new_response_id,
+    now_ts,
+)
+from .models_anthropic import (
+    AnthropicRequest,
+    AnthropicResponse,
+    AnthropicUsage,
+    TextContentBlock,
+    ThinkingContentBlock,
+    RedactedThinkingContentBlock,
+    ToolUseContentBlock,
+    ToolResultContentBlock,
+)
 
 
-def anthropic_messages_to_acp(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text") or "")
-            content = "".join(parts)
-        result.append({"role": role, "content": content})
-    return result
+# ---------------------------------------------------------------------------
+# Anthropic request -> ACP request
+# ---------------------------------------------------------------------------
 
+def anthropic_request_to_acp(req: AnthropicRequest) -> ACPRequest:
+    acp_messages: List[ACPMessage] = []
+
+    for msg in req.messages:
+        blocks = normalise_content(msg.content)
+        acp_messages.append(
+            ACPMessage(
+                role=map_role(msg.role, ANTHROPIC_TO_ACP_ROLE),
+                content=blocks,
+            )
+        )
+
+    system_text: Optional[str] = None
+    if req.system:
+        if isinstance(req.system, str):
+            system_text = req.system
+        else:
+            system_text = " ".join(getattr(b, "text", str(b)) for b in req.system)
+
+    thinking = None
+    if req.thinking:
+        thinking = {"type": req.thinking.type, "budget_tokens": req.thinking.budget_tokens}
+
+    tool_choice = None
+    if req.tool_choice:
+        tc = req.tool_choice
+        tc_type = getattr(tc, "type", None)
+        tool_choice = {"type": tc_type}
+        if tc_type == "tool":
+            tool_choice["name"] = getattr(tc, "name", "")
+
+    return ACPRequest(
+        model=req.model,
+        messages=acp_messages,
+        system=system_text,
+        max_tokens=req.max_tokens,
+        temperature=req.temperature,
+        top_p=req.top_p,
+        stream=req.stream or False,
+        tools=convert_tools(req.tools),
+        stop_sequences=req.stop_sequences,
+        thinking=thinking,
+        tool_choice=tool_choice,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ACP response -> Anthropic response
+# ---------------------------------------------------------------------------
 
 def acp_response_to_anthropic(
-    acp_resp: dict[str, Any],
+    acp_resp: ACPResponse,
     model: str,
-    message_id: str,
-) -> dict[str, Any]:
-    content_text = acp_resp.get("content") or ""
-    tool_calls = acp_resp.get("tool_calls") or []
-    stop_reason = acp_resp.get("finish_reason") or "end_turn"
+    request_id: Optional[str] = None,
+) -> AnthropicResponse:
+    rid = request_id or new_response_id(prefix="msg")
+    content_blocks: List[Any] = []
 
-    content_blocks: list[dict[str, Any]] = [{"type": "text", "text": content_text}]
-    for tc in tool_calls:
-        fn = tc.get("function", {})
-        try:
-            inp = json.loads(fn.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            inp = {}
-        content_blocks.append({
-            "type": "tool_use",
-            "id": tc.get("id", ""),
-            "name": fn.get("name", ""),
-            "input": inp,
-        })
+    for block in (acp_resp.content or []):
+        btype = getattr(block, "type", None)
+        if btype == "text":
+            content_blocks.append(TextContentBlock(type="text", text=getattr(block, "text", "")))
+        elif btype == "thinking":
+            content_blocks.append(
+                ThinkingContentBlock(
+                    type="thinking",
+                    thinking=getattr(block, "thinking", ""),
+                    signature=getattr(block, "signature", None),
+                )
+            )
+        elif btype == "redacted_thinking":
+            content_blocks.append(
+                RedactedThinkingContentBlock(type="redacted_thinking", data=getattr(block, "data", ""))
+            )
+        elif btype == "tool_use":
+            content_blocks.append(
+                ToolUseContentBlock(
+                    type="tool_use",
+                    id=getattr(block, "id", str(uuid.uuid4())),
+                    name=getattr(block, "name", ""),
+                    input=getattr(block, "input", {}),
+                )
+            )
 
-    return {
-        "id": message_id,
-        "type": "message",
-        "role": "assistant",
-        "model": model,
-        "content": content_blocks,
-        "stop_reason": stop_reason,
-        "stop_sequence": None,
-        "usage": {"input_tokens": 0, "output_tokens": 0},
-    }
+    stop_reason = getattr(acp_resp, "stop_reason", None) or "end_turn"
+    usage = getattr(acp_resp, "usage", None)
+    anthropic_usage = AnthropicUsage(
+        input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
+        output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+    )
+
+    return AnthropicResponse(
+        id=rid,
+        type="message",
+        role="assistant",
+        model=model,
+        content=content_blocks,
+        stop_reason=stop_reason,
+        stop_sequence=getattr(acp_resp, "stop_sequence", None),
+        usage=anthropic_usage,
+    )
