@@ -1,7 +1,7 @@
 """Model ID resolution and capability helpers."""
 from __future__ import annotations
 
-import re
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
@@ -47,6 +47,16 @@ _CAPABILITIES: Dict[str, Dict[str, Any]] = {
 }
 
 
+@dataclass
+class ModelResolution:
+    """Result of resolving a model alias to a canonical model ID."""
+    model_id: str
+    provider: str
+    capabilities: Dict[str, Any] = field(default_factory=dict)
+    is_claude: bool = False
+    is_openai: bool = False
+
+
 def resolve_model(model_id: str) -> str:
     """Return the canonical model ID for *model_id*, passing through unknowns."""
     return _MODEL_MAP.get(model_id, model_id)
@@ -80,6 +90,21 @@ def get_capabilities(model_id: str) -> Dict[str, Any]:
 def get_model_id_for_kiro(model_id: str) -> str:
     """Alias for resolve_model — maps public IDs to Kiro-internal IDs."""
     return resolve_model(model_id)
+
+
+def resolve_model_full(model_id: str) -> ModelResolution:
+    """Resolve *model_id* and return a full ModelResolution object."""
+    canonical = resolve_model(model_id)
+    family = extract_model_family(canonical)
+    caps = get_capabilities(canonical)
+    provider = "anthropic" if family == "claude" else ("openai" if family == "gpt" else "unknown")
+    return ModelResolution(
+        model_id=canonical,
+        provider=provider,
+        capabilities=caps,
+        is_claude=(family == "claude"),
+        is_openai=(family == "gpt"),
+    )
 
 
 def list_models() -> List[str]:

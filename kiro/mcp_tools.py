@@ -52,6 +52,21 @@ def format_tool_result(
     }
 
 
+def extract_query_from_messages(messages: List[Dict[str, Any]]) -> str:
+    """Extract the last user message text as the search query."""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return " ".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+    return ""
+
+
 async def call_mcp_tool(
     endpoint: str,
     tool_name: str,

@@ -25,6 +25,13 @@ class FunctionDefinition(BaseModel):
     parameters: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolFunction(BaseModel):
+    """Function spec inside a tool definition."""
+    name: str
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
 class OpenAITool(BaseModel):
     type: Literal["function"] = "function"
     function: FunctionDefinition
@@ -91,6 +98,16 @@ class OpenAIChoice(BaseModel):
 
 
 class OpenAIResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: List[OpenAIChoice]
+    usage: OpenAIUsage = Field(default_factory=OpenAIUsage)
+
+
+class ChatCompletionResponse(BaseModel):
+    """Alias for OpenAIResponse — used by tests and converters."""
     id: str
     object: str = "chat.completion"
     created: int

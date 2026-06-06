@@ -63,7 +63,28 @@ class ThinkingBlock(BaseModel):
 ThinkingContentBlock = ThinkingBlock
 
 
-ContentBlock = Union[TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock]
+class RedactedThinkingBlock(BaseModel):
+    """Redacted thinking block — returned when thinking is hidden by Anthropic."""
+    type: Literal["redacted_thinking"] = "redacted_thinking"
+    data: str
+
+
+RedactedThinkingContentBlock = RedactedThinkingBlock
+
+
+class ToolReferenceBlock(BaseModel):
+    """Claude Code deferred tool reference block."""
+    type: Literal["tool_reference"] = "tool_reference"
+    tool_name: str
+
+
+ToolReferenceContentBlock = ToolReferenceBlock
+
+
+ContentBlock = Union[
+    TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock,
+    ThinkingBlock, RedactedThinkingBlock, ToolReferenceBlock,
+]
 
 
 class ThinkingConfig(BaseModel):

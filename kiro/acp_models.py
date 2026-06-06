@@ -48,6 +48,9 @@ ACPToolResult = ACPToolResultBlock
 ACPTool = ACPToolUseBlock
 ACPToolCall = ACPToolUseBlock        # alias expected by converters_core
 
+# ToolCall alias expected by shim_service and tests
+ToolCall = ACPToolUseBlock
+
 ContentBlock = Union[
     ACPTextBlock, ACPImageBlock, ACPToolUseBlock,
     ACPToolResultBlock, ACPThinkingBlock,

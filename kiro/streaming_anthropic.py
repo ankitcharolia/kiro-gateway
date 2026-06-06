@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import json
 import secrets
-from typing import Any, AsyncIterator, Callable, Dict, Iterator, Optional
+from typing import Any, AsyncIterator, AsyncGenerator, Callable, Dict, Iterator, Optional
 
 from .streaming_core import FirstTokenTimeoutError, KiroEvent, StreamResult, stream_with_first_token_retry
 
@@ -137,6 +137,31 @@ async def stream_kiro_to_anthropic(
     yield build_content_block_stop(idx)
     yield build_message_delta("end_turn", 0)
     yield build_message_stop()
+
+
+async def stream_with_first_token_retry_anthropic(
+    request_fn: Callable[[], AsyncGenerator[str, None]],
+    model: str,
+    max_retries: int = 2,
+    message_id: Optional[str] = None,
+) -> AsyncGenerator[str, None]:
+    """Retry *request_fn* if no content arrives before the first-token timeout.
+
+    Wraps *request_fn* (an async generator factory) and yields Anthropic SSE
+    strings, retrying up to *max_retries* times on FirstTokenTimeoutError.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            async for chunk in request_fn():
+                yield chunk
+            return
+        except FirstTokenTimeoutError as exc:
+            last_exc = exc
+            continue
+    # Re-raise after all retries exhausted
+    if last_exc is not None:
+        raise last_exc
 
 
 async def collect_anthropic_response(

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 def find_matching_brace(text: str, start: int = 0) -> int:
@@ -96,6 +96,22 @@ def parse_bracket_tool_calls(text: str) -> List[Dict[str, Any]]:
         except json.JSONDecodeError:
             pass
     return results
+
+
+def deduplicate_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Remove duplicate tool calls, preserving the first occurrence of each (id, name) pair."""
+    seen: Set[Tuple[Optional[str], Optional[str]]] = set()
+    result: List[Dict[str, Any]] = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        key: Tuple[Optional[str], Optional[str]] = (
+            tc.get("id"),
+            fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None),
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(tc)
+    return result
 
 
 class AwsEventStreamParser:
