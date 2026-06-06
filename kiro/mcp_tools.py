@@ -41,3 +41,26 @@ def extract_tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
 def has_tool_calls(message: Dict[str, Any]) -> bool:
     """Return True if the message contains at least one tool_use block."""
     return bool(extract_tool_calls(message))
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat addition expected by tests
+# ---------------------------------------------------------------------------
+
+async def call_kiro_mcp_api(
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    *,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """Async stub for calling a Kiro MCP API endpoint.
+
+    In production this performs an HTTP call to the Kiro MCP server.
+    In unit-test environments it is mocked, so this stub just raises
+    ``NotImplementedError`` when invoked without a mock in place.
+    """
+    raise NotImplementedError(
+        "call_kiro_mcp_api must be mocked in tests or configured with a real base_url."
+    )
