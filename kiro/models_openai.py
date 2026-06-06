@@ -1,105 +1,105 @@
-"""OpenAI-compatible Pydantic models for /v1/models and related endpoints."""
+"""Pydantic models for the OpenAI-compatible API layer."""
 from __future__ import annotations
 
-import time
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
-# Chat message
+# Content blocks
 # ---------------------------------------------------------------------------
 
-class Message(BaseModel):
-    """A single chat message (user / assistant / system / tool)."""
-    role: str
-    content: Optional[Union[str, List[Dict[str, Any]]]] = None
-    name: Optional[str] = None
-    tool_call_id: Optional[str] = None
-    tool_calls: Optional[List["ToolCall"]] = None
+class TextContent(BaseModel):
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ImageUrlContent(BaseModel):
+    type: Literal["image_url"] = "image_url"
+    image_url: Dict[str, str]  # {"url": "..."}
+
+
+ContentPart = Union[TextContent, ImageUrlContent, Dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
-# Tool definitions
+# Tool / function definitions
 # ---------------------------------------------------------------------------
 
 class FunctionDefinition(BaseModel):
     name: str
     description: Optional[str] = None
-    parameters: Optional[Dict[str, Any]] = None
+    parameters: Dict[str, Any] = Field(default_factory=dict)
 
 
-class Tool(BaseModel):
+class OpenAITool(BaseModel):
     type: Literal["function"] = "function"
     function: FunctionDefinition
-
-
-class FunctionCall(BaseModel):
-    name: str
-    arguments: str  # JSON string
 
 
 class ToolCall(BaseModel):
     id: str
     type: Literal["function"] = "function"
-    function: FunctionCall
+    function: Dict[str, Any]  # {name, arguments}
 
 
 # ---------------------------------------------------------------------------
-# Request
+# Messages
 # ---------------------------------------------------------------------------
 
-class ChatCompletionRequest(BaseModel):
+class OpenAIMessage(BaseModel):
+    role: Literal["system", "user", "assistant", "tool", "function"]
+    content: Optional[Union[str, List[ContentPart]]] = None
+    name: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None
+    tool_call_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Request / response
+# ---------------------------------------------------------------------------
+
+class OpenAIRequest(BaseModel):
     model: str
-    messages: List[Message]
+    messages: List[OpenAIMessage]
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
-    stream: bool = False
-    tools: Optional[List[Tool]] = None
-    tool_choice: Optional[Any] = None
-    system: Optional[str] = None
-    thinking: Optional[Dict[str, Any]] = None
+    stream: Optional[bool] = None
+    tools: Optional[List[OpenAITool]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+    stop: Optional[Union[str, List[str]]] = None
+    n: Optional[int] = None
+    top_p: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    user: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
-# ---------------------------------------------------------------------------
-# Response
-# ---------------------------------------------------------------------------
-
-class ChatCompletionUsage(BaseModel):
+class OpenAIUsage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
 
 
-class ChatCompletionChoice(BaseModel):
+class OpenAIChoice(BaseModel):
     index: int = 0
-    message: Message
+    message: OpenAIMessage
     finish_reason: Optional[str] = None
 
 
-class ChatCompletionResponse(BaseModel):
+class OpenAIResponse(BaseModel):
     id: str
-    object: Literal["chat.completion"] = "chat.completion"
-    created: int = Field(default_factory=lambda: int(time.time()))
+    object: str = "chat.completion"
+    created: int
     model: str
-    choices: List[ChatCompletionChoice]
-    usage: ChatCompletionUsage = Field(default_factory=ChatCompletionUsage)
+    choices: List[OpenAIChoice]
+    usage: OpenAIUsage = Field(default_factory=OpenAIUsage)
 
 
 # ---------------------------------------------------------------------------
-# Models list
+# Backward-compat alias expected by tests
 # ---------------------------------------------------------------------------
 
-class ModelCard(BaseModel):
-    """A single model entry in the /v1/models list."""
-    id: str
-    object: Literal["model"] = "model"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    owned_by: str = "kiro"
-
-
-class ModelList(BaseModel):
-    """Response body for GET /v1/models."""
-    object: Literal["list"] = "list"
-    data: List[ModelCard] = Field(default_factory=list)
+OpenAIModel = OpenAIRequest
