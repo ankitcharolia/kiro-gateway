@@ -34,6 +34,10 @@ class TextBlock(BaseModel):
     text: str
 
 
+# Alias expected by conftest and tests
+TextContentBlock = TextBlock
+
+
 class ImageBlock(BaseModel):
     type: Literal["image"] = "image"
     source: Union[UrlImageSource, Base64ImageSource, Dict[str, Any]]
@@ -44,6 +48,10 @@ class ToolUseBlock(BaseModel):
     id: str
     name: str
     input: Dict[str, Any] = Field(default_factory=dict)
+
+
+# Alias expected by conftest and tests
+ToolUseContentBlock = ToolUseBlock
 
 
 class ToolResultBlock(BaseModel):
