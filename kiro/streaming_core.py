@@ -5,12 +5,21 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 
+KiroEvent = Dict[str, Any]
+
+
 # ---------------------------------------------------------------------------
-# Type aliases
+# Exceptions
 # ---------------------------------------------------------------------------
 
-# A single ACP stream event represented as a plain dict.
-KiroEvent = Dict[str, Any]
+class FirstTokenTimeoutError(TimeoutError):
+    """Raised when no token is received within the first-token timeout window."""
+
+    def __init__(self, timeout_seconds: float) -> None:
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"No token received within {timeout_seconds}s first-token timeout."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -18,10 +27,6 @@ KiroEvent = Dict[str, Any]
 # ---------------------------------------------------------------------------
 
 def parse_sse_line(line: str) -> Optional[KiroEvent]:
-    """Parse a raw SSE ``data:`` line into a KiroEvent dict.
-
-    Returns *None* for keep-alive lines and ``[DONE]`` sentinels.
-    """
     line = line.strip()
     if not line or line == "data: [DONE]":
         return None
@@ -35,7 +40,6 @@ def parse_sse_line(line: str) -> Optional[KiroEvent]:
 
 
 def iter_sse_events(raw: str) -> Iterator[KiroEvent]:
-    """Yield parsed KiroEvent dicts from a multi-line SSE string."""
     for line in raw.splitlines():
         event = parse_sse_line(line)
         if event is not None:
@@ -43,7 +47,6 @@ def iter_sse_events(raw: str) -> Iterator[KiroEvent]:
 
 
 async def aiter_sse_events(stream: AsyncIterator[bytes]) -> AsyncIterator[KiroEvent]:
-    """Async variant — yield KiroEvent dicts from a byte-stream."""
     async for chunk in stream:
         for line in chunk.decode("utf-8", errors="replace").splitlines():
             event = parse_sse_line(line)
@@ -51,13 +54,8 @@ async def aiter_sse_events(stream: AsyncIterator[bytes]) -> AsyncIterator[KiroEv
                 yield event
 
 
-# ---------------------------------------------------------------------------
-# Backward-compat addition expected by tests
-# ---------------------------------------------------------------------------
-
 @dataclass
 class StreamResult:
-    """Aggregated result of consuming a complete ACP stream."""
     events: List[KiroEvent] = field(default_factory=list)
     text: str = ""
     stop_reason: str = "end_turn"
