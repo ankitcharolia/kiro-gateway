@@ -53,6 +53,9 @@ ContentBlock = Union[
     ACPToolResultBlock, ACPThinkingBlock,
 ]
 
+# ACPContentBlock — top-level Union used by converters_core and tests
+ACPContentBlock = ContentBlock
+
 
 # ---------------------------------------------------------------------------
 # Messages
@@ -72,6 +75,14 @@ ACPMessage = PromptMessage
 # ---------------------------------------------------------------------------
 
 class ACPToolDefinition(BaseModel):
+    name: str
+    description: Optional[str] = None
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+
+# ACPTool is also used as a tool *definition* in converters_core
+# Re-export the definition class under the expected name as well.
+class ACPToolDef(BaseModel):
+    """Tool definition model (input schema variant)."""
     name: str
     description: Optional[str] = None
     input_schema: Dict[str, Any] = Field(default_factory=dict)
@@ -104,6 +115,65 @@ class JsonRpcError(BaseModel):
 
 # Notification is a request that expects no response (no id required in reply)
 JsonRpcNotification = JsonRpcRequest
+
+
+# ---------------------------------------------------------------------------
+# ACP session bootstrap models (used by acp_client)
+# ---------------------------------------------------------------------------
+
+class GatewayCapabilities(BaseModel):
+    """Capabilities the gateway advertises during session initialisation."""
+    readFile: bool = True
+    writeFile: bool = True
+    runCommand: bool = False
+    listDirectory: bool = True
+
+
+class SessionInitParams(BaseModel):
+    capabilities: GatewayCapabilities = Field(default_factory=GatewayCapabilities)
+
+
+class SessionInitResult(BaseModel):
+    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    protocol_version: str = "1.0"
+
+
+class PromptParams(BaseModel):
+    session_id: str
+    messages: List[PromptMessage] = Field(default_factory=list)
+    model: Optional[str] = None
+    stream: bool = False
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    tools: Optional[List[ACPToolDefinition]] = None
+
+
+class ProgressParams(BaseModel):
+    """ACP progress notification payload."""
+    session_id: str
+    type: str  # e.g. 'text_delta', 'done', 'error'
+    data: Optional[Dict[str, Any]] = None
+
+
+# Capability request param models
+class ReadFileParams(BaseModel):
+    path: str
+
+
+class WriteFileParams(BaseModel):
+    path: str
+    content: str
+
+
+class RunCommandParams(BaseModel):
+    command: str
+    args: List[str] = Field(default_factory=list)
+    cwd: Optional[str] = None
+
+
+class ListDirectoryParams(BaseModel):
+    path: str
+    recursive: bool = False
 
 
 # ---------------------------------------------------------------------------

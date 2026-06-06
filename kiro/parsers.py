@@ -90,6 +90,37 @@ def parse_json_from_response(text: str) -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Bracket-style tool-call parser
+# e.g.  <tool_call>{"name": "foo", "arguments": {...}}</tool_call>
+# or    [TOOL_CALL]{"name": "foo", "arguments": {...}}[/TOOL_CALL]
+# ---------------------------------------------------------------------------
+
+_BRACKET_TOOL_RE = re.compile(
+    r"(?:<tool_call>|\[TOOL_CALL\])\s*(?P<json>\{.*?\})\s*(?:</tool_call>|\[/TOOL_CALL\])",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def parse_bracket_tool_calls(text: str) -> List[Dict[str, Any]]:
+    """Extract tool-call dicts embedded in bracket/XML-style tags.
+
+    Handles both ``<tool_call>{...}</tool_call>`` and
+    ``[TOOL_CALL]{...}[/TOOL_CALL]`` conventions.
+
+    Returns a list of parsed dicts; entries that are not valid JSON are
+    silently skipped.
+    """
+    results: List[Dict[str, Any]] = []
+    for m in _BRACKET_TOOL_RE.finditer(text):
+        raw = m.group("json")
+        try:
+            results.append(json.loads(raw))
+        except json.JSONDecodeError:
+            pass
+    return results
+
+
+# ---------------------------------------------------------------------------
 # AWS Event Stream binary frame parser
 # ---------------------------------------------------------------------------
 

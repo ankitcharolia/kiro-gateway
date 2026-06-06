@@ -95,3 +95,25 @@ def is_claude_model(model_id: str) -> bool:
 def is_openai_model(model_id: str) -> bool:
     """Return True if *model_id* is an OpenAI model."""
     return extract_model_family(model_id) == "gpt"
+
+
+class ModelResolver:
+    """Stateful resolver — wraps the module-level helpers for DI / mocking."""
+
+    def __init__(self, model_map: Optional[Dict[str, str]] = None) -> None:
+        self._map: Dict[str, str] = model_map if model_map is not None else dict(_MODEL_MAP)
+
+    def resolve(self, model_id: str) -> str:
+        return self._map.get(model_id, model_id)
+
+    def get_capabilities(self, model_id: str) -> Dict[str, Any]:
+        return get_capabilities(self.resolve(model_id))
+
+    def list_models(self) -> List[str]:
+        return sorted(self._map.keys())
+
+    def is_claude(self, model_id: str) -> bool:
+        return is_claude_model(self.resolve(model_id))
+
+    def is_openai(self, model_id: str) -> bool:
+        return is_openai_model(self.resolve(model_id))

@@ -67,8 +67,9 @@ class Message(BaseModel):
     tool_call_id: Optional[str] = None
 
 
-# Alias for backwards compat
+# Aliases for backwards compat
 OpenAIMessage = Message
+ChatMessage = Message
 
 
 # ---------------------------------------------------------------------------

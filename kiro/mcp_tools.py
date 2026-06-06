@@ -91,3 +91,31 @@ def list_mcp_tools(
     tools: List[Dict[str, Any]],
 ) -> List[str]:
     return [t.get("name", "") for t in tools if t.get("name")]
+
+
+def generate_search_summary(
+    results: List[Dict[str, Any]],
+    max_results: int = 5,
+) -> str:
+    """Format a list of MCP search-result dicts into a human-readable summary.
+
+    Each result dict is expected to have at least a ``title`` and optionally
+    a ``snippet`` / ``url`` key.  Unknown shapes are rendered as JSON.
+    """
+    if not results:
+        return "No results found."
+    lines: List[str] = []
+    for i, r in enumerate(results[:max_results], 1):
+        if isinstance(r, dict):
+            title = r.get("title") or r.get("name") or "(untitled)"
+            snippet = r.get("snippet") or r.get("description") or ""
+            url = r.get("url") or r.get("link") or ""
+            parts = [f"{i}. {title}"]
+            if snippet:
+                parts.append(f"   {snippet}")
+            if url:
+                parts.append(f"   {url}")
+            lines.append("\n".join(parts))
+        else:
+            lines.append(f"{i}. {r}")
+    return "\n\n".join(lines)

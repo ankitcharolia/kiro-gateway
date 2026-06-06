@@ -7,7 +7,7 @@ import json
 import secrets
 from typing import Any, AsyncIterator, Callable, Dict, Iterator, Optional
 
-from .streaming_core import FirstTokenTimeoutError, KiroEvent, StreamResult
+from .streaming_core import FirstTokenTimeoutError, KiroEvent, StreamResult, stream_with_first_token_retry
 
 
 def format_sse_event(event: str, data: Any) -> str:
@@ -137,6 +137,31 @@ async def stream_kiro_to_anthropic(
     yield build_content_block_stop(idx)
     yield build_message_delta("end_turn", 0)
     yield build_message_stop()
+
+
+async def stream_with_first_token_retry_anthropic(
+    stream_factory: Callable[[], AsyncIterator[KiroEvent]],
+    model: str,
+    first_token_timeout: float = 30.0,
+    max_retries: int = 2,
+    message_id: Optional[str] = None,
+) -> AsyncIterator[str]:
+    """Yield Anthropic SSE strings from *stream_factory* with first-token retry.
+
+    Wraps :func:`stream_with_first_token_retry` and pipes the events through
+    :func:`stream_kiro_to_anthropic`.
+    """
+    async def _gen() -> AsyncIterator[str]:
+        retry_stream = stream_with_first_token_retry(
+            stream_factory,
+            first_token_timeout=first_token_timeout,
+            max_retries=max_retries,
+        )
+        async for chunk in stream_kiro_to_anthropic(retry_stream, model, message_id):
+            yield chunk
+
+    async for chunk in _gen():
+        yield chunk
 
 
 async def collect_anthropic_response(

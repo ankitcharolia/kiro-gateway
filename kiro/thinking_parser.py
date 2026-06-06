@@ -1,9 +1,22 @@
 """Utilities for parsing and handling extended-thinking blocks."""
 from __future__ import annotations
 
+import enum
 import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# ParserState — used by streaming thinking parsers
+# ---------------------------------------------------------------------------
+
+class ParserState(enum.Enum):
+    """State machine states for the streaming thinking-block parser."""
+    IDLE = "idle"
+    IN_THINKING = "in_thinking"
+    IN_TEXT = "in_text"
+    DONE = "done"
 
 
 @dataclass
@@ -74,12 +87,14 @@ class ThinkingParser:
         self._blocks: List[ThinkingBlock] = []
         self._text: List[str] = []
         self._raw: List[Dict[str, Any]] = []
+        self.state: ParserState = ParserState.IDLE
 
     def feed_block(self, block: Dict[str, Any]) -> None:
         """Feed a single content block dict into the parser."""
         self._raw.append(block)
         btype = block.get("type", "")
         if btype == "thinking":
+            self.state = ParserState.IN_THINKING
             self._blocks.append(
                 ThinkingBlock(
                     thinking=block.get("thinking", ""),
@@ -87,6 +102,7 @@ class ThinkingParser:
                 )
             )
         elif btype == "text":
+            self.state = ParserState.IN_TEXT
             self._text.append(block.get("text", ""))
 
     def result(self) -> ThinkingParseResult:
@@ -100,3 +116,4 @@ class ThinkingParser:
         self._blocks.clear()
         self._text.clear()
         self._raw.clear()
+        self.state = ParserState.IDLE

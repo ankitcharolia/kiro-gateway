@@ -7,7 +7,7 @@ import secrets
 import time
 from typing import Any, AsyncIterator, Callable, Dict, Iterator, Optional
 
-from .streaming_core import FirstTokenTimeoutError, KiroEvent
+from .streaming_core import FirstTokenTimeoutError, KiroEvent, stream_with_first_token_retry
 
 
 def generate_chunk_id(prefix: str = "chatcmpl") -> str:

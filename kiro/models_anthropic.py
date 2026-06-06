@@ -61,6 +61,10 @@ class ToolResultBlock(BaseModel):
     is_error: bool = False
 
 
+# Alias expected by tests
+ToolResultContentBlock = ToolResultBlock
+
+
 class ThinkingBlock(BaseModel):
     type: Literal["thinking"] = "thinking"
     thinking: str
