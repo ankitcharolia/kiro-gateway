@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # Canonical model list
@@ -65,3 +65,35 @@ def resolve_model(model_id: Optional[str]) -> str:
 
 # Backward-compat alias
 normalize_model_name = resolve_model
+
+
+# ---------------------------------------------------------------------------
+# Capability map
+# ---------------------------------------------------------------------------
+
+_MODEL_CAPABILITIES: Dict[str, Dict] = {
+    m: {
+        "context_window": 200_000,
+        "max_output_tokens": 8192,
+        "supports_tools": True,
+        "supports_vision": True,
+        "supports_thinking": m in ("claude-sonnet-4-5", "claude-3-7-sonnet"),
+    }
+    for m in KIRO_MODELS
+}
+
+
+def get_capabilities(model_id: str) -> Dict:
+    """Return the capability dict for *model_id* (resolved first)."""
+    canonical = resolve_model(model_id)
+    return _MODEL_CAPABILITIES.get(canonical, _MODEL_CAPABILITIES[DEFAULT_MODEL])
+
+
+def list_models() -> List[str]:
+    """Return the list of canonical Kiro model IDs."""
+    return list(KIRO_MODELS)
+
+
+def get_model_id_for_kiro(model_id: str) -> str:
+    """Alias for resolve_model — returns the Kiro-internal model string."""
+    return resolve_model(model_id)
