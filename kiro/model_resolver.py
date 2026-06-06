@@ -52,6 +52,11 @@ def resolve_model(model_id: str) -> str:
     return _MODEL_MAP.get(model_id, model_id)
 
 
+def normalize_model_name(model_id: str) -> str:
+    """Normalize *model_id* to its canonical form. Alias for resolve_model."""
+    return resolve_model(model_id)
+
+
 def extract_model_family(model_id: str) -> str:
     """Return a short family name for *model_id* (e.g. 'claude', 'gpt')."""
     lower = model_id.lower()
@@ -73,7 +78,7 @@ def get_capabilities(model_id: str) -> Dict[str, Any]:
 
 
 def get_model_id_for_kiro(model_id: str) -> str:
-    """Alias for :func:`resolve_model` — maps public IDs to Kiro-internal IDs."""
+    """Alias for resolve_model — maps public IDs to Kiro-internal IDs."""
     return resolve_model(model_id)
 
 

@@ -118,3 +118,17 @@ class OpenAIResponse(BaseModel):
     model: str
     choices: List[OpenAIChoice]
     usage: OpenAIUsage = Field(default_factory=OpenAIUsage)
+
+
+class ModelData(BaseModel):
+    """A single model entry in the /v1/models listing."""
+    id: str
+    object: str = "model"
+    created: int = 0
+    owned_by: str = "kiro"
+
+
+class ModelList(BaseModel):
+    """Response body for GET /v1/models."""
+    object: str = "list"
+    data: List[ModelData] = Field(default_factory=list)

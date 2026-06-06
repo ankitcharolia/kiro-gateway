@@ -87,3 +87,44 @@ def parse_json_from_response(text: str) -> Optional[Dict[str, Any]]:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         return extract_first_json(cleaned)
+
+
+# ---------------------------------------------------------------------------
+# AWS Event Stream binary frame parser
+# ---------------------------------------------------------------------------
+
+class AwsEventStreamParser:
+    """Minimal AWS event-stream binary frame parser.
+
+    Frames have a 12-byte prelude (total_len:4, headers_len:4, crc:4)
+    followed by headers, payload, and a 4-byte trailing CRC.
+    We extract the JSON payload bytes between prelude+headers and trailing CRC.
+    """
+
+    def __init__(self) -> None:
+        self._buf = b""
+
+    def feed(self, data: bytes) -> List[Dict[str, Any]]:
+        """Feed raw bytes and return any fully-parsed event dicts."""
+        self._buf += data
+        events: List[Dict[str, Any]] = []
+        while len(self._buf) >= 12:
+            total_len = int.from_bytes(self._buf[:4], "big")
+            headers_len = int.from_bytes(self._buf[4:8], "big")
+            if len(self._buf) < total_len:
+                break
+            frame = self._buf[:total_len]
+            self._buf = self._buf[total_len:]
+            payload_start = 12 + headers_len
+            payload_end = total_len - 4
+            if payload_start >= payload_end:
+                continue
+            raw_payload = frame[payload_start:payload_end]
+            try:
+                events.append(json.loads(raw_payload))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+        return events
+
+    def reset(self) -> None:
+        self._buf = b""

@@ -34,7 +34,7 @@ class TextBlock(BaseModel):
     text: str
 
 
-# Alias expected by conftest and tests
+# Aliases expected by conftest and tests
 TextContentBlock = TextBlock
 
 
@@ -65,6 +65,10 @@ class ThinkingBlock(BaseModel):
     type: Literal["thinking"] = "thinking"
     thinking: str
     signature: Optional[str] = None
+
+
+# Alias expected by tests
+ThinkingContentBlock = ThinkingBlock
 
 
 ContentBlock = Union[TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock]

@@ -65,3 +65,38 @@ def strip_thinking_blocks(
     clean = [b for b in content if isinstance(b, dict) and b.get("type") != "thinking"]
     thinking_text = parsed.combined_thinking or None
     return clean, thinking_text
+
+
+class ThinkingParser:
+    """Stateful parser that accumulates thinking blocks from streaming content."""
+
+    def __init__(self) -> None:
+        self._blocks: List[ThinkingBlock] = []
+        self._text: List[str] = []
+        self._raw: List[Dict[str, Any]] = []
+
+    def feed_block(self, block: Dict[str, Any]) -> None:
+        """Feed a single content block dict into the parser."""
+        self._raw.append(block)
+        btype = block.get("type", "")
+        if btype == "thinking":
+            self._blocks.append(
+                ThinkingBlock(
+                    thinking=block.get("thinking", ""),
+                    signature=block.get("signature"),
+                )
+            )
+        elif btype == "text":
+            self._text.append(block.get("text", ""))
+
+    def result(self) -> ThinkingParseResult:
+        """Return the accumulated :class:`ThinkingParseResult`."""
+        r = ThinkingParseResult(raw_content=list(self._raw))
+        r.thinking_blocks = list(self._blocks)
+        r.text_blocks = list(self._text)
+        return r
+
+    def reset(self) -> None:
+        self._blocks.clear()
+        self._text.clear()
+        self._raw.clear()

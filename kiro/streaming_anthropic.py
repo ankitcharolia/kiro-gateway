@@ -1,22 +1,18 @@
 """Streaming helpers — Anthropic SSE format."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import secrets
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Iterator, Optional
+
+from .streaming_core import FirstTokenTimeoutError, KiroEvent, StreamResult
 
 
 def format_sse_event(event: str, data: Any) -> str:
-    """Format a single Server-Sent Event string.
-
-    ``event`` is the event name; ``data`` is any JSON-serialisable value.
-    """
+    """Format a single Server-Sent Event string."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-
-# Backward-compat alias
-_sse_line = format_sse_event
 
 
 def generate_message_id(prefix: str = "msg") -> str:
@@ -24,6 +20,7 @@ def generate_message_id(prefix: str = "msg") -> str:
 
 
 def generate_thinking_signature(thinking_text: str) -> str:
+    """Generate a deterministic signature for a thinking block."""
     return hashlib.sha256(thinking_text.encode()).hexdigest()[:32]
 
 
@@ -74,10 +71,7 @@ def build_content_block_stop(index: int) -> str:
     )
 
 
-def build_message_delta(
-    stop_reason: str = "end_turn",
-    output_tokens: int = 0,
-) -> str:
+def build_message_delta(stop_reason: str = "end_turn", output_tokens: int = 0) -> str:
     return format_sse_event(
         "message_delta",
         {
@@ -97,6 +91,7 @@ def acp_stream_to_anthropic_events(
     model: str,
     message_id: Optional[str] = None,
 ) -> Iterator[str]:
+    """Convert an ACP event iterator to Anthropic SSE strings."""
     _id = message_id or generate_message_id()
     yield build_message_start(model, _id)
     idx = 0
@@ -120,3 +115,52 @@ def acp_stream_to_anthropic_events(
     yield build_content_block_stop(idx)
     yield build_message_delta("end_turn", 0)
     yield build_message_stop()
+
+
+async def stream_kiro_to_anthropic(
+    kiro_event_stream: AsyncIterator[KiroEvent],
+    model: str,
+    message_id: Optional[str] = None,
+) -> AsyncIterator[str]:
+    """Yield Anthropic-format SSE strings from an async KiroEvent stream."""
+    _id = message_id or generate_message_id()
+    yield build_message_start(model, _id)
+    idx = 0
+    yield build_content_block_start(idx, "text")
+
+    async for evt in kiro_event_stream:
+        if evt.type == "content" and evt.content:
+            yield build_content_block_delta(idx, evt.content)
+        elif evt.type == "stop":
+            break
+
+    yield build_content_block_stop(idx)
+    yield build_message_delta("end_turn", 0)
+    yield build_message_stop()
+
+
+async def collect_anthropic_response(
+    kiro_event_stream: AsyncIterator[KiroEvent],
+    model: str,
+    message_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Drain *kiro_event_stream* and return a complete Anthropic response dict."""
+    _id = message_id or generate_message_id()
+    content_parts = []
+    usage: Dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
+
+    async for evt in kiro_event_stream:
+        if evt.type == "content" and evt.content:
+            content_parts.append({"type": "text", "text": evt.content})
+        elif evt.type == "usage" and evt.usage:
+            usage.update(evt.usage)
+
+    return {
+        "id": _id,
+        "type": "message",
+        "role": "assistant",
+        "content": content_parts,
+        "model": model,
+        "stop_reason": "end_turn",
+        "usage": usage,
+    }

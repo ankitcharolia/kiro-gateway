@@ -46,6 +46,7 @@ class ACPThinkingBlock(BaseModel):
 # Backward-compat aliases
 ACPToolResult = ACPToolResultBlock
 ACPTool = ACPToolUseBlock
+ACPToolCall = ACPToolUseBlock        # alias expected by converters_core
 
 ContentBlock = Union[
     ACPTextBlock, ACPImageBlock, ACPToolUseBlock,
@@ -99,6 +100,10 @@ class JsonRpcError(BaseModel):
     code: int
     message: str
     data: Optional[Any] = None
+
+
+# Notification is a request that expects no response (no id required in reply)
+JsonRpcNotification = JsonRpcRequest
 
 
 # ---------------------------------------------------------------------------

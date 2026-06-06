@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -14,14 +15,18 @@ class MCPToolError(Exception):
         super().__init__(message)
 
 
+def generate_random_id(prefix: str = "id") -> str:
+    """Generate a random ID with an optional prefix."""
+    return f"{prefix}_{secrets.token_hex(8)}"
+
+
 def build_tool_call_payload(
     tool_name: str,
     tool_input: Dict[str, Any],
     call_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    import secrets
     return {
-        "id": call_id or f"call_{secrets.token_hex(8)}",
+        "id": call_id or generate_random_id("call"),
         "type": "function",
         "function": {
             "name": tool_name,

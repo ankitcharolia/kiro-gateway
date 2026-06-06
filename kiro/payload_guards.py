@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -10,6 +11,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 MAX_PAYLOAD_BYTES: int = 10 * 1024 * 1024   # 10 MB
 MAX_INPUT_TOKENS: int = 100_000
+
+
+# ---------------------------------------------------------------------------
+# Stats dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PayloadTrimStats:
+    """Metadata returned by trimming operations for observability."""
+    original_message_count: int
+    trimmed_message_count: int
+    original_token_estimate: int
+    final_token_estimate: int
+    bytes_size: int
+    was_trimmed: bool
 
 
 # ---------------------------------------------------------------------------
