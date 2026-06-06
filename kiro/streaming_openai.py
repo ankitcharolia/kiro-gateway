@@ -78,3 +78,16 @@ def acp_stream_to_openai_chunks(
 
 # Backward-compat alias
 stream_kiro_to_openai = acp_stream_to_openai_chunks
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat alias expected by tests
+# ---------------------------------------------------------------------------
+
+def stream_kiro_to_openai_internal(
+    acp_events: Iterator[Dict[str, Any]],
+    model: str,
+    chunk_id: Optional[str] = None,
+) -> Iterator[str]:
+    """Alias for acp_stream_to_openai_chunks with an internal-facing name."""
+    yield from acp_stream_to_openai_chunks(acp_events, model, chunk_id)
