@@ -55,3 +55,57 @@ def clear_truncation_records(request_id: str) -> None:
     """Remove all records for *request_id* (call after request completes)."""
     with _lock:
         _store.pop(request_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat additions expected by tests
+# ---------------------------------------------------------------------------
+
+# get_tool_truncation -> get_truncation_records
+get_tool_truncation = get_truncation_records
+
+
+def estimate_conversation_tokens(messages: List[Dict[str, Any]]) -> int:
+    """Estimate total tokens in a list of chat messages."""
+    from .tokenizer import count_message_tokens
+    return count_message_tokens(messages)
+
+
+class TruncationState:
+    """Stateful helper that tracks and applies truncation for a single request."""
+
+    def __init__(self, request_id: str, max_input_tokens: int = 100_000) -> None:
+        self.request_id = request_id
+        self.max_input_tokens = max_input_tokens
+        self._records: List[TruncationRecord] = []
+
+    def should_truncate(self, messages: List[Dict[str, Any]]) -> bool:
+        """Return True if messages exceed the token budget."""
+        return estimate_conversation_tokens(messages) > self.max_input_tokens
+
+    def record(
+        self,
+        tool_call_id: str,
+        original: int,
+        truncated_to: int,
+    ) -> TruncationRecord:
+        """Record a truncation event and store it."""
+        rec = save_tool_truncation(
+            self.request_id, tool_call_id, original, truncated_to
+        )
+        self._records.append(rec)
+        return rec
+
+    def records(self) -> List[TruncationRecord]:
+        """Return all recorded truncation events for this request."""
+        return list(self._records)
+
+
+def truncate_messages(
+    messages: List[Dict[str, Any]],
+    max_input_tokens: int = 100_000,
+) -> List[Dict[str, Any]]:
+    """Trim *messages* to fit within *max_input_tokens* (drops oldest first)."""
+    from .payload_guards import trim_messages as _trim
+    trimmed, _ = _trim(messages, max_input_tokens)
+    return trimmed
