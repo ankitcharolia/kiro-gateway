@@ -50,3 +50,12 @@ def count_message_tokens(messages: List[Dict[str, Any]]) -> int:
         total += count_content_tokens(msg.get("content", ""))
     total += 2  # reply priming overhead
     return total
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat alias expected by tests
+# ---------------------------------------------------------------------------
+
+def count_tokens(text: str) -> int:
+    """Alias for estimate_tokens — count tokens in a plain string."""
+    return estimate_tokens(text)
