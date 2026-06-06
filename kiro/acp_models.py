@@ -51,6 +51,9 @@ ACPToolCall = ACPToolUseBlock        # alias expected by converters_core
 # ToolCall alias expected by shim_service and tests
 ToolCall = ACPToolUseBlock
 
+# ToolResult alias expected by shim_service
+ToolResult = ACPToolResultBlock
+
 ContentBlock = Union[
     ACPTextBlock, ACPImageBlock, ACPToolUseBlock,
     ACPToolResultBlock, ACPThinkingBlock,
@@ -82,8 +85,7 @@ class ACPToolDefinition(BaseModel):
     description: Optional[str] = None
     input_schema: Dict[str, Any] = Field(default_factory=dict)
 
-# ACPTool is also used as a tool *definition* in converters_core
-# Re-export the definition class under the expected name as well.
+
 class ACPToolDef(BaseModel):
     """Tool definition model (input schema variant)."""
     name: str
@@ -130,6 +132,20 @@ class GatewayCapabilities(BaseModel):
     writeFile: bool = True
     runCommand: bool = False
     listDirectory: bool = True
+    filesystem: Optional[List[Any]] = Field(default_factory=list)
+    terminal: Optional[Any] = None
+
+
+class FilesystemRoot(BaseModel):
+    """A filesystem root exposed to kiro-cli."""
+    path: str
+    read_only: bool = False
+
+
+class TerminalCapability(BaseModel):
+    """Terminal capability descriptor."""
+    enabled: bool = True
+    allowed_commands: Optional[List[str]] = None
 
 
 class SessionInitParams(BaseModel):
@@ -149,6 +165,7 @@ class PromptParams(BaseModel):
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     tools: Optional[List[ACPToolDefinition]] = None
+    tool_results: Optional[List[ACPToolResultBlock]] = None
 
 
 class ProgressParams(BaseModel):
@@ -191,6 +208,10 @@ class ACPRequest(BaseModel):
     system: Optional[str] = None
     stream: bool = False
     temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    stop_sequences: Optional[List[str]] = None
+    thinking: Optional[Dict[str, Any]] = None
+    tool_choice: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, Any]] = None
 
 

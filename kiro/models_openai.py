@@ -97,6 +97,10 @@ class OpenAIChoice(BaseModel):
     finish_reason: Optional[str] = None
 
 
+# Alias: tests expect ChatCompletionChoice
+ChatCompletionChoice = OpenAIChoice
+
+
 class OpenAIResponse(BaseModel):
     id: str
     object: str = "chat.completion"

@@ -128,3 +128,29 @@ def generate_search_summary(
         else:
             lines.append(f"{i}. {r}")
     return "\n\n".join(lines)
+
+
+async def handle_native_web_search(
+    query: str,
+    endpoint: str,
+    auth_token: Optional[str] = None,
+    max_results: int = 5,
+    timeout: float = 30.0,
+) -> str:
+    """Call a native web-search MCP tool and return a formatted summary."""
+    try:
+        results = await call_kiro_mcp_api(
+            endpoint=endpoint,
+            tool_name="web_search",
+            tool_input={"query": query, "max_results": max_results},
+            auth_token=auth_token,
+            timeout=timeout,
+        )
+        items: List[Dict[str, Any]] = []
+        if isinstance(results, list):
+            items = results
+        elif isinstance(results, dict):
+            items = results.get("results", results.get("items", []))
+        return generate_search_summary(items, max_results=max_results)
+    except MCPToolError as exc:
+        return f"Web search failed: {exc}"

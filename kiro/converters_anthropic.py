@@ -37,6 +37,28 @@ from .models_anthropic import (
 
 
 # ---------------------------------------------------------------------------
+# Helper: extract plain text from Anthropic content
+# ---------------------------------------------------------------------------
+
+def convert_anthropic_content_to_text(
+    content: Union[str, List[Any], None],
+) -> str:
+    """Return the concatenated plain-text from any Anthropic message content."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    parts: List[str] = []
+    for block in content:
+        if isinstance(block, dict):
+            if block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        elif hasattr(block, "type") and block.type == "text":
+            parts.append(getattr(block, "text", ""))
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Anthropic request -> ACP request
 # ---------------------------------------------------------------------------
 
@@ -77,7 +99,7 @@ def anthropic_request_to_acp(req: AnthropicRequest) -> ACPRequest:
         system=system_text,
         max_tokens=req.max_tokens,
         temperature=req.temperature,
-        top_p=req.top_p,
+        top_p=getattr(req, "top_p", None),
         stream=req.stream or False,
         tools=convert_tools(req.tools),
         stop_sequences=req.stop_sequences,
