@@ -206,3 +206,40 @@ def acp_stream_thinking_events():
 @pytest.fixture
 def make_event_gen():
     return _event_gen
+
+
+# ---------------------------------------------------------------------------
+# Integration test fixtures
+# ---------------------------------------------------------------------------
+
+from fastapi.testclient import TestClient
+from kiro.main import app
+from kiro.config import PROXY_API_KEY
+
+
+@pytest.fixture(scope="session")
+def test_client():
+    """Session-scoped FastAPI TestClient for integration tests."""
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.fixture
+def valid_proxy_api_key() -> str:
+    """Valid API key for authentication tests."""
+    return PROXY_API_KEY
+
+
+@pytest.fixture
+def invalid_proxy_api_key() -> str:
+    """Invalid API key for authentication failure tests."""
+    return "invalid-key-000"
+
+
+@pytest.fixture
+def sample_models_data():
+    """Sample model list for cache tests."""
+    return [
+        {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"},
+        {"id": "claude-opus-4-5", "name": "Claude Opus 4.5"},
+    ]

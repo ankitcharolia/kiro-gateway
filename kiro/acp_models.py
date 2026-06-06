@@ -224,7 +224,11 @@ class ACPResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"msg_{uuid.uuid4().hex[:12]}")
     type: str = "message"
     role: Literal["assistant"] = "assistant"
-    content: List[Dict[str, Any]] = Field(default_factory=list)
+    # Accept typed content blocks OR raw dicts (for JSON deserialization)
+    content: List[Union[
+        ACPTextBlock, ACPImageBlock, ACPToolUseBlock,
+        ACPToolResultBlock, ACPThinkingBlock, Dict[str, Any]
+    ]] = Field(default_factory=list)
     model: Optional[str] = None
     stop_reason: Optional[str] = None
     usage: ACPUsage = Field(default_factory=ACPUsage)
