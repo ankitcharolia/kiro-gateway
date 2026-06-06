@@ -1,52 +1,56 @@
-"""Token-count estimation for messages and prompts."""
+"""Token-counting utilities for context-window management."""
 from __future__ import annotations
 
 import json
 from typing import Any, Dict, List, Union
 
-# Rough chars-per-token ratio for Claude models (conservative estimate).
+# Characters-per-token approximation (conservative for mixed content).
 _CHARS_PER_TOKEN: float = 3.5
 
 
-def estimate_tokens(text: str) -> int:
-    """Estimate the number of tokens in *text* using a character ratio."""
+def _text_tokens(text: str) -> int:
+    """Rough token estimate for a plain string."""
     return max(1, int(len(text) / _CHARS_PER_TOKEN))
 
 
-def count_content_tokens(content: Union[str, List[Any]]) -> int:
-    """Count estimated tokens in a message *content* field.
-
-    Handles both plain strings and structured content blocks.
-    """
-    if isinstance(content, str):
-        return estimate_tokens(content)
-    total = 0
-    for block in content:
-        if isinstance(block, dict):
-            btype = block.get("type", "")
-            if btype == "text":
-                total += estimate_tokens(block.get("text", ""))
-            elif btype == "tool_use":
-                total += estimate_tokens(json.dumps(block.get("input", {})))
-            elif btype == "tool_result":
-                c = block.get("content", "")
-                total += estimate_tokens(c if isinstance(c, str) else json.dumps(c))
-            else:
-                total += estimate_tokens(json.dumps(block))
-        else:
-            total += estimate_tokens(str(block))
-    return total
+def count_tokens(text: str) -> int:
+    """Estimate the number of tokens in *text*."""
+    return _text_tokens(text)
 
 
 def count_message_tokens(messages: List[Dict[str, Any]]) -> int:
-    """Return total estimated token count across a list of chat messages.
-
-    Each message contributes ~4 overhead tokens (role + delimiters) plus
-    its content tokens.
-    """
+    """Estimate total tokens for a list of chat messages."""
     total = 0
     for msg in messages:
-        total += 4  # overhead per message
-        total += count_content_tokens(msg.get("content", ""))
-    total += 2  # reply priming overhead
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += _text_tokens(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        total += _text_tokens(block.get("text", ""))
+                    elif block.get("type") == "image":
+                        total += 800  # flat image cost estimate
+                    else:
+                        total += _text_tokens(json.dumps(block))
+                else:
+                    total += _text_tokens(str(block))
+        # per-message overhead
+        total += 4
     return total
+
+
+def count_tools_tokens(tools: List[Dict[str, Any]]) -> int:
+    """Estimate tokens consumed by tool definitions injected into the prompt."""
+    if not tools:
+        return 0
+    return _text_tokens(json.dumps(tools))
+
+
+def estimate_tokens(
+    messages: List[Dict[str, Any]],
+    tools: Union[List[Dict[str, Any]], None] = None,
+) -> int:
+    """Combined estimate: messages + optional tool definitions."""
+    return count_message_tokens(messages) + count_tools_tokens(tools or [])

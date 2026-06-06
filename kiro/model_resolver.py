@@ -1,67 +1,92 @@
-"""Model ID resolution — maps external model names to Kiro-internal IDs."""
+"""Model ID resolution and capability helpers."""
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
-# Canonical model list
+# Internal mapping: kiro model alias -> real model ID
 # ---------------------------------------------------------------------------
 
-KIRO_MODELS = [
-    "claude-sonnet-4-5",
-    "claude-opus-4-5",
-    "claude-haiku-3-5",
-    "claude-3-7-sonnet",
-    "claude-3-5-sonnet-v2",
-    "claude-3-5-haiku",
-]
+_MODEL_MAP: Dict[str, str] = {
+    "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
+    "claude-3-5-haiku": "claude-3-5-haiku-20241022",
+    "claude-3-opus": "claude-3-opus-20240229",
+    "claude-3-sonnet": "claude-3-sonnet-20240229",
+    "claude-3-haiku": "claude-3-haiku-20240307",
+    "claude-sonnet-4": "claude-sonnet-4-5",
+    "gpt-4o": "gpt-4o",
+    "gpt-4o-mini": "gpt-4o-mini",
+    "gpt-4-turbo": "gpt-4-turbo",
+    "gpt-4": "gpt-4",
+    "gpt-3.5-turbo": "gpt-3.5-turbo",
+}
 
-DEFAULT_MODEL = "claude-sonnet-4-5"
-
-# Aliases from OpenAI / generic names used by harnesses.
-_ALIAS_MAP: dict[str, str] = {
-    # OpenAI compat aliases
-    "gpt-4": "claude-sonnet-4-5",
-    "gpt-4o": "claude-sonnet-4-5",
-    "gpt-4-turbo": "claude-sonnet-4-5",
-    "gpt-3.5-turbo": "claude-haiku-3-5",
-    # Anthropic short names
-    "claude-3-sonnet": "claude-3-7-sonnet",
-    "claude-3-haiku": "claude-haiku-3-5",
-    "claude-3-opus": "claude-opus-4-5",
-    "claude-sonnet": "claude-sonnet-4-5",
-    "claude-opus": "claude-opus-4-5",
-    "claude-haiku": "claude-haiku-3-5",
-    # Generic
-    "default": DEFAULT_MODEL,
+_CAPABILITIES: Dict[str, Dict[str, Any]] = {
+    "claude": {
+        "vision": True,
+        "tools": True,
+        "streaming": True,
+        "thinking": True,
+        "max_output_tokens": 8192,
+    },
+    "gpt": {
+        "vision": True,
+        "tools": True,
+        "streaming": True,
+        "thinking": False,
+        "max_output_tokens": 4096,
+    },
+    "default": {
+        "vision": False,
+        "tools": False,
+        "streaming": True,
+        "thinking": False,
+        "max_output_tokens": 4096,
+    },
 }
 
 
-def resolve_model(model_id: Optional[str]) -> str:
-    """Return the canonical Kiro model ID for *model_id*.
+def resolve_model(model_id: str) -> str:
+    """Return the canonical model ID for *model_id*, passing through unknowns."""
+    return _MODEL_MAP.get(model_id, model_id)
 
-    Falls back to DEFAULT_MODEL if the name is unknown.
-    """
-    if not model_id:
-        return DEFAULT_MODEL
 
-    # Direct match
-    if model_id in KIRO_MODELS:
-        return model_id
-
-    # Alias lookup (case-insensitive)
+def extract_model_family(model_id: str) -> str:
+    """Return a short family name for *model_id* (e.g. 'claude', 'gpt')."""
     lower = model_id.lower()
-    if lower in _ALIAS_MAP:
-        return _ALIAS_MAP[lower]
+    if "claude" in lower:
+        return "claude"
+    if "gpt" in lower:
+        return "gpt"
+    if "gemini" in lower:
+        return "gemini"
+    if "llama" in lower:
+        return "llama"
+    return "unknown"
 
-    # Partial / fuzzy: return first model that contains the query as substring
-    for m in KIRO_MODELS:
-        if lower in m or m in lower:
-            return m
 
-    return DEFAULT_MODEL
+def get_capabilities(model_id: str) -> Dict[str, Any]:
+    """Return a capabilities dict for *model_id*."""
+    family = extract_model_family(model_id)
+    return dict(_CAPABILITIES.get(family, _CAPABILITIES["default"]))
 
 
-# Backward-compat alias
-normalize_model_name = resolve_model
+def get_model_id_for_kiro(model_id: str) -> str:
+    """Alias for :func:`resolve_model` — maps public IDs to Kiro-internal IDs."""
+    return resolve_model(model_id)
+
+
+def list_models() -> List[str]:
+    """Return the list of supported model aliases."""
+    return sorted(_MODEL_MAP.keys())
+
+
+def is_claude_model(model_id: str) -> bool:
+    """Return True if *model_id* is a Claude model."""
+    return extract_model_family(model_id) == "claude"
+
+
+def is_openai_model(model_id: str) -> bool:
+    """Return True if *model_id* is an OpenAI model."""
+    return extract_model_family(model_id) == "gpt"

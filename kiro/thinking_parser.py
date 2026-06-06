@@ -1,61 +1,67 @@
-"""Utilities for parsing <thinking> blocks from model output."""
+"""Utilities for parsing and handling extended-thinking blocks."""
 from __future__ import annotations
 
-import re
+import hashlib
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
-
-_THINK_RE = re.compile(r"<thinking>(.*?)</thinking>", re.DOTALL)
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass
-class ParsedThinking:
+class ThinkingBlock:
     thinking: str
-    remaining_text: str
+    signature: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.signature is None:
+            self.signature = hashlib.sha256(self.thinking.encode()).hexdigest()[:32]
 
 
-def extract_thinking(text: str) -> ParsedThinking:
-    """Extract the first ``<thinking>`` block from *text*.
+@dataclass
+class ThinkingParseResult:
+    """Result of extracting thinking blocks from a response."""
+    thinking_blocks: List[ThinkingBlock] = field(default_factory=list)
+    text_blocks: List[str] = field(default_factory=list)
+    raw_content: List[Dict[str, Any]] = field(default_factory=list)
 
-    Returns a :class:`ParsedThinking` with the thinking content and the
-    remaining text with the block removed.
-    """
-    m = _THINK_RE.search(text)
-    if m:
-        thinking = m.group(1).strip()
-        remaining = (text[: m.start()] + text[m.end() :]).strip()
-        return ParsedThinking(thinking=thinking, remaining_text=remaining)
-    return ParsedThinking(thinking="", remaining_text=text)
+    @property
+    def has_thinking(self) -> bool:
+        return len(self.thinking_blocks) > 0
 
+    @property
+    def combined_thinking(self) -> str:
+        return "\n\n".join(b.thinking for b in self.thinking_blocks)
 
-def strip_thinking(text: str) -> str:
-    """Remove all ``<thinking>`` … ``</thinking>`` blocks from *text*."""
-    return _THINK_RE.sub("", text).strip()
-
-
-def has_thinking(text: str) -> bool:
-    """Return True if *text* contains at least one ``<thinking>`` block."""
-    return bool(_THINK_RE.search(text))
+    @property
+    def combined_text(self) -> str:
+        return "".join(self.text_blocks)
 
 
-# ---------------------------------------------------------------------------
-# Class-based API (used by shim_service and tests)
-# ---------------------------------------------------------------------------
+def parse_thinking_blocks(
+    content: List[Dict[str, Any]],
+) -> ThinkingParseResult:
+    """Extract thinking and text blocks from an Anthropic content list."""
+    result = ThinkingParseResult(raw_content=list(content))
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "thinking":
+            result.thinking_blocks.append(
+                ThinkingBlock(
+                    thinking=block.get("thinking", ""),
+                    signature=block.get("signature"),
+                )
+            )
+        elif btype == "text":
+            result.text_blocks.append(block.get("text", ""))
+    return result
 
-class ThinkingParser:
-    """Stateless wrapper around the module-level parsing functions."""
 
-    @staticmethod
-    def extract(text: str) -> ParsedThinking:
-        """Alias for :func:`extract_thinking`."""
-        return extract_thinking(text)
-
-    @staticmethod
-    def strip(text: str) -> str:
-        """Alias for :func:`strip_thinking`."""
-        return strip_thinking(text)
-
-    @staticmethod
-    def has_thinking(text: str) -> bool:
-        """Alias for :func:`has_thinking`."""
-        return has_thinking(text)
+def strip_thinking_blocks(
+    content: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Return (content_without_thinking, combined_thinking_text)."""
+    parsed = parse_thinking_blocks(content)
+    clean = [b for b in content if isinstance(b, dict) and b.get("type") != "thinking"]
+    thinking_text = parsed.combined_thinking or None
+    return clean, thinking_text

@@ -1,15 +1,15 @@
 """Heuristics for detecting and recovering from context-window truncation."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import functools
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
-# Stop reasons that indicate the model ran out of context rather than
-# finishing naturally.
 _TRUNCATION_STOP_REASONS = {"max_tokens", "length"}
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 
 def is_truncated_response(response: Dict[str, Any]) -> bool:
-    """Return True if *response* looks like it was cut short by the context limit."""
     stop_reason = response.get("stop_reason") or response.get("finish_reason", "")
     return stop_reason in _TRUNCATION_STOP_REASONS
 
@@ -19,19 +19,13 @@ def should_inject_recovery(
     max_input_tokens: int,
     current_token_estimate: int,
 ) -> bool:
-    """Return True if a recovery / summarisation injection is warranted.
-
-    A recovery is triggered when the estimated token count exceeds
-    90 % of *max_input_tokens* and there are enough messages to truncate.
-    """
-    if len(messages) < 4:  # too short to be worth compressing
+    if len(messages) < 4:
         return False
     threshold = int(max_input_tokens * 0.90)
     return current_token_estimate >= threshold
 
 
 def build_recovery_message(summary: str) -> Dict[str, Any]:
-    """Build a synthetic user message that injects a conversation summary."""
     return {
         "role": "user",
         "content": (
@@ -45,13 +39,67 @@ def truncate_messages_to_fit(
     messages: List[Dict[str, Any]],
     max_messages: int = 20,
 ) -> List[Dict[str, Any]]:
-    """Return at most *max_messages* messages, keeping the system prompt and
-    the most recent turns.
-    """
     if len(messages) <= max_messages:
         return messages
-
-    # Preserve leading system message if present.
     if messages and messages[0].get("role") == "system":
-        return [messages[0]] + messages[-(max_messages - 1) :]
+        return [messages[0]] + messages[-(max_messages - 1):]
     return messages[-max_messages:]
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat additions expected by tests
+# ---------------------------------------------------------------------------
+
+def generate_truncation_tool_result(
+    tool_use_id: str,
+    summary: Optional[str] = None,
+) -> Dict[str, Any]:
+    content = summary or (
+        "[Context truncated: previous tool output was removed to fit "
+        "within the context window. Please re-request if needed.]"
+    )
+    return {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+                "is_error": False,
+            }
+        ],
+    }
+
+
+def generate_truncation_user_message(
+    summary: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a synthetic user message that signals context truncation."""
+    return build_recovery_message(
+        summary
+        or "Prior context was truncated to fit within the context window."
+    )
+
+
+def with_truncation_recovery(
+    max_input_tokens: int = 100_000,
+    max_messages: int = 20,
+) -> Callable[[F], F]:
+    """Decorator that trims the ``messages`` kwarg before calling the wrapped function.
+
+    Usage::
+
+        @with_truncation_recovery(max_input_tokens=80_000)
+        async def handle(messages, ...):
+            ...
+    """
+    def decorator(fn: F) -> F:
+        @functools.wraps(fn)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if "messages" in kwargs:
+                kwargs["messages"] = truncate_messages_to_fit(
+                    kwargs["messages"], max_messages
+                )
+            return await fn(*args, **kwargs)
+        return wrapper  # type: ignore[return-value]
+    return decorator

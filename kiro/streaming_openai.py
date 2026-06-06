@@ -1,14 +1,16 @@
 """Streaming helpers — OpenAI SSE format."""
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 import time
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Iterator, Optional
+
+from .streaming_core import FirstTokenTimeoutError
 
 
 def generate_chunk_id(prefix: str = "chatcmpl") -> str:
-    """Return a unique OpenAI-style completion ID."""
     return f"{prefix}-{secrets.token_hex(12)}"
 
 
@@ -25,7 +27,6 @@ def build_chunk(
     finish_reason: Optional[str] = None,
     created: Optional[int] = None,
 ) -> str:
-    """Build and serialise a single OpenAI streaming chunk."""
     return _sse_line(
         {
             "id": chunk_id,
@@ -48,25 +49,17 @@ def acp_stream_to_openai_chunks(
     model: str,
     chunk_id: Optional[str] = None,
 ) -> Iterator[str]:
-    """Translate ACP stream events into OpenAI SSE chunks.
-
-    Yields raw SSE strings ready to be written to the response.
-    """
     _id = chunk_id or generate_chunk_id()
     _created = int(time.time())
-
-    # role header
     yield build_chunk(_id, model, {"role": "assistant", "content": ""}, created=_created)
 
     for event in acp_events:
         etype = event.get("event", "")
         data = event.get("data", {})
-
         if etype == "text_delta":
             text = data.get("text", "")
             if text:
                 yield build_chunk(_id, model, {"content": text}, created=_created)
-
         elif etype in ("message_stop", "end"):
             stop_reason = data.get("stop_reason", "stop")
             openai_reason = "tool_calls" if stop_reason == "tool_use" else "stop"
@@ -76,5 +69,36 @@ def acp_stream_to_openai_chunks(
     yield _sse_line("[DONE]")
 
 
-# Backward-compat alias
 stream_kiro_to_openai = acp_stream_to_openai_chunks
+
+
+def stream_kiro_to_openai_internal(
+    acp_events: Iterator[Dict[str, Any]],
+    model: str,
+    chunk_id: Optional[str] = None,
+) -> Iterator[str]:
+    yield from acp_stream_to_openai_chunks(acp_events, model, chunk_id)
+
+
+async def stream_with_first_token_retry(
+    stream_factory: Callable[[], AsyncIterator[str]],
+    first_token_timeout: float = 30.0,
+    max_retries: int = 2,
+) -> AsyncIterator[str]:
+    """Wrap an async SSE stream with a first-token timeout and retry logic.
+
+    Raises :class:`~kiro.streaming_core.FirstTokenTimeoutError` when all
+    retries are exhausted without receiving a first token.
+    """
+    for attempt in range(max_retries + 1):
+        stream = stream_factory()
+        try:
+            first = True
+            async for chunk in stream:
+                if first:
+                    first = False
+                yield chunk
+            return
+        except asyncio.TimeoutError:
+            if attempt >= max_retries:
+                raise FirstTokenTimeoutError(first_token_timeout)

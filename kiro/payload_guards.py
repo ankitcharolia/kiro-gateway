@@ -1,79 +1,91 @@
-"""Payload validation and trimming guards."""
+"""Payload validation and size-guard helpers."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from .tokenizer import count_message_tokens
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+MAX_PAYLOAD_BYTES: int = 10 * 1024 * 1024   # 10 MB
+MAX_INPUT_TOKENS: int = 100_000
 
 
 # ---------------------------------------------------------------------------
-# Stats
+# Size helpers
 # ---------------------------------------------------------------------------
 
-@dataclass
-class PayloadTrimStats:
-    """Statistics about a trim operation performed by :func:`trim_messages`."""
-    original_message_count: int = 0
-    trimmed_message_count: int = 0
-    original_token_estimate: int = 0
-    trimmed_token_estimate: int = 0
-    messages_removed: int = 0
+def check_payload_size(
+    payload: Dict[str, Any],
+    max_bytes: int = MAX_PAYLOAD_BYTES,
+) -> Tuple[bool, int]:
+    """Return (ok, size_bytes) for *payload* serialised to JSON."""
+    size = len(json.dumps(payload).encode("utf-8"))
+    return size <= max_bytes, size
 
-    @property
-    def was_trimmed(self) -> bool:
-        return self.messages_removed > 0
-
-
-# ---------------------------------------------------------------------------
-# Guards
-# ---------------------------------------------------------------------------
 
 def trim_messages(
     messages: List[Dict[str, Any]],
-    max_input_tokens: int,
-    preserve_system: bool = True,
-) -> Tuple[List[Dict[str, Any]], PayloadTrimStats]:
-    """Trim *messages* so that the estimated token count is below *max_input_tokens*.
+    max_tokens: int = MAX_INPUT_TOKENS,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Drop oldest messages until the estimated token count fits *max_tokens*.
 
-    Returns the (possibly shortened) message list and a :class:`PayloadTrimStats`.
+    Returns (trimmed_messages, estimated_tokens).
     """
-    stats = PayloadTrimStats(
-        original_message_count=len(messages),
-        original_token_estimate=count_message_tokens(messages),
-    )
+    from .tokenizer import count_message_tokens
 
-    if stats.original_token_estimate <= max_input_tokens:
-        stats.trimmed_message_count = len(messages)
-        stats.trimmed_token_estimate = stats.original_token_estimate
-        return messages, stats
-
-    # Separate system message if present
-    result: List[Dict[str, Any]] = []
-    system_msg: Optional[Dict[str, Any]] = None
-    rest = list(messages)
-
-    if preserve_system and rest and rest[0].get("role") == "system":
-        system_msg = rest.pop(0)
-
-    # Drop oldest non-system messages until we fit
-    while rest and count_message_tokens(
-        ([system_msg] if system_msg else []) + rest
-    ) > max_input_tokens:
-        rest.pop(0)
-        stats.messages_removed += 1
-
-    result = ([system_msg] if system_msg else []) + rest
-    stats.trimmed_message_count = len(result)
-    stats.trimmed_token_estimate = count_message_tokens(result)
-    return result, stats
+    result = list(messages)
+    while result and count_message_tokens(result) > max_tokens:
+        # Preserve a leading system message if present.
+        if len(result) > 1 and result[0].get("role") == "system":
+            result.pop(1)
+        else:
+            result.pop(0)
+    return result, count_message_tokens(result)
 
 
-def validate_max_tokens(
-    requested: Optional[int],
-    hard_limit: int = 8192,
-) -> int:
-    """Clamp *requested* max_tokens to *hard_limit*."""
-    if requested is None:
-        return hard_limit
-    return min(requested, hard_limit)
+def trim_payload_to_limit(
+    payload: Dict[str, Any],
+    max_tokens: int = MAX_INPUT_TOKENS,
+) -> Dict[str, Any]:
+    """Return a copy of *payload* with messages trimmed to fit *max_tokens*."""
+    messages = payload.get("messages", [])
+    trimmed, _ = trim_messages(messages, max_tokens)
+    return {**payload, "messages": trimmed}
+
+
+# ---------------------------------------------------------------------------
+# Guard functions
+# ---------------------------------------------------------------------------
+
+def guard_openai_request(
+    payload: Dict[str, Any],
+    max_bytes: int = MAX_PAYLOAD_BYTES,
+    max_tokens: int = MAX_INPUT_TOKENS,
+) -> Dict[str, Any]:
+    """Validate and trim an OpenAI-format request payload.
+
+    Raises ``ValueError`` if the raw payload exceeds *max_bytes*.
+    Returns the (possibly trimmed) payload.
+    """
+    ok, size = check_payload_size(payload, max_bytes)
+    if not ok:
+        raise ValueError(f"Payload too large: {size} bytes (limit {max_bytes})")
+    return trim_payload_to_limit(payload, max_tokens)
+
+
+def guard_anthropic_request(
+    payload: Dict[str, Any],
+    max_bytes: int = MAX_PAYLOAD_BYTES,
+    max_tokens: int = MAX_INPUT_TOKENS,
+) -> Dict[str, Any]:
+    """Validate and trim an Anthropic-format request payload.
+
+    Raises ``ValueError`` if the raw payload exceeds *max_bytes*.
+    Returns the (possibly trimmed) payload.
+    """
+    ok, size = check_payload_size(payload, max_bytes)
+    if not ok:
+        raise ValueError(f"Payload too large: {size} bytes (limit {max_bytes})")
+    return trim_payload_to_limit(payload, max_tokens)
