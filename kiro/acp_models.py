@@ -36,11 +36,21 @@ class ACPToolResultBlock(BaseModel):
     is_error: bool = False
 
 
+class ACPThinkingBlock(BaseModel):
+    """Extended-thinking block in an ACP message."""
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    signature: Optional[str] = None
+
+
 # Backward-compat aliases
 ACPToolResult = ACPToolResultBlock
 ACPTool = ACPToolUseBlock
 
-ContentBlock = Union[ACPTextBlock, ACPImageBlock, ACPToolUseBlock, ACPToolResultBlock]
+ContentBlock = Union[
+    ACPTextBlock, ACPImageBlock, ACPToolUseBlock,
+    ACPToolResultBlock, ACPThinkingBlock,
+]
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +60,10 @@ ContentBlock = Union[ACPTextBlock, ACPImageBlock, ACPToolUseBlock, ACPToolResult
 class PromptMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: Union[str, List[Dict[str, Any]]]
+
+
+# Alias: tests and conftest use ACPMessage
+ACPMessage = PromptMessage
 
 
 # ---------------------------------------------------------------------------
