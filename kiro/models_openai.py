@@ -38,17 +38,28 @@ class OpenAITool(BaseModel):
     function: FunctionDefinition
 
 
+# Alias expected by conftest / tests
+Tool = OpenAITool
+
+
+class FunctionCall(BaseModel):
+    """Represents a function call within a tool_call (name + arguments string)."""
+    name: str
+    arguments: str = "{}"
+
+
 class ToolCall(BaseModel):
     id: str
     type: Literal["function"] = "function"
-    function: Dict[str, Any]  # {name, arguments}
+    function: FunctionCall
 
 
 # ---------------------------------------------------------------------------
 # Messages
 # ---------------------------------------------------------------------------
 
-class OpenAIMessage(BaseModel):
+class Message(BaseModel):
+    """A single chat message (OpenAI schema)."""
     role: Literal["system", "user", "assistant", "tool", "function"]
     content: Optional[Union[str, List[ContentPart]]] = None
     name: Optional[str] = None
@@ -56,13 +67,18 @@ class OpenAIMessage(BaseModel):
     tool_call_id: Optional[str] = None
 
 
+# Alias for backwards compat
+OpenAIMessage = Message
+
+
 # ---------------------------------------------------------------------------
 # Request / response
 # ---------------------------------------------------------------------------
 
-class OpenAIRequest(BaseModel):
+class ChatCompletionRequest(BaseModel):
+    """OpenAI /v1/chat/completions request body."""
     model: str
-    messages: List[OpenAIMessage]
+    messages: List[Message]
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     stream: Optional[bool] = None
@@ -75,6 +91,12 @@ class OpenAIRequest(BaseModel):
     presence_penalty: Optional[float] = None
     user: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    thinking: Optional[Dict[str, Any]] = None  # {"type": "enabled", "budget_tokens": N}
+
+
+# Aliases expected by various tests
+OpenAIRequest = ChatCompletionRequest
+OpenAIModel = ChatCompletionRequest
 
 
 class OpenAIUsage(BaseModel):
@@ -85,7 +107,7 @@ class OpenAIUsage(BaseModel):
 
 class OpenAIChoice(BaseModel):
     index: int = 0
-    message: OpenAIMessage
+    message: Message
     finish_reason: Optional[str] = None
 
 
@@ -96,10 +118,3 @@ class OpenAIResponse(BaseModel):
     model: str
     choices: List[OpenAIChoice]
     usage: OpenAIUsage = Field(default_factory=OpenAIUsage)
-
-
-# ---------------------------------------------------------------------------
-# Backward-compat alias expected by tests
-# ---------------------------------------------------------------------------
-
-OpenAIModel = OpenAIRequest
