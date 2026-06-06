@@ -191,26 +191,18 @@ async def stream_with_first_token_retry(
     first_token_timeout: float = 30.0,
     max_retries: int = 2,
 ) -> AsyncIterator[KiroEvent]:
-    """Wrap *stream_factory* with a first-token timeout + retry loop.
-
-    If no event arrives within *first_token_timeout* seconds,
-    :class:`FirstTokenTimeoutError` is raised and the factory is called
-    again up to *max_retries* times.
-    """
+    """Wrap *stream_factory* with a first-token timeout + retry loop."""
     attempt = 0
     while True:
         attempt += 1
         stream = stream_factory()
-        got_first = False
         try:
             async for evt in stream:
-                got_first = True
                 yield evt
             return
         except (asyncio.TimeoutError, FirstTokenTimeoutError):
             if attempt > max_retries:
                 raise FirstTokenTimeoutError(first_token_timeout)
-            # retry
             continue
         except Exception:
             raise

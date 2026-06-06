@@ -16,7 +16,6 @@ class MCPToolError(Exception):
 
 
 def generate_random_id(prefix: str = "id") -> str:
-    """Generate a random ID with an optional prefix."""
     return f"{prefix}_{secrets.token_hex(8)}"
 
 
@@ -97,11 +96,6 @@ def generate_search_summary(
     results: List[Dict[str, Any]],
     max_results: int = 5,
 ) -> str:
-    """Format a list of MCP search-result dicts into a human-readable summary.
-
-    Each result dict is expected to have at least a ``title`` and optionally
-    a ``snippet`` / ``url`` key.  Unknown shapes are rendered as JSON.
-    """
     if not results:
         return "No results found."
     lines: List[str] = []

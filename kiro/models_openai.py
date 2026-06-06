@@ -6,10 +6,6 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 
-# ---------------------------------------------------------------------------
-# Content blocks
-# ---------------------------------------------------------------------------
-
 class TextContent(BaseModel):
     type: Literal["text"] = "text"
     text: str
@@ -17,15 +13,11 @@ class TextContent(BaseModel):
 
 class ImageUrlContent(BaseModel):
     type: Literal["image_url"] = "image_url"
-    image_url: Dict[str, str]  # {"url": "..."}
+    image_url: Dict[str, str]
 
 
 ContentPart = Union[TextContent, ImageUrlContent, Dict[str, Any]]
 
-
-# ---------------------------------------------------------------------------
-# Tool / function definitions
-# ---------------------------------------------------------------------------
 
 class FunctionDefinition(BaseModel):
     name: str
@@ -38,12 +30,10 @@ class OpenAITool(BaseModel):
     function: FunctionDefinition
 
 
-# Alias expected by conftest / tests
 Tool = OpenAITool
 
 
 class FunctionCall(BaseModel):
-    """Represents a function call within a tool_call (name + arguments string)."""
     name: str
     arguments: str = "{}"
 
@@ -54,12 +44,7 @@ class ToolCall(BaseModel):
     function: FunctionCall
 
 
-# ---------------------------------------------------------------------------
-# Messages
-# ---------------------------------------------------------------------------
-
 class Message(BaseModel):
-    """A single chat message (OpenAI schema)."""
     role: Literal["system", "user", "assistant", "tool", "function"]
     content: Optional[Union[str, List[ContentPart]]] = None
     name: Optional[str] = None
@@ -67,17 +52,11 @@ class Message(BaseModel):
     tool_call_id: Optional[str] = None
 
 
-# Aliases for backwards compat
 OpenAIMessage = Message
 ChatMessage = Message
 
 
-# ---------------------------------------------------------------------------
-# Request / response
-# ---------------------------------------------------------------------------
-
 class ChatCompletionRequest(BaseModel):
-    """OpenAI /v1/chat/completions request body."""
     model: str
     messages: List[Message]
     max_tokens: Optional[int] = None
@@ -92,10 +71,9 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: Optional[float] = None
     user: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
-    thinking: Optional[Dict[str, Any]] = None  # {"type": "enabled", "budget_tokens": N}
+    thinking: Optional[Dict[str, Any]] = None
 
 
-# Aliases expected by various tests
 OpenAIRequest = ChatCompletionRequest
 OpenAIModel = ChatCompletionRequest
 
@@ -122,7 +100,6 @@ class OpenAIResponse(BaseModel):
 
 
 class ModelData(BaseModel):
-    """A single model entry in the /v1/models listing."""
     id: str
     object: str = "model"
     created: int = 0
@@ -130,6 +107,5 @@ class ModelData(BaseModel):
 
 
 class ModelList(BaseModel):
-    """Response body for GET /v1/models."""
     object: str = "list"
     data: List[ModelData] = Field(default_factory=list)

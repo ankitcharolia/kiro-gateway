@@ -46,10 +46,6 @@ def truncate_messages_to_fit(
     return messages[-max_messages:]
 
 
-# ---------------------------------------------------------------------------
-# Backward-compat additions expected by tests
-# ---------------------------------------------------------------------------
-
 def generate_truncation_tool_result(
     tool_use_id: str,
     summary: Optional[str] = None,
@@ -85,14 +81,7 @@ def with_truncation_recovery(
     max_input_tokens: int = 100_000,
     max_messages: int = 20,
 ) -> Callable[[F], F]:
-    """Decorator that trims the ``messages`` kwarg before calling the wrapped function.
-
-    Usage::
-
-        @with_truncation_recovery(max_input_tokens=80_000)
-        async def handle(messages, ...):
-            ...
-    """
+    """Decorator that trims the ``messages`` kwarg before calling the wrapped function."""
     def decorator(fn: F) -> F:
         @functools.wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:

@@ -6,15 +6,10 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# ---------------------------------------------------------------------------
-# Brace / bracket matching
-# ---------------------------------------------------------------------------
-
 def find_matching_brace(text: str, start: int = 0) -> int:
     """Return the index of the closing ``}`` that matches the ``{`` at *start*.
 
-    Returns ``-1`` if *start* does not point at ``{`` or the brace is
-    unclosed.
+    Returns ``-1`` if *start* does not point at ``{`` or the brace is unclosed.
     """
     if start >= len(text) or text[start] != "{":
         return -1
@@ -66,10 +61,6 @@ def extract_first_json(text: str) -> Optional[Dict[str, Any]]:
     return objs[0] if objs else None
 
 
-# ---------------------------------------------------------------------------
-# Markdown code-fence stripping
-# ---------------------------------------------------------------------------
-
 _CODE_FENCE_RE = re.compile(
     r"^```[\w]*\n?(.+?)\n?```$",
     re.DOTALL | re.MULTILINE,
@@ -89,12 +80,6 @@ def parse_json_from_response(text: str) -> Optional[Dict[str, Any]]:
         return extract_first_json(cleaned)
 
 
-# ---------------------------------------------------------------------------
-# Bracket-style tool-call parser
-# e.g.  <tool_call>{"name": "foo", "arguments": {...}}</tool_call>
-# or    [TOOL_CALL]{"name": "foo", "arguments": {...}}[/TOOL_CALL]
-# ---------------------------------------------------------------------------
-
 _BRACKET_TOOL_RE = re.compile(
     r"(?:<tool_call>|\[TOOL_CALL\])\s*(?P<json>\{.*?\})\s*(?:</tool_call>|\[/TOOL_CALL\])",
     re.DOTALL | re.IGNORECASE,
@@ -102,14 +87,7 @@ _BRACKET_TOOL_RE = re.compile(
 
 
 def parse_bracket_tool_calls(text: str) -> List[Dict[str, Any]]:
-    """Extract tool-call dicts embedded in bracket/XML-style tags.
-
-    Handles both ``<tool_call>{...}</tool_call>`` and
-    ``[TOOL_CALL]{...}[/TOOL_CALL]`` conventions.
-
-    Returns a list of parsed dicts; entries that are not valid JSON are
-    silently skipped.
-    """
+    """Extract tool-call dicts embedded in bracket/XML-style tags."""
     results: List[Dict[str, Any]] = []
     for m in _BRACKET_TOOL_RE.finditer(text):
         raw = m.group("json")
@@ -120,17 +98,8 @@ def parse_bracket_tool_calls(text: str) -> List[Dict[str, Any]]:
     return results
 
 
-# ---------------------------------------------------------------------------
-# AWS Event Stream binary frame parser
-# ---------------------------------------------------------------------------
-
 class AwsEventStreamParser:
-    """Minimal AWS event-stream binary frame parser.
-
-    Frames have a 12-byte prelude (total_len:4, headers_len:4, crc:4)
-    followed by headers, payload, and a 4-byte trailing CRC.
-    We extract the JSON payload bytes between prelude+headers and trailing CRC.
-    """
+    """Minimal AWS event-stream binary frame parser."""
 
     def __init__(self) -> None:
         self._buf = b""

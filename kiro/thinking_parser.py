@@ -7,10 +7,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# ---------------------------------------------------------------------------
-# ParserState — used by streaming thinking parsers
-# ---------------------------------------------------------------------------
-
 class ParserState(enum.Enum):
     """State machine states for the streaming thinking-block parser."""
     IDLE = "idle"
@@ -106,7 +102,7 @@ class ThinkingParser:
             self._text.append(block.get("text", ""))
 
     def result(self) -> ThinkingParseResult:
-        """Return the accumulated :class:`ThinkingParseResult`."""
+        """Return the accumulated ThinkingParseResult."""
         r = ThinkingParseResult(raw_content=list(self._raw))
         r.thinking_blocks = list(self._blocks)
         r.text_blocks = list(self._text)

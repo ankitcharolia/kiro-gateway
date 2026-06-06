@@ -6,10 +6,6 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 
-# ---------------------------------------------------------------------------
-# Image sources
-# ---------------------------------------------------------------------------
-
 class UrlImageSource(BaseModel):
     type: Literal["url"] = "url"
     url: str
@@ -18,23 +14,18 @@ class UrlImageSource(BaseModel):
 class Base64ImageSource(BaseModel):
     """Base-64 encoded image source for Anthropic vision requests."""
     type: Literal["base64"] = "base64"
-    media_type: str  # e.g. "image/jpeg"
-    data: str        # base-64 string
+    media_type: str
+    data: str
 
 
 ImageSource = Union[UrlImageSource, Base64ImageSource]
 
-
-# ---------------------------------------------------------------------------
-# Content blocks
-# ---------------------------------------------------------------------------
 
 class TextBlock(BaseModel):
     type: Literal["text"] = "text"
     text: str
 
 
-# Aliases expected by conftest and tests
 TextContentBlock = TextBlock
 
 
@@ -50,7 +41,6 @@ class ToolUseBlock(BaseModel):
     input: Dict[str, Any] = Field(default_factory=dict)
 
 
-# Alias expected by conftest and tests
 ToolUseContentBlock = ToolUseBlock
 
 
@@ -61,7 +51,6 @@ class ToolResultBlock(BaseModel):
     is_error: bool = False
 
 
-# Alias expected by tests
 ToolResultContentBlock = ToolResultBlock
 
 
@@ -71,16 +60,11 @@ class ThinkingBlock(BaseModel):
     signature: Optional[str] = None
 
 
-# Alias expected by tests
 ThinkingContentBlock = ThinkingBlock
 
 
 ContentBlock = Union[TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock]
 
-
-# ---------------------------------------------------------------------------
-# Thinking / extended-thinking config
-# ---------------------------------------------------------------------------
 
 class ThinkingConfig(BaseModel):
     """Controls extended-thinking (budget_tokens) on Anthropic requests."""
@@ -88,19 +72,11 @@ class ThinkingConfig(BaseModel):
     budget_tokens: int = 10_000
 
 
-# ---------------------------------------------------------------------------
-# Tool definition
-# ---------------------------------------------------------------------------
-
 class AnthropicTool(BaseModel):
     name: str
     description: Optional[str] = None
     input_schema: Dict[str, Any] = Field(default_factory=dict)
 
-
-# ---------------------------------------------------------------------------
-# Messages and request/response
-# ---------------------------------------------------------------------------
 
 class AnthropicMessage(BaseModel):
     role: Literal["user", "assistant"]
