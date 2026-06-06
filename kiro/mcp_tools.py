@@ -174,7 +174,6 @@ async def generate_anthropic_web_search_sse(
         timeout=timeout,
     )
 
-    # Yield a minimal Anthropic streaming SSE sequence
     events = [
         ("content_block_start", {"type": "content_block_start", "index": 0,
                                    "content_block": {"type": "text", "text": ""}}),
@@ -185,3 +184,63 @@ async def generate_anthropic_web_search_sse(
     ]
     for event_type, data in events:
         yield f"event: {event_type}\ndata: {_json.dumps(data)}\n\n"
+
+
+async def generate_openai_web_search_sse(
+    query: str,
+    endpoint: str,
+    auth_token: Optional[str] = None,
+    max_results: int = 5,
+    timeout: float = 30.0,
+) -> AsyncIterator[str]:
+    """Yield OpenAI-compatible SSE lines for a web search result.
+
+    Emits a minimal streaming sequence: a ``chat.completion.chunk`` with the
+    search summary as a ``content`` delta, followed by a ``[DONE]`` sentinel.
+    """
+    import json as _json
+    import time
+
+    summary = await handle_native_web_search(
+        query=query,
+        endpoint=endpoint,
+        auth_token=auth_token,
+        max_results=max_results,
+        timeout=timeout,
+    )
+
+    chunk_id = generate_random_id("chatcmpl")
+    ts = int(time.time())
+
+    # delta chunk
+    delta_chunk = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": ts,
+        "model": "web-search",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": summary},
+                "finish_reason": None,
+            }
+        ],
+    }
+    yield f"data: {_json.dumps(delta_chunk)}\n\n"
+
+    # stop chunk
+    stop_chunk = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": ts,
+        "model": "web-search",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    yield f"data: {_json.dumps(stop_chunk)}\n\n"
+    yield "data: [DONE]\n\n"

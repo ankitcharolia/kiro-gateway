@@ -165,6 +165,21 @@ def acp_response_to_openai(
     )
 
 
+def build_kiro_payload(
+    req: ChatCompletionRequest,
+    conversation_id: str,
+    profile_arn: str,
+) -> Dict[str, Any]:
+    """Convert an OpenAI ChatCompletionRequest to a Kiro API payload dict.
+
+    This is the OpenAI-side equivalent of ``anthropic_to_kiro`` and is used
+    by tests that verify the full OpenAI -> Kiro conversion pipeline.
+    """
+    from .converters_core import build_kiro_payload as _core_build  # lazy import
+    acp_req = openai_request_to_acp(req)
+    return _core_build(acp_req, conversation_id, profile_arn)
+
+
 def _map_stop_reason_to_openai(stop_reason: Optional[str]) -> str:
     mapping = {
         "end_turn": "stop",

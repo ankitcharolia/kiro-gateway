@@ -79,6 +79,7 @@ class ChatCompletionRequest(BaseModel):
     user: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     thinking: Optional[Dict[str, Any]] = None
+    reasoning_effort: Optional[str] = None
 
 
 OpenAIRequest = ChatCompletionRequest
@@ -105,6 +106,29 @@ class OpenAIChoice(BaseModel):
 ChatCompletionChoice = OpenAIChoice
 
 
+class ChatCompletionChunkDelta(BaseModel):
+    """Delta object inside a streaming chunk choice."""
+    role: Optional[str] = None
+    content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None
+
+
+class ChatCompletionChunkChoice(BaseModel):
+    """Single choice inside a streaming chunk."""
+    index: int = 0
+    delta: ChatCompletionChunkDelta = Field(default_factory=ChatCompletionChunkDelta)
+    finish_reason: Optional[str] = None
+
+
+class ChatCompletionChunk(BaseModel):
+    """OpenAI-compatible streaming chunk."""
+    id: str
+    object: str = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: List[ChatCompletionChunkChoice] = Field(default_factory=list)
+
+
 class OpenAIResponse(BaseModel):
     id: str
     object: str = "chat.completion"
@@ -121,7 +145,7 @@ class ChatCompletionResponse(BaseModel):
     created: int
     model: str
     choices: List[OpenAIChoice]
-    usage: OpenAIUsage = Field(default_factory=OpenAIUsage)
+    usage: Optional[OpenAIUsage] = Field(default_factory=OpenAIUsage)
 
 
 class ModelData(BaseModel):
