@@ -55,3 +55,37 @@ def truncate_messages_to_fit(
     if messages and messages[0].get("role") == "system":
         return [messages[0]] + messages[-(max_messages - 1) :]
     return messages[-max_messages:]
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat addition expected by tests
+# ---------------------------------------------------------------------------
+
+def generate_truncation_tool_result(
+    tool_use_id: str,
+    summary: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a synthetic tool-result that signals context truncation.
+
+    Injected into the message list so the model understands prior tool
+    output was lost due to context-window limits.
+    """
+    content = (
+        summary
+        if summary
+        else (
+            "[Context truncated: previous tool output was removed to fit "
+            "within the context window. Please re-request if needed.]"
+        )
+    )
+    return {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+                "is_error": False,
+            }
+        ],
+    }
