@@ -75,3 +75,23 @@ def parse_sse_chunk(raw: str) -> Optional[Dict[str, Any]]:
             except json.JSONDecodeError:
                 return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat addition expected by tests
+# ---------------------------------------------------------------------------
+
+def find_matching_brace(text: str, start: int = 0) -> int:
+    """Return the index of the closing ``}`` matching the ``{`` at *start*.
+
+    Returns -1 if no matching closing brace is found.
+    """
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
