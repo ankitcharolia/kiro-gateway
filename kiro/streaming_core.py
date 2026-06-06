@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator, Dict, Iterator, Optional
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -48,3 +49,17 @@ async def aiter_sse_events(stream: AsyncIterator[bytes]) -> AsyncIterator[KiroEv
             event = parse_sse_line(line)
             if event is not None:
                 yield event
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat addition expected by tests
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StreamResult:
+    """Aggregated result of consuming a complete ACP stream."""
+    events: List[KiroEvent] = field(default_factory=list)
+    text: str = ""
+    stop_reason: str = "end_turn"
+    input_tokens: int = 0
+    output_tokens: int = 0
