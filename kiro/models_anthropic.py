@@ -1,83 +1,91 @@
-"""Pydantic models for the Anthropic-compatible API layer."""
+"""Anthropic-compatible Pydantic models."""
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
-# Image sources
+# Image source models
 # ---------------------------------------------------------------------------
 
-class UrlImageSource(BaseModel):
-    type: Literal["url"] = "url"
-    url: str
-
-
 class Base64ImageSource(BaseModel):
-    """Base-64 encoded image source for Anthropic vision requests."""
+    """Base64-encoded image source for Anthropic image blocks."""
     type: Literal["base64"] = "base64"
     media_type: str  # e.g. "image/jpeg"
-    data: str        # base-64 string
+    data: str        # base64-encoded bytes
 
 
-ImageSource = Union[UrlImageSource, Base64ImageSource]
+class URLImageSource(BaseModel):
+    """URL-referenced image source."""
+    type: Literal["url"] = "url"
+    url: str
 
 
 # ---------------------------------------------------------------------------
 # Content blocks
 # ---------------------------------------------------------------------------
 
-class TextBlock(BaseModel):
+class TextContentBlock(BaseModel):
     type: Literal["text"] = "text"
     text: str
 
 
-# Alias expected by conftest and tests
-TextContentBlock = TextBlock
-
-
-class ImageBlock(BaseModel):
-    type: Literal["image"] = "image"
-    source: Union[UrlImageSource, Base64ImageSource, Dict[str, Any]]
-
-
-class ToolUseBlock(BaseModel):
+class ToolUseContentBlock(BaseModel):
     type: Literal["tool_use"] = "tool_use"
     id: str
     name: str
     input: Dict[str, Any] = Field(default_factory=dict)
 
 
-# Alias expected by conftest and tests
-ToolUseContentBlock = ToolUseBlock
-
-
-class ToolResultBlock(BaseModel):
+class ToolResultContentBlock(BaseModel):
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
     content: Union[str, List[Dict[str, Any]]]
     is_error: bool = False
 
 
-class ThinkingBlock(BaseModel):
+class ThinkingContentBlock(BaseModel):
     type: Literal["thinking"] = "thinking"
     thinking: str
     signature: Optional[str] = None
 
 
-ContentBlock = Union[TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock]
+class ImageContentBlock(BaseModel):
+    type: Literal["image"] = "image"
+    source: Union[Base64ImageSource, URLImageSource, Dict[str, Any]]
+
+
+class ToolReferenceContentBlock(BaseModel):
+    type: Literal["tool_reference"] = "tool_reference"
+    id: str
+    name: str
+
+
+# Union alias used by tests
+ContentBlock = Union[
+    TextContentBlock,
+    ToolUseContentBlock,
+    ToolResultContentBlock,
+    ThinkingContentBlock,
+    ImageContentBlock,
+    ToolReferenceContentBlock,
+]
+
+# Backward-compat alias
+AnthropicContentBlock = ContentBlock
 
 
 # ---------------------------------------------------------------------------
-# Thinking / extended-thinking config
+# System prompt block
 # ---------------------------------------------------------------------------
 
-class ThinkingConfig(BaseModel):
-    """Controls extended-thinking (budget_tokens) on Anthropic requests."""
-    type: Literal["enabled", "disabled"] = "enabled"
-    budget_tokens: int = 10_000
+class SystemContentBlock(BaseModel):
+    """A typed system-prompt content block (Anthropic extended format)."""
+    type: Literal["text"] = "text"
+    text: str
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +99,37 @@ class AnthropicTool(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Messages and request/response
+# Tool choice
+# ---------------------------------------------------------------------------
+
+class ToolChoiceAuto(BaseModel):
+    type: Literal["auto"] = "auto"
+
+
+class ToolChoiceAny(BaseModel):
+    type: Literal["any"] = "any"
+
+
+class ToolChoiceTool(BaseModel):
+    type: Literal["tool"] = "tool"
+    name: str
+
+
+ToolChoice = Union[ToolChoiceAuto, ToolChoiceAny, ToolChoiceTool]
+
+
+# ---------------------------------------------------------------------------
+# Thinking config
+# ---------------------------------------------------------------------------
+
+class ThinkingConfig(BaseModel):
+    """Extended thinking configuration block."""
+    type: Literal["enabled", "disabled"] = "enabled"
+    budget_tokens: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# Message request / response
 # ---------------------------------------------------------------------------
 
 class AnthropicMessage(BaseModel):
@@ -100,16 +138,21 @@ class AnthropicMessage(BaseModel):
 
 
 class AnthropicRequest(BaseModel):
+    """Anthropic /v1/messages request (legacy name kept for compat)."""
     model: str
     messages: List[AnthropicMessage]
-    max_tokens: int = 4096
-    system: Optional[Union[str, List[Dict[str, Any]]]] = None
+    max_tokens: int = 8192
+    system: Optional[Union[str, List[SystemContentBlock]]] = None
     tools: Optional[List[AnthropicTool]] = None
+    tool_choice: Optional[Any] = None
+    stream: bool = False
     temperature: Optional[float] = None
-    stream: Optional[bool] = None
     thinking: Optional[ThinkingConfig] = None
-    metadata: Optional[Dict[str, Any]] = None
-    stop_sequences: Optional[List[str]] = None
+
+
+class AnthropicMessagesRequest(AnthropicRequest):
+    """Alias matching the newer test import name."""
+    pass
 
 
 class AnthropicUsage(BaseModel):
@@ -119,7 +162,7 @@ class AnthropicUsage(BaseModel):
 
 class AnthropicResponse(BaseModel):
     id: str
-    type: str = "message"
+    type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
     content: List[Dict[str, Any]] = Field(default_factory=list)
     model: str

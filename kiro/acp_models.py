@@ -1,14 +1,51 @@
-"""ACP (Agent Communication Protocol) Pydantic models."""
+"""Pydantic models for ACP (Agent Client Protocol) JSON-RPC payloads."""
 from __future__ import annotations
 
-import uuid
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
-# Primitive content blocks
+# Usage
+# ---------------------------------------------------------------------------
+
+class ACPUsage(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Tool-use / tool-result blocks
+# ---------------------------------------------------------------------------
+
+class ACPToolUseBlock(BaseModel):
+    """A tool-use request block returned by the model."""
+    type: Literal["tool_use"] = "tool_use"
+    id: str
+    name: str
+    input: Dict[str, Any] = Field(default_factory=dict)
+
+
+# Backward-compat aliases
+ACPToolCall = ACPToolUseBlock
+ACPTool = ACPToolUseBlock  # alias expected by converters_core tests
+
+
+class ACPToolResultBlock(BaseModel):
+    """A tool-result block sent back to the model."""
+    type: Literal["tool_result"] = "tool_result"
+    tool_use_id: str
+    content: Union[str, List[Dict[str, Any]]]
+    is_error: bool = False
+
+
+# Alias expected by converters_* and acp_client tests
+ACPToolResult = ACPToolResultBlock
+
+
+# ---------------------------------------------------------------------------
+# Content blocks
 # ---------------------------------------------------------------------------
 
 class ACPTextBlock(BaseModel):
@@ -16,83 +53,41 @@ class ACPTextBlock(BaseModel):
     text: str
 
 
-class ACPImageBlock(BaseModel):
-    """Image content block carried in ACP messages."""
-    type: Literal["image"] = "image"
-    source: Dict[str, Any]  # {type, media_type, data} or {type, url}
-
-
-class ACPToolUseBlock(BaseModel):
-    type: Literal["tool_use"] = "tool_use"
-    id: str = Field(default_factory=lambda: f"tool_{uuid.uuid4().hex[:8]}")
-    name: str
-    input: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ACPToolResultBlock(BaseModel):
-    type: Literal["tool_result"] = "tool_result"
-    tool_use_id: str
-    content: Union[str, List[Dict[str, Any]]]
-    is_error: bool = False
-
-
 class ACPThinkingBlock(BaseModel):
-    """Extended-thinking block in an ACP message."""
     type: Literal["thinking"] = "thinking"
     thinking: str
     signature: Optional[str] = None
 
 
-# Backward-compat aliases
-ACPToolResult = ACPToolResultBlock
-ACPTool = ACPToolUseBlock
-
-ContentBlock = Union[
-    ACPTextBlock, ACPImageBlock, ACPToolUseBlock,
-    ACPToolResultBlock, ACPThinkingBlock,
-]
+ACPContentBlock = Union[ACPTextBlock, ACPThinkingBlock, ACPToolUseBlock, ACPToolResultBlock]
 
 
 # ---------------------------------------------------------------------------
-# Messages
+# Message
 # ---------------------------------------------------------------------------
 
+class ACPMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: Union[str, List[ACPContentBlock]]
+
+
+# PromptMessage — generic role (includes "system") used by tests
 class PromptMessage(BaseModel):
-    role: Literal["user", "assistant", "system"]
-    content: Union[str, List[Dict[str, Any]]]
-
-
-# Alias: tests and conftest use ACPMessage
-ACPMessage = PromptMessage
+    """Generic prompt message supporting user / assistant / system roles."""
+    role: str
+    content: str
 
 
 # ---------------------------------------------------------------------------
-# Tool definitions
-# ---------------------------------------------------------------------------
-
-class ACPToolDefinition(BaseModel):
-    name: str
-    description: Optional[str] = None
-    input_schema: Dict[str, Any] = Field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# JSON-RPC 2.0 envelope
+# JSON-RPC envelope models (used by acp_client)
 # ---------------------------------------------------------------------------
 
 class JsonRpcRequest(BaseModel):
-    jsonrpc: str = "2.0"
-    id: Union[str, int] = Field(default_factory=lambda: str(uuid.uuid4()))
+    """A JSON-RPC 2.0 request envelope."""
+    jsonrpc: Literal["2.0"] = "2.0"
+    id: Union[str, int]
     method: str
-    params: Optional[Dict[str, Any]] = None
-
-
-class JsonRpcResponse(BaseModel):
-    """JSON-RPC 2.0 response envelope."""
-    jsonrpc: str = "2.0"
-    id: Union[str, int, None] = None
-    result: Optional[Any] = None
-    error: Optional[Dict[str, Any]] = None
+    params: Dict[str, Any] = Field(default_factory=dict)
 
 
 class JsonRpcError(BaseModel):
@@ -101,31 +96,41 @@ class JsonRpcError(BaseModel):
     data: Optional[Any] = None
 
 
+class JsonRpcResponse(BaseModel):
+    jsonrpc: Literal["2.0"] = "2.0"
+    id: Optional[Union[str, int]] = None
+    result: Optional[Any] = None
+    error: Optional[JsonRpcError] = None
+
+
+# Backward-compat alias
+ACPRequest = JsonRpcRequest
+
+
 # ---------------------------------------------------------------------------
-# ACP request / response
+# Full ACP response
 # ---------------------------------------------------------------------------
-
-class ACPRequest(BaseModel):
-    messages: List[PromptMessage]
-    model: Optional[str] = None
-    max_tokens: Optional[int] = None
-    tools: Optional[List[ACPToolDefinition]] = None
-    system: Optional[str] = None
-    stream: bool = False
-    temperature: Optional[float] = None
-    metadata: Optional[Dict[str, Any]] = None
-
-
-class ACPUsage(BaseModel):
-    input_tokens: int = 0
-    output_tokens: int = 0
-
 
 class ACPResponse(BaseModel):
-    id: str = Field(default_factory=lambda: f"msg_{uuid.uuid4().hex[:12]}")
-    type: str = "message"
+    """Full ACP message response (non-streaming)."""
+    id: str
+    type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
-    content: List[Dict[str, Any]] = Field(default_factory=list)
-    model: Optional[str] = None
+    model: str = ""
+    content: List[ACPContentBlock] = Field(default_factory=list)
     stop_reason: Optional[str] = None
+    stop_sequence: Optional[str] = None
     usage: ACPUsage = Field(default_factory=ACPUsage)
+
+    # JSON-RPC envelope fields
+    jsonrpc: Optional[str] = None
+    error: Optional[Dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------------
+# Streaming events
+# ---------------------------------------------------------------------------
+
+class ACPStreamEvent(BaseModel):
+    event: str
+    data: Dict[str, Any] = Field(default_factory=dict)

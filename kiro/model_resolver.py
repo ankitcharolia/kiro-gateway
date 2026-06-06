@@ -1,92 +1,152 @@
-"""Model ID resolution and capability helpers."""
+"""Model ID resolution — maps external model names to Kiro-internal IDs."""
 from __future__ import annotations
 
-import re
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------------
-# Internal mapping: kiro model alias -> real model ID
+# Canonical model list
 # ---------------------------------------------------------------------------
 
-_MODEL_MAP: Dict[str, str] = {
-    "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
-    "claude-3-5-haiku": "claude-3-5-haiku-20241022",
-    "claude-3-opus": "claude-3-opus-20240229",
-    "claude-3-sonnet": "claude-3-sonnet-20240229",
-    "claude-3-haiku": "claude-3-haiku-20240307",
-    "claude-sonnet-4": "claude-sonnet-4-5",
-    "gpt-4o": "gpt-4o",
-    "gpt-4o-mini": "gpt-4o-mini",
-    "gpt-4-turbo": "gpt-4-turbo",
-    "gpt-4": "gpt-4",
-    "gpt-3.5-turbo": "gpt-3.5-turbo",
+KIRO_MODELS: List[str] = [
+    "claude-sonnet-4-5",
+    "claude-opus-4-5",
+    "claude-haiku-3-5",
+    "claude-3-7-sonnet",
+    "claude-3-5-sonnet-v2",
+    "claude-3-5-haiku",
+]
+
+DEFAULT_MODEL = "claude-sonnet-4-5"
+
+# Aliases from OpenAI / generic names used by harnesses.
+_ALIAS_MAP: Dict[str, str] = {
+    # OpenAI compat aliases
+    "gpt-4": "claude-sonnet-4-5",
+    "gpt-4o": "claude-sonnet-4-5",
+    "gpt-4-turbo": "claude-sonnet-4-5",
+    "gpt-3.5-turbo": "claude-haiku-3-5",
+    # Anthropic short names
+    "claude-3-sonnet": "claude-3-7-sonnet",
+    "claude-3-haiku": "claude-haiku-3-5",
+    "claude-3-opus": "claude-opus-4-5",
+    "claude-sonnet": "claude-sonnet-4-5",
+    "claude-opus": "claude-opus-4-5",
+    "claude-haiku": "claude-haiku-3-5",
+    # Generic
+    "default": DEFAULT_MODEL,
 }
 
-_CAPABILITIES: Dict[str, Dict[str, Any]] = {
-    "claude": {
-        "vision": True,
-        "tools": True,
-        "streaming": True,
-        "thinking": True,
-        "max_output_tokens": 8192,
-    },
-    "gpt": {
-        "vision": True,
-        "tools": True,
-        "streaming": True,
-        "thinking": False,
-        "max_output_tokens": 4096,
-    },
-    "default": {
-        "vision": False,
-        "tools": False,
-        "streaming": True,
-        "thinking": False,
-        "max_output_tokens": 4096,
-    },
+# Model capabilities map
+_CAPABILITIES: Dict[str, Dict[str, object]] = {
+    "claude-sonnet-4-5": {"vision": True, "tools": True, "thinking": True, "max_tokens": 8192, "context": 200000},
+    "claude-opus-4-5":   {"vision": True, "tools": True, "thinking": True, "max_tokens": 8192, "context": 200000},
+    "claude-haiku-3-5":  {"vision": True, "tools": True, "thinking": False, "max_tokens": 8192, "context": 200000},
+    "claude-3-7-sonnet": {"vision": True, "tools": True, "thinking": True, "max_tokens": 8192, "context": 200000},
+    "claude-3-5-sonnet-v2": {"vision": True, "tools": True, "thinking": False, "max_tokens": 8192, "context": 200000},
+    "claude-3-5-haiku":  {"vision": True, "tools": True, "thinking": False, "max_tokens": 8192, "context": 200000},
 }
 
 
-def resolve_model(model_id: str) -> str:
-    """Return the canonical model ID for *model_id*, passing through unknowns."""
-    return _MODEL_MAP.get(model_id, model_id)
+# ---------------------------------------------------------------------------
+# ModelResolution dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ModelResolution:
+    """Result of resolving an incoming model name."""
+    requested: str
+    resolved: str
+    is_alias: bool = False
+    is_passthrough: bool = False
 
 
-def extract_model_family(model_id: str) -> str:
-    """Return a short family name for *model_id* (e.g. 'claude', 'gpt')."""
+# ---------------------------------------------------------------------------
+# Public functions
+# ---------------------------------------------------------------------------
+
+def resolve_model(model_id: Optional[str]) -> str:
+    """Return the canonical Kiro model ID for *model_id*.
+
+    Falls back to DEFAULT_MODEL if the name is unknown.
+    """
+    if not model_id:
+        return DEFAULT_MODEL
+
+    if model_id in KIRO_MODELS:
+        return model_id
+
     lower = model_id.lower()
-    if "claude" in lower:
-        return "claude"
-    if "gpt" in lower:
-        return "gpt"
-    if "gemini" in lower:
-        return "gemini"
-    if "llama" in lower:
-        return "llama"
-    return "unknown"
+    if lower in _ALIAS_MAP:
+        return _ALIAS_MAP[lower]
+
+    for m in KIRO_MODELS:
+        if lower in m or m in lower:
+            return m
+
+    return DEFAULT_MODEL
 
 
-def get_capabilities(model_id: str) -> Dict[str, Any]:
-    """Return a capabilities dict for *model_id*."""
-    family = extract_model_family(model_id)
-    return dict(_CAPABILITIES.get(family, _CAPABILITIES["default"]))
+# Backward-compat alias
+normalize_model_name = resolve_model
 
 
-def get_model_id_for_kiro(model_id: str) -> str:
-    """Alias for :func:`resolve_model` — maps public IDs to Kiro-internal IDs."""
+def get_model_id_for_kiro(model_id: Optional[str]) -> str:
+    """Resolve *model_id* to a Kiro-internal model identifier."""
     return resolve_model(model_id)
 
 
 def list_models() -> List[str]:
-    """Return the list of supported model aliases."""
-    return sorted(_MODEL_MAP.keys())
+    """Return the list of all supported canonical model IDs."""
+    return list(KIRO_MODELS)
 
 
-def is_claude_model(model_id: str) -> bool:
-    """Return True if *model_id* is a Claude model."""
-    return extract_model_family(model_id) == "claude"
+def get_capabilities(model_id: Optional[str]) -> Dict[str, object]:
+    """Return capability flags for *model_id*.
+
+    Falls back to the DEFAULT_MODEL capabilities if unknown.
+    """
+    canonical = resolve_model(model_id)
+    return dict(_CAPABILITIES.get(canonical, _CAPABILITIES[DEFAULT_MODEL]))
 
 
-def is_openai_model(model_id: str) -> bool:
-    """Return True if *model_id* is an OpenAI model."""
-    return extract_model_family(model_id) == "gpt"
+def extract_model_family(model_id: Optional[str]) -> str:
+    """Return the high-level family name (e.g. 'sonnet', 'haiku', 'opus')."""
+    resolved = resolve_model(model_id)
+    for family in ("opus", "sonnet", "haiku"):
+        if family in resolved:
+            return family
+    return "sonnet"
+
+
+# ---------------------------------------------------------------------------
+# ModelResolver class (tests import this by name)
+# ---------------------------------------------------------------------------
+
+class ModelResolver:
+    """Stateful wrapper around the module-level resolution functions.
+
+    Accepts an optional :class:`~kiro.cache.ModelInfoCache` to honour
+    dynamically discovered models returned by the Kiro API.
+    """
+
+    def __init__(self, cache=None) -> None:
+        self._cache = cache
+
+    def resolve(self, model_id: Optional[str]) -> ModelResolution:
+        """Resolve *model_id* and return a :class:`ModelResolution`."""
+        resolved = resolve_model(model_id)
+        is_alias = bool(model_id) and model_id != resolved and model_id not in KIRO_MODELS
+        is_passthrough = resolved == DEFAULT_MODEL and bool(model_id) and model_id not in KIRO_MODELS and (model_id or "").lower() not in _ALIAS_MAP
+        return ModelResolution(
+            requested=model_id or "",
+            resolved=resolved,
+            is_alias=is_alias,
+            is_passthrough=is_passthrough,
+        )
+
+    def get_capabilities(self, model_id: Optional[str]) -> Dict[str, object]:
+        return get_capabilities(model_id)
+
+    def list_models(self) -> List[str]:
+        return list_models()

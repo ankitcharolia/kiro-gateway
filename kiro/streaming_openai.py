@@ -1,13 +1,12 @@
 """Streaming helpers — OpenAI SSE format."""
 from __future__ import annotations
 
-import asyncio
 import json
 import secrets
 import time
-from typing import Any, AsyncIterator, Callable, Dict, Iterator, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Iterator, List, Optional
 
-from .streaming_core import FirstTokenTimeoutError
+from .streaming_core import FirstTokenTimeoutError, KiroEvent
 
 
 def generate_chunk_id(prefix: str = "chatcmpl") -> str:
@@ -44,11 +43,12 @@ def build_chunk(
     )
 
 
-def acp_stream_to_openai_chunks(
+def stream_kiro_to_openai(
     acp_events: Iterator[Dict[str, Any]],
     model: str,
     chunk_id: Optional[str] = None,
 ) -> Iterator[str]:
+    """Convert an ACP event iterator to OpenAI SSE chunks."""
     _id = chunk_id or generate_chunk_id()
     _created = int(time.time())
     yield build_chunk(_id, model, {"role": "assistant", "content": ""}, created=_created)
@@ -69,7 +69,8 @@ def acp_stream_to_openai_chunks(
     yield _sse_line("[DONE]")
 
 
-stream_kiro_to_openai = acp_stream_to_openai_chunks
+# Alias expected by tests
+acp_stream_to_openai_chunks = stream_kiro_to_openai
 
 
 def stream_kiro_to_openai_internal(
@@ -77,7 +78,42 @@ def stream_kiro_to_openai_internal(
     model: str,
     chunk_id: Optional[str] = None,
 ) -> Iterator[str]:
-    yield from acp_stream_to_openai_chunks(acp_events, model, chunk_id)
+    yield from stream_kiro_to_openai(acp_events, model, chunk_id)
+
+
+async def collect_stream_response(
+    kiro_event_stream: AsyncIterator[KiroEvent],
+    model: str,
+    chunk_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    _id = chunk_id or generate_chunk_id()
+    text_parts: List[str] = []
+    usage: Dict[str, Any] = {}
+
+    async for evt in kiro_event_stream:
+        if evt.type == "content" and evt.content:
+            text_parts.append(evt.content)
+        elif evt.type == "usage" and evt.usage:
+            usage.update(evt.usage)
+
+    return {
+        "id": _id,
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "".join(text_parts)},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+        },
+    }
 
 
 async def stream_with_first_token_retry(
@@ -85,18 +121,11 @@ async def stream_with_first_token_retry(
     first_token_timeout: float = 30.0,
     max_retries: int = 2,
 ) -> AsyncIterator[str]:
-    """Wrap an async SSE stream with a first-token timeout and retry logic.
-
-    Raises :class:`~kiro.streaming_core.FirstTokenTimeoutError` when all
-    retries are exhausted without receiving a first token.
-    """
+    import asyncio
     for attempt in range(max_retries + 1):
         stream = stream_factory()
         try:
-            first = True
             async for chunk in stream:
-                if first:
-                    first = False
                 yield chunk
             return
         except asyncio.TimeoutError:
