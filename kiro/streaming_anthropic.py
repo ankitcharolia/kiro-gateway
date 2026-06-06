@@ -1,6 +1,7 @@
 """Streaming helpers — Anthropic SSE format."""
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import time
@@ -89,3 +90,50 @@ def build_message_delta(
 def build_message_stop() -> str:
     """Emit the ``message_stop`` SSE event."""
     return _sse_line("message_stop", {"type": "message_stop"})
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat additions expected by tests
+# ---------------------------------------------------------------------------
+
+def generate_thinking_signature(thinking_text: str) -> str:
+    """Return a deterministic hex signature for a thinking block.
+
+    Used by tests that verify thinking blocks carry a stable identifier.
+    """
+    return hashlib.sha256(thinking_text.encode()).hexdigest()[:32]
+
+
+def acp_stream_to_anthropic_events(
+    acp_events: Iterator[Dict[str, Any]],
+    model: str,
+    message_id: Optional[str] = None,
+) -> Iterator[str]:
+    """Translate ACP stream events into Anthropic SSE strings.
+
+    Yields raw SSE strings ready to be written to the response.
+    Accepts a sync iterable of ACP event dicts.
+    """
+    _id = message_id or generate_message_id()
+    yield build_message_start(model, _id)
+    idx = 0
+    yield build_content_block_start(idx, "text")
+
+    for event in acp_events:
+        etype = event.get("event", "")
+        data = event.get("data", {})
+        if etype == "text_delta":
+            text = data.get("text", "")
+            if text:
+                yield build_content_block_delta(idx, text)
+        elif etype in ("message_stop", "end"):
+            stop_reason = data.get("stop_reason", "end_turn")
+            output_tokens = data.get("usage", {}).get("output_tokens", 0)
+            yield build_content_block_stop(idx)
+            yield build_message_delta(stop_reason, output_tokens)
+            yield build_message_stop()
+            return
+
+    yield build_content_block_stop(idx)
+    yield build_message_delta("end_turn", 0)
+    yield build_message_stop()
