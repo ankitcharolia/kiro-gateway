@@ -104,3 +104,32 @@ class ACPResponse(BaseModel):
 class ACPStreamEvent(BaseModel):
     event: str
     data: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat aliases expected by tests
+# ---------------------------------------------------------------------------
+
+# ACPToolResult -> ACPToolResultBlock
+ACPToolResult = ACPToolResultBlock
+
+
+class ACPTool(BaseModel):
+    """Tool definition model used in ACP requests."""
+    name: str
+    description: Optional[str] = None
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+
+
+class JsonRpcRequest(BaseModel):
+    """Generic JSON-RPC 2.0 request envelope."""
+    jsonrpc: Literal["2.0"] = "2.0"
+    id: Union[str, int]
+    method: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PromptMessage(BaseModel):
+    """Simple role+content pair used for prompt construction."""
+    role: str
+    content: Union[str, List[Any]]
