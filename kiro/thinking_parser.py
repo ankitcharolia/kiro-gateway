@@ -59,3 +59,11 @@ class ThinkingParser:
     def has_thinking(text: str) -> bool:
         """Alias for :func:`has_thinking`."""
         return has_thinking(text)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat alias expected by tests
+# ---------------------------------------------------------------------------
+
+# ThinkingParseResult -> ParsedThinking
+ThinkingParseResult = ParsedThinking
