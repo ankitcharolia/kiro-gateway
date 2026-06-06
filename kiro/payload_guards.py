@@ -1,6 +1,7 @@
 """Payload validation and trimming guards."""
 from __future__ import annotations
 
+import json as _json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -77,3 +78,57 @@ def validate_max_tokens(
     if requested is None:
         return hard_limit
     return min(requested, hard_limit)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat additions expected by tests
+# ---------------------------------------------------------------------------
+
+_MAX_PAYLOAD_BYTES = 10 * 1024 * 1024  # 10 MB hard limit
+
+
+def check_payload_size(payload: Any, max_bytes: int = _MAX_PAYLOAD_BYTES) -> None:
+    """Raise ValueError if the JSON-serialised *payload* exceeds *max_bytes*."""
+    size = len(_json.dumps(payload).encode("utf-8"))
+    if size > max_bytes:
+        raise ValueError(
+            f"Payload too large: {size} bytes exceeds limit of {max_bytes} bytes"
+        )
+
+
+def guard_openai_request(
+    request: Dict[str, Any],
+    max_input_tokens: int = 100_000,
+    hard_limit: int = 8192,
+) -> Tuple[Dict[str, Any], PayloadTrimStats]:
+    """Validate and trim an OpenAI-format chat request.
+
+    Clamps max_tokens and trims messages to fit within *max_input_tokens*.
+    Returns the (possibly modified) request dict and trim stats.
+    """
+    check_payload_size(request)
+    request = dict(request)
+    request["max_tokens"] = validate_max_tokens(request.get("max_tokens"), hard_limit)
+    messages = request.get("messages", [])
+    trimmed, stats = trim_messages(messages, max_input_tokens)
+    request["messages"] = trimmed
+    return request, stats
+
+
+def guard_anthropic_request(
+    request: Dict[str, Any],
+    max_input_tokens: int = 100_000,
+    hard_limit: int = 8192,
+) -> Tuple[Dict[str, Any], PayloadTrimStats]:
+    """Validate and trim an Anthropic-format messages request.
+
+    Same semantics as guard_openai_request but the body shape follows
+    the Anthropic /v1/messages schema.
+    """
+    check_payload_size(request)
+    request = dict(request)
+    request["max_tokens"] = validate_max_tokens(request.get("max_tokens"), hard_limit)
+    messages = request.get("messages", [])
+    trimmed, stats = trim_messages(messages, max_input_tokens)
+    request["messages"] = trimmed
+    return request, stats
