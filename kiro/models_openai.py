@@ -91,6 +91,10 @@ class OpenAIUsage(BaseModel):
     total_tokens: int = 0
 
 
+# Alias: tests and converters expect ChatCompletionUsage
+ChatCompletionUsage = OpenAIUsage
+
+
 class OpenAIChoice(BaseModel):
     index: int = 0
     message: Message

@@ -59,6 +59,29 @@ def convert_anthropic_content_to_text(
 
 
 # ---------------------------------------------------------------------------
+# Helper: extract system prompt text
+# ---------------------------------------------------------------------------
+
+def extract_system_prompt(
+    system: Union[str, List[Any], None],
+) -> Optional[str]:
+    """Return the system prompt as a plain string, or None if absent."""
+    if system is None:
+        return None
+    if isinstance(system, str):
+        return system or None
+    parts: List[str] = []
+    for block in system:
+        if isinstance(block, dict):
+            if block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        elif hasattr(block, "text"):
+            parts.append(getattr(block, "text", ""))
+    text = " ".join(parts).strip()
+    return text if text else None
+
+
+# ---------------------------------------------------------------------------
 # Anthropic request -> ACP request
 # ---------------------------------------------------------------------------
 
@@ -74,12 +97,7 @@ def anthropic_request_to_acp(req: AnthropicRequest) -> ACPRequest:
             )
         )
 
-    system_text: Optional[str] = None
-    if req.system:
-        if isinstance(req.system, str):
-            system_text = req.system
-        else:
-            system_text = " ".join(getattr(b, "text", str(b)) for b in req.system)
+    system_text: Optional[str] = extract_system_prompt(req.system)
 
     thinking = None
     if req.thinking:

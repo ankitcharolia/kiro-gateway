@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 
@@ -154,3 +154,34 @@ async def handle_native_web_search(
         return generate_search_summary(items, max_results=max_results)
     except MCPToolError as exc:
         return f"Web search failed: {exc}"
+
+
+async def generate_anthropic_web_search_sse(
+    query: str,
+    endpoint: str,
+    auth_token: Optional[str] = None,
+    max_results: int = 5,
+    timeout: float = 30.0,
+) -> AsyncIterator[str]:
+    """Yield Anthropic-compatible SSE lines for a web search result."""
+    import json as _json
+
+    summary = await handle_native_web_search(
+        query=query,
+        endpoint=endpoint,
+        auth_token=auth_token,
+        max_results=max_results,
+        timeout=timeout,
+    )
+
+    # Yield a minimal Anthropic streaming SSE sequence
+    events = [
+        ("content_block_start", {"type": "content_block_start", "index": 0,
+                                   "content_block": {"type": "text", "text": ""}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                   "delta": {"type": "text_delta", "text": summary}}),
+        ("content_block_stop",  {"type": "content_block_stop", "index": 0}),
+        ("message_stop",        {"type": "message_stop"}),
+    ]
+    for event_type, data in events:
+        yield f"event: {event_type}\ndata: {_json.dumps(data)}\n\n"
