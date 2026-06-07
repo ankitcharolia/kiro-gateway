@@ -232,3 +232,30 @@ class ACPResponse(BaseModel):
     model: Optional[str] = None
     stop_reason: Optional[str] = None
     usage: ACPUsage = Field(default_factory=ACPUsage)
+
+
+# ---------------------------------------------------------------------------
+# ACP HTTP chat models (used by routes_acp)
+# ---------------------------------------------------------------------------
+
+class ACPChatRequest(BaseModel):
+    """Request body for POST /acp/chat and POST /acp/chat/stream."""
+    messages: List[PromptMessage]
+    model: Optional[str] = None
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    tools: Optional[List[ACPToolDefinition]] = None
+    filesystem_roots: Optional[List[Dict[str, Any]]] = None
+    terminal: Optional[Dict[str, Any]] = None
+    stream: bool = False
+    thinking: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class ACPChatResponse(BaseModel):
+    """Response body for POST /acp/chat."""
+    session_id: str = ""
+    content: str = ""
+    tool_calls: List[ACPToolUseBlock] = Field(default_factory=list)
+    finish_reason: str = "stop"
+    usage: Dict[str, Any] = Field(default_factory=dict)
