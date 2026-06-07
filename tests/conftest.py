@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import AsyncIterator, Dict, Any, List
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -219,9 +220,25 @@ from kiro.config import PROXY_API_KEY
 
 @pytest.fixture(scope="session")
 def test_client():
-    """Session-scoped FastAPI TestClient for integration tests."""
-    with TestClient(app) as client:
-        yield client
+    """Session-scoped FastAPI TestClient for integration tests.
+
+    ACPClient.start/stop are patched with async no-ops so that the app
+    lifespan does not attempt to spawn the real `kiro` binary, which is
+    not available in the CI test environment.
+    """
+    async def _noop_start(self) -> None:  # noqa: D401
+        self._proc = None
+        self._reader_task = None
+
+    async def _noop_stop(self) -> None:  # noqa: D401
+        pass
+
+    with (
+        patch("kiro.acp_client.ACPClient.start", new=_noop_start),
+        patch("kiro.acp_client.ACPClient.stop", new=_noop_stop),
+    ):
+        with TestClient(app) as client:
+            yield client
 
 
 @pytest.fixture
