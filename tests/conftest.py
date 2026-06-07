@@ -213,7 +213,7 @@ def make_event_gen():
 # ---------------------------------------------------------------------------
 
 from fastapi.testclient import TestClient
-from kiro.main import app
+from main import app  # app lives at repo root main.py, not inside kiro package
 from kiro.config import PROXY_API_KEY
 
 
