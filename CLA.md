@@ -8,7 +8,7 @@ Version 1.0 — Effective Date: December 2025
 
 ## Introduction
 
-Thank you for your interest in contributing to **Kiro Gateway** (the "Project"), maintained by **Jwadow** (the "Maintainer"). This Contributor License Agreement ("Agreement") documents the rights granted by contributors to the Maintainer.
+Thank you for your interest in contributing to **Kiro Gateway** (the "Project"), maintained by **ankitcharolia** (the "Maintainer"). This Contributor License Agreement ("Agreement") documents the rights granted by contributors to the Maintainer.
 
 By submitting a Contribution to this Project, you accept and agree to the following terms and conditions for your present and future Contributions.
 
@@ -107,9 +107,9 @@ For significant contributions, you may be asked to explicitly confirm your accep
 
 If you have questions about this CLA, please open an issue in the repository or contact the Maintainer directly.
 
-**Maintainer:** Jwadow
-**GitHub:** [@jwadow](https://github.com/jwadow)
-**Project:** [Kiro Gateway](https://github.com/jwadow/kiro-gateway)
+**Maintainer:** ankitcharolia
+**GitHub:** [@ankitcharolia](https://github.com/ankitcharolia)
+**Project:** [Kiro Gateway](https://github.com/ankitcharolia/kiro-gateway)
 
 ---
 
