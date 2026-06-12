@@ -222,23 +222,96 @@ from kiro.config import PROXY_API_KEY
 def test_client():
     """Session-scoped FastAPI TestClient for integration tests.
 
-    ACPClient.start/stop are patched with async no-ops so that the app
-    lifespan does not attempt to spawn the real `kiro` binary, which is
+    ACPClient.start/stop/initialize are patched with async no-ops so that the
+    app lifespan does not attempt to spawn the real `kiro` binary, which is
     not available in the CI test environment.
     """
-    async def _noop_start(self) -> None:  # noqa: D401
+    async def _noop_start(self) -> None:
         self._proc = None
         self._reader_task = None
 
-    async def _noop_stop(self) -> None:  # noqa: D401
+    async def _noop_stop(self) -> None:
+        pass
+
+    async def _noop_initialize(self, capabilities=None) -> None:
         pass
 
     with (
         patch("kiro.acp_client.ACPClient.start", new=_noop_start),
         patch("kiro.acp_client.ACPClient.stop", new=_noop_stop),
+        patch("kiro.acp_client.ACPClient.initialize", new=_noop_initialize),
     ):
         with TestClient(app) as client:
             yield client
+
+
+@pytest.fixture
+def sync_client():
+    """Function-scoped TestClient with ACP and ShimService fully mocked.
+
+    Patches start/stop/initialize so no kiro CLI is spawned. Also installs a
+    mock ShimService on app.state so shim routes return valid responses.
+    Uses function scope to avoid cross-test state contamination.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    async def _noop_start(self) -> None:
+        self._proc = None
+        self._reader_task = None
+
+    async def _noop_stop(self) -> None:
+        pass
+
+    async def _noop_initialize(self, capabilities=None) -> None:
+        pass
+
+    mock_shim = MagicMock()
+    mock_shim.complete = AsyncMock(return_value={
+        "content": "Hello, world!",
+        "tool_calls": [],
+        "finish_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    })
+
+    with (
+        patch("kiro.acp_client.ACPClient.start", new=_noop_start),
+        patch("kiro.acp_client.ACPClient.stop", new=_noop_stop),
+        patch("kiro.acp_client.ACPClient.initialize", new=_noop_initialize),
+    ):
+        with TestClient(app) as client:
+            client.app.state.shim_service = mock_shim
+            yield client
+
+
+@pytest.fixture
+def openai_headers() -> dict:
+    """Authorization headers for OpenAI-compatible endpoints."""
+    return {"Authorization": f"Bearer {PROXY_API_KEY}"}
+
+
+@pytest.fixture
+def anthropic_headers() -> dict:
+    """x-api-key headers for Anthropic-compatible endpoints."""
+    return {"x-api-key": PROXY_API_KEY}
+
+
+@pytest.fixture
+def sample_tool_definition() -> dict:
+    """A valid OpenAI-format tool definition for use in request payloads."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather for a location.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City name"},
+                },
+                "required": ["location"],
+            },
+        },
+    }
 
 
 @pytest.fixture

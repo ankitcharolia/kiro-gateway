@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from kiro.acp_client import ACPClient
-from kiro.config import settings
+from kiro.config import settings, APP_VERSION
 from kiro.routes_acp import router as acp_router
 from kiro.routes_openai_shim import router as openai_shim_router
 from kiro.routes_anthropic_shim import router as anthropic_shim_router
@@ -104,7 +104,7 @@ if settings.ANTHROPIC_SHIM_ENABLED:
 
 @app.get("/health", tags=["Health"])
 async def health():
-    return {"status": "ok", "mode": "acp-cli-bridge", "version": "2.0.0"}
+    return {"status": "ok", "mode": "acp-cli-bridge", "version": APP_VERSION}
 
 
 def _parse_args() -> argparse.Namespace:
