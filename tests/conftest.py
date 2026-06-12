@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import AsyncIterator, Dict, Any, List
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -207,6 +207,20 @@ def acp_stream_thinking_events():
 @pytest.fixture
 def make_event_gen():
     return _event_gen
+
+
+# ---------------------------------------------------------------------------
+# MCP tools fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def mock_auth_manager():
+    """Mock auth manager for MCP API tests."""
+    manager = Mock()
+    manager.get_token = AsyncMock(return_value="test-bearer-token")
+    manager.base_url = "https://test.kiro.dev"
+    manager.mcp_endpoint = "https://test.kiro.dev/mcp/search"
+    return manager
 
 
 # ---------------------------------------------------------------------------

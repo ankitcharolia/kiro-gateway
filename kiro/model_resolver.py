@@ -122,14 +122,60 @@ def is_openai_model(model_id: str) -> bool:
     return extract_model_family(model_id) == "gpt"
 
 
-class ModelResolver:
-    """Stateful resolver — wraps the module-level helpers for DI / mocking."""
+class ModelInfoCache:
+    """Simple in-memory cache of ModelInfo objects keyed by model_id."""
 
-    def __init__(self, model_map: Optional[Dict[str, str]] = None) -> None:
+    def __init__(self, models: Optional[List[Dict[str, Any]]] = None) -> None:
+        # models is a list of dicts with at least an 'id' key
+        self._models: Dict[str, Dict[str, Any]] = {}
+        for m in (models or []):
+            mid = m.get("id", "")
+            if mid:
+                self._models[mid] = m
+
+    def get(self, model_id: str) -> Optional[Dict[str, Any]]:
+        return self._models.get(model_id)
+
+    def all(self) -> List[Dict[str, Any]]:
+        return list(self._models.values())
+
+    def ids(self) -> List[str]:
+        return sorted(self._models.keys())
+
+
+class ModelResolver:
+    """Stateful resolver — wraps the module-level helpers for DI / mocking.
+
+    Accepts optional *cache* (a ModelInfoCache) and *hidden_models* (a list of
+    model IDs that are valid but not shown in public listings) so that test
+    fixtures can inject known state without touching global state.
+    """
+
+    def __init__(
+        self,
+        model_map: Optional[Dict[str, str]] = None,
+        cache: Optional[ModelInfoCache] = None,
+        hidden_models: Optional[List[str]] = None,
+    ) -> None:
         self._map: Dict[str, str] = model_map if model_map is not None else dict(_MODEL_MAP)
+        self._cache: ModelInfoCache = cache if cache is not None else ModelInfoCache()
+        self._hidden_models: List[str] = list(hidden_models or [])
+
+    # ------------------------------------------------------------------
+    # Core resolution
+    # ------------------------------------------------------------------
 
     def resolve(self, model_id: str) -> str:
-        return self._map.get(model_id, model_id)
+        """Resolve *model_id* to its canonical form, passing through unknowns."""
+        # Check static map first, then cache, then pass through
+        if model_id in self._map:
+            return self._map[model_id]
+        if self._cache.get(model_id):
+            return model_id
+        # Hidden models are valid pass-throughs
+        if model_id in self._hidden_models:
+            return model_id
+        return model_id
 
     def get_capabilities(self, model_id: str) -> Dict[str, Any]:
         return get_capabilities(self.resolve(model_id))
@@ -142,3 +188,31 @@ class ModelResolver:
 
     def is_openai(self, model_id: str) -> bool:
         return is_openai_model(self.resolve(model_id))
+
+    # ------------------------------------------------------------------
+    # Extended helpers used by unit tests
+    # ------------------------------------------------------------------
+
+    def get_available_models(self) -> List[str]:
+        """Return all public model IDs: static map aliases + cache IDs + hidden models, sorted."""
+        ids: set = set(self._map.keys()) | set(self._cache.ids()) | set(self._hidden_models)
+        return sorted(ids)
+
+    def get_models_by_family(self, family: str) -> List[str]:
+        """Return all available model IDs whose family matches *family* (case-insensitive)."""
+        target = family.lower()
+        return sorted(
+            mid for mid in self.get_available_models()
+            if extract_model_family(mid).lower() == target
+        )
+
+    def get_suggestions_for_model(self, model_id: str) -> List[str]:
+        """Return alternative model IDs in the same family as *model_id*.
+
+        Returns all models in the same family, excluding *model_id* itself.
+        If the family is unknown, returns all available models.
+        """
+        family = extract_model_family(model_id)
+        if family == "unknown":
+            return [m for m in self.get_available_models() if m != model_id]
+        return [m for m in self.get_models_by_family(family) if m != model_id]
