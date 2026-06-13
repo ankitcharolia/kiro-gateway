@@ -27,7 +27,7 @@ RUN set -eux; \
 # ────────────────────────────────────────────────────────────────────────────
 # Stage 2: Python dependency build
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /build
 COPY requirements.txt .
@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # ────────────────────────────────────────────────────────────────────────────
 # Stage 3: Runtime image
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 LABEL org.opencontainers.image.title="kiro-gateway" \
       org.opencontainers.image.description="ACP-compliant bridge: OpenAI/Anthropic API → kiro CLI" \
