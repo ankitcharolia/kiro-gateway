@@ -1,20 +1,36 @@
 """
-test_account_manager.py — REMOVED
+test_account_manager.py
 
-kiro.account_manager (AccountManager / multi-account failover) was
-deleted as part of the ACP compliance refactor.  Multi-account
-quota-bypass is prohibited; the gateway now enforces a single
-authenticated kiro CLI session.
-
-This file is kept as a tombstone so git history stays readable.
-
-See: kiro/compliance.py, COMPLIANCE.md
+kiro.account_manager is a minimal single-account manager in ACP compliance mode.
+Multi-account failover is prohibited; the gateway enforces a single authenticated
+kiro CLI session.
 """
+from __future__ import annotations
 
-import pytest
+from kiro.account_manager import AccountManager
 
 
-def test_account_manager_removed_notice() -> None:
-    """Confirm multi-account support has been intentionally removed."""
-    with pytest.raises((ImportError, ModuleNotFoundError)):
-        from kiro.account_manager import AccountManager  # noqa: F401
+def test_account_manager_is_importable():
+    """AccountManager can be imported (single-account ACP mode)."""
+    assert AccountManager is not None
+
+
+def test_account_manager_is_ready():
+    """AccountManager.is_ready() returns True by default."""
+    mgr = AccountManager()
+    assert mgr.is_ready() is True
+
+
+def test_account_manager_set_and_get_models():
+    """AccountManager stores and returns model lists."""
+    mgr = AccountManager()
+    mgr.set_available_models(["claude-sonnet-4-5", "claude-haiku-3-5"])
+    models = mgr.get_all_available_models()
+    assert "claude-sonnet-4-5" in models
+    assert "claude-haiku-3-5" in models
+
+
+def test_account_manager_empty_by_default():
+    """AccountManager starts with an empty model list."""
+    mgr = AccountManager()
+    assert mgr.get_all_available_models() == []

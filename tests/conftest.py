@@ -287,6 +287,12 @@ def sync_client():
         "usage": {"input_tokens": 10, "output_tokens": 5},
     })
 
+    async def _mock_stream(*args, **kwargs):
+        yield {"type": "text", "content": "Hello"}
+        yield {"type": "done", "finish_reason": "end_turn"}
+
+    mock_shim.stream_tokens = _mock_stream
+
     with (
         patch("kiro.acp_client.ACPClient.start", new=_noop_start),
         patch("kiro.acp_client.ACPClient.stop", new=_noop_stop),

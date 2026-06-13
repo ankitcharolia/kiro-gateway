@@ -1,291 +1,69 @@
-# -*- coding: utf-8 -*-
-
-"""
-Unit tests for exception handlers.
-Tests validation error handling and debug logging integration.
-"""
+"""Unit tests for kiro.exceptions — ACP-mode exception hierarchy."""
+from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from fastapi import Request
-from fastapi.exceptions import RequestValidationError
+
+from kiro.exceptions import (
+    AuthenticationError,
+    AuthorizationError,
+    ComplianceError,
+    KiroGatewayError,
+    RateLimitError,
+    TimeoutError,
+    UpstreamError,
+    ValidationError,
+)
 
 
-class TestSanitizeValidationErrors:
-    """Tests for sanitize_validation_errors function."""
-    
-    def test_sanitizes_bytes_in_input_field(self):
-        """
-        What it does: Verifies that bytes in 'input' field are converted to strings.
-        Purpose: Ensure JSON serialization works for bytes objects.
-        """
-        print("Setup: Creating error with bytes in input field...")
-        from kiro.exceptions import sanitize_validation_errors
-        
-        errors = [
-            {
-                "type": "json_invalid",
-                "loc": ["body", 0],
-                "msg": "Invalid JSON",
-                "input": b'{"invalid": json}'
-            }
-        ]
-        
-        print("Action: Calling sanitize_validation_errors...")
-        result = sanitize_validation_errors(errors)
-        
-        print(f"Comparing input type: Expected str, Got {type(result[0]['input'])}")
-        assert isinstance(result[0]["input"], str)
-        assert result[0]["input"] == '{"invalid": json}'
-    
-    def test_sanitizes_bytes_in_list_values(self):
-        """
-        What it does: Verifies that bytes in list values are converted to strings.
-        Purpose: Ensure nested bytes are handled.
-        """
-        print("Setup: Creating error with bytes in list...")
-        from kiro.exceptions import sanitize_validation_errors
-        
-        errors = [
-            {
-                "type": "value_error",
-                "loc": ["body", "messages"],
-                "msg": "Invalid value",
-                "input": [b'bytes1', "string", b'bytes2']
-            }
-        ]
-        
-        print("Action: Calling sanitize_validation_errors...")
-        result = sanitize_validation_errors(errors)
-        
-        print(f"Checking list values are converted...")
-        assert result[0]["input"] == ["bytes1", "string", "bytes2"]
-    
-    def test_preserves_non_bytes_values(self):
-        """
-        What it does: Verifies that non-bytes values are preserved.
-        Purpose: Ensure normal values are not modified.
-        """
-        print("Setup: Creating error with normal values...")
-        from kiro.exceptions import sanitize_validation_errors
-        
-        errors = [
-            {
-                "type": "missing",
-                "loc": ["body", "model"],
-                "msg": "Field required",
-                "input": {"messages": []}
-            }
-        ]
-        
-        print("Action: Calling sanitize_validation_errors...")
-        result = sanitize_validation_errors(errors)
-        
-        print(f"Checking values are preserved...")
-        assert result[0]["input"] == {"messages": []}
-        assert result[0]["type"] == "missing"
+def test_kiro_gateway_error_is_exception():
+    err = KiroGatewayError("oops")
+    assert isinstance(err, Exception)
+    assert err.message == "oops"
+    assert err.status_code == 500
 
 
-class TestValidationExceptionHandler:
-    """Tests for validation_exception_handler function."""
-    
-    @pytest.mark.asyncio
-    async def test_returns_422_status_code(self):
-        """
-        What it does: Verifies that handler returns 422 status code.
-        Purpose: Ensure proper HTTP status for validation errors.
-        """
-        print("Setup: Creating mock request and exception...")
-        from kiro.exceptions import validation_exception_handler
-        
-        mock_request = MagicMock(spec=Request)
-        mock_request.body = AsyncMock(return_value=b'{"invalid": json}')
-        
-        mock_exc = MagicMock(spec=RequestValidationError)
-        mock_exc.errors.return_value = [
-            {"type": "json_invalid", "loc": ["body"], "msg": "Invalid JSON", "input": {}}
-        ]
-        
-        # Patch debug_logger at the source module
-        with patch('kiro.debug_logger.debug_logger') as mock_logger:
-            print("Action: Calling validation_exception_handler...")
-            response = await validation_exception_handler(mock_request, mock_exc)
-            
-            print(f"Comparing status_code: Expected 422, Got {response.status_code}")
-            assert response.status_code == 422
-    
-    @pytest.mark.asyncio
-    async def test_calls_flush_on_error_with_422(self):
-        """
-        What it does: Verifies that handler calls flush_on_error(422).
-        Purpose: Ensure debug logs are flushed for validation errors.
-        """
-        print("Setup: Creating mock request and exception...")
-        from kiro.exceptions import validation_exception_handler
-        
-        mock_request = MagicMock(spec=Request)
-        mock_request.body = AsyncMock(return_value=b'{"test": "data"}')
-        
-        mock_exc = MagicMock(spec=RequestValidationError)
-        mock_exc.errors.return_value = [
-            {"type": "missing", "loc": ["body", "model"], "msg": "Field required", "input": {}}
-        ]
-        
-        # Patch debug_logger at the source module
-        with patch('kiro.debug_logger.debug_logger') as mock_logger:
-            print("Action: Calling validation_exception_handler...")
-            await validation_exception_handler(mock_request, mock_exc)
-            
-            print("Verifying flush_on_error was called with 422...")
-            mock_logger.flush_on_error.assert_called_once()
-            call_args = mock_logger.flush_on_error.call_args
-            assert call_args[0][0] == 422  # First positional argument is status_code
-    
-    @pytest.mark.asyncio
-    async def test_includes_sanitized_errors_in_response(self):
-        """
-        What it does: Verifies that response includes sanitized errors.
-        Purpose: Ensure error details are returned to client.
-        """
-        print("Setup: Creating mock request and exception...")
-        from kiro.exceptions import validation_exception_handler
-        import json
-        
-        mock_request = MagicMock(spec=Request)
-        mock_request.body = AsyncMock(return_value=b'{"test": "data"}')
-        
-        mock_exc = MagicMock(spec=RequestValidationError)
-        mock_exc.errors.return_value = [
-            {"type": "missing", "loc": ["body", "model"], "msg": "Field required", "input": {}}
-        ]
-        
-        with patch('kiro.debug_logger.debug_logger'):
-            print("Action: Calling validation_exception_handler...")
-            response = await validation_exception_handler(mock_request, mock_exc)
-            
-            print("Parsing response body...")
-            body = json.loads(response.body.decode())
-            
-            print(f"Verifying 'detail' is in response...")
-            assert "detail" in body
-            assert len(body["detail"]) == 1
-            assert body["detail"][0]["type"] == "missing"
-    
-    @pytest.mark.asyncio
-    async def test_truncates_body_in_response(self):
-        """
-        What it does: Verifies that body is truncated to 500 chars in response.
-        Purpose: Ensure large bodies don't bloat error responses.
-        """
-        print("Setup: Creating mock request with large body...")
-        from kiro.exceptions import validation_exception_handler
-        import json
-        
-        large_body = b'{"data": "' + b'x' * 1000 + b'"}'
-        
-        mock_request = MagicMock(spec=Request)
-        mock_request.body = AsyncMock(return_value=large_body)
-        
-        mock_exc = MagicMock(spec=RequestValidationError)
-        mock_exc.errors.return_value = [
-            {"type": "json_invalid", "loc": ["body"], "msg": "Invalid", "input": {}}
-        ]
-        
-        with patch('kiro.debug_logger.debug_logger'):
-            print("Action: Calling validation_exception_handler...")
-            response = await validation_exception_handler(mock_request, mock_exc)
-            
-            print("Parsing response body...")
-            body = json.loads(response.body.decode())
-            
-            print(f"Verifying body is truncated to 500 chars...")
-            assert len(body["body"]) <= 500
+def test_kiro_gateway_error_custom_status():
+    err = KiroGatewayError("bad", status_code=503)
+    assert err.status_code == 503
 
 
-class TestValidationExceptionHandlerLogging:
-    """Tests for logging behavior in validation_exception_handler."""
-    
-    @pytest.mark.asyncio
-    async def test_logs_error_at_error_level(self):
-        """
-        What it does: Verifies that validation error is logged at ERROR level.
-        Purpose: Ensure errors are visible in logs.
-        """
-        print("Setup: Creating mock request and exception...")
-        from kiro.exceptions import validation_exception_handler
-        
-        mock_request = MagicMock(spec=Request)
-        mock_request.body = AsyncMock(return_value=b'{"test": "data"}')
-        
-        mock_exc = MagicMock(spec=RequestValidationError)
-        mock_exc.errors.return_value = [
-            {"type": "missing", "loc": ["body", "model"], "msg": "Field required", "input": {}}
-        ]
-        
-        with patch('kiro.debug_logger.debug_logger'):
-            with patch('kiro.exceptions.logger') as mock_logger:
-                print("Action: Calling validation_exception_handler...")
-                await validation_exception_handler(mock_request, mock_exc)
-                
-                print("Verifying logger.error was called...")
-                mock_logger.error.assert_called()
+def test_authentication_error_status():
+    err = AuthenticationError("no key")
+    assert err.status_code == 401
+    assert isinstance(err, KiroGatewayError)
 
 
-class TestValidationExceptionHandlerEdgeCases:
-    """Tests for edge cases in validation_exception_handler."""
-    
-    @pytest.mark.asyncio
-    async def test_handles_empty_errors_list(self):
-        """
-        What it does: Verifies that handler works with empty errors list.
-        Purpose: Ensure edge case doesn't cause crash.
-        """
-        print("Setup: Creating mock request with empty errors...")
-        from kiro.exceptions import validation_exception_handler
-        import json
-        
-        mock_request = MagicMock(spec=Request)
-        mock_request.body = AsyncMock(return_value=b'{}')
-        
-        mock_exc = MagicMock(spec=RequestValidationError)
-        mock_exc.errors.return_value = []
-        
-        with patch('kiro.debug_logger.debug_logger'):
-            print("Action: Calling validation_exception_handler...")
-            response = await validation_exception_handler(mock_request, mock_exc)
-            
-            print(f"Verifying response is valid...")
-            assert response.status_code == 422
-            
-            body = json.loads(response.body.decode())
-            assert body["detail"] == []
-    
-    @pytest.mark.asyncio
-    async def test_handles_unicode_in_body(self):
-        """
-        What it does: Verifies that handler works with unicode in body.
-        Purpose: Ensure international characters are handled.
-        """
-        print("Setup: Creating mock request with unicode body...")
-        from kiro.exceptions import validation_exception_handler
-        import json
-        
-        unicode_body = '{"message": "Привет мир 🌍"}'.encode('utf-8')
-        
-        mock_request = MagicMock(spec=Request)
-        mock_request.body = AsyncMock(return_value=unicode_body)
-        
-        mock_exc = MagicMock(spec=RequestValidationError)
-        mock_exc.errors.return_value = [
-            {"type": "missing", "loc": ["body", "model"], "msg": "Field required", "input": {}}
-        ]
-        
-        with patch('kiro.debug_logger.debug_logger'):
-            print("Action: Calling validation_exception_handler...")
-            response = await validation_exception_handler(mock_request, mock_exc)
-            
-            print(f"Verifying response is valid...")
-            assert response.status_code == 422
-            
-            body = json.loads(response.body.decode())
-            assert "Привет мир" in body["body"]
+def test_authorization_error_status():
+    err = AuthorizationError("forbidden")
+    assert err.status_code == 403
+
+
+def test_validation_error_status():
+    err = ValidationError("invalid")
+    assert err.status_code == 422
+
+
+def test_rate_limit_error_status():
+    err = RateLimitError("slow down")
+    assert err.status_code == 429
+
+
+def test_upstream_error_status():
+    err = UpstreamError("bad gateway")
+    assert err.status_code == 502
+
+
+def test_timeout_error_status():
+    err = TimeoutError("timed out")
+    assert err.status_code == 504
+
+
+def test_compliance_error_status():
+    err = ComplianceError("single account only")
+    assert err.status_code == 403
+    assert isinstance(err, KiroGatewayError)
+
+
+def test_exceptions_are_catchable_as_base():
+    with pytest.raises(KiroGatewayError):
+        raise AuthenticationError("test")
