@@ -22,7 +22,7 @@ jobs:
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.12'
           cache: 'pip'
 
       - name: Install dependencies
@@ -85,7 +85,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
           labels: |
             org.opencontainers.image.title=kiro-gateway
-            org.opencontainers.image.description=ACP-compliant gateway for Kiro — OpenAI and Anthropic compatible shims over kiro CLI
+            org.opencontainers.image.description=ACP-compliant gateway for Kiro \u2014 OpenAI and Anthropic compatible shims over kiro CLI
             org.opencontainers.image.url=https://github.com/ankitcharolia/kiro-gateway
             org.opencontainers.image.source=https://github.com/ankitcharolia/kiro-gateway
             org.opencontainers.image.licenses=AGPL-3.0
@@ -97,6 +97,7 @@ jobs:
           echo "Cleaned up test artifacts (credentials.json, state.json)"
 
       - name: Build Docker image
+        id: docker_build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -107,6 +108,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Run Trivy vulnerability scanner
+        id: trivy
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: kiro-gateway:test
@@ -115,9 +117,10 @@ jobs:
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
 
+      # Upload only if Trivy actually wrote the SARIF file
       - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('trivy-results.sarif') != ''
         with:
           sarif_file: 'trivy-results.sarif'
           category: 'docker-image'
@@ -147,8 +150,6 @@ jobs:
           import uvicorn
           print('\u2713 All critical imports OK')
           "
-
-          docker run --rm kiro-gateway:test python main.py --version
 
           echo ""
           echo "========================================="

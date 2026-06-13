@@ -1,33 +1,51 @@
 # syntax=docker/dockerfile:1
 
 # ────────────────────────────────────────────────────────────────────────────
-# Stage 1: download the official kiro CLI binary
+# Stage 1: kiro CLI placeholder
+#
+# The kiro CLI binary is NOT distributed as a public tarball on kiro.dev.
+# Provide the binary at build time via one of these methods:
+#
+#   Option A – build-arg path to a local binary:
+#     docker build --build-arg KIRO_BINARY=./kiro-linux-x86_64 -t kiro-gateway .
+#
+#   Option B – mount a pre-downloaded binary in CI:
+#     docker build --secret id=kiro,src=./kiro -t kiro-gateway .
+#
+#   Option C (runtime-only) – bind-mount the host binary:
+#     docker run -v $(which kiro):/usr/local/bin/kiro:ro kiro-gateway
+#
+# The stub below satisfies the COPY --from step so the image builds even
+# when no real binary is provided; the gateway will fail at runtime if kiro
+# is actually needed and no real binary is mounted.
 # ────────────────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS kiro-downloader
 
 ARG TARGETARCH
+ARG KIRO_BINARY=""
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Download the correct kiro CLI binary for the target architecture.
-# Replace the URL pattern below if Kiro publishes binaries at a different path.
-RUN set -eux; \
-    case "${TARGETARCH}" in \
-        amd64) KIRO_ARCH="x86_64" ;; \
-        arm64) KIRO_ARCH="aarch64" ;; \
-        *) echo "Unsupported arch: ${TARGETARCH}"; exit 1 ;; \
-    esac; \
-    curl -fsSL \
-        "https://kiro.dev/releases/latest/kiro-linux-${KIRO_ARCH}.tar.gz" \
-        -o /tmp/kiro.tar.gz; \
-    tar -xzf /tmp/kiro.tar.gz -C /usr/local/bin --strip-components=1 kiro; \
+# If a local binary path is provided via --build-arg KIRO_BINARY=<path>,
+# it will be COPYed in the next step.  Otherwise we create a stub that
+# prints a helpful error at runtime so the build never fails with a 404.
+RUN mkdir -p /usr/local/bin
+
+# Try to copy a real binary if KIRO_BINARY was supplied; fall through to stub.
+COPY ${KIRO_BINARY:-docker/kiro-stub.sh} /tmp/kiro-candidate
+RUN if [ -s /tmp/kiro-candidate ] && file /tmp/kiro-candidate 2>/dev/null | grep -q 'ELF'; then \
+        cp /tmp/kiro-candidate /usr/local/bin/kiro; \
+    else \
+        printf '#!/bin/sh\necho "kiro binary not installed. Mount the real kiro binary at /usr/local/bin/kiro" >&2\nexit 1\n' > /usr/local/bin/kiro; \
+    fi; \
     chmod +x /usr/local/bin/kiro
 
 # ────────────────────────────────────────────────────────────────────────────
 # Stage 2: Python dependency build
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.14-slim AS builder
+FROM python:3.12-slim AS builder
 
 WORKDIR /build
 COPY requirements.txt .
@@ -37,14 +55,14 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # ────────────────────────────────────────────────────────────────────────────
 # Stage 3: Runtime image
 # ────────────────────────────────────────────────────────────────────────────
-FROM python:3.14-slim AS runtime
+FROM python:3.12-slim AS runtime
 
 LABEL org.opencontainers.image.title="kiro-gateway" \
-      org.opencontainers.image.description="ACP-compliant bridge: OpenAI/Anthropic API → kiro CLI" \
+      org.opencontainers.image.description="ACP-compliant bridge: OpenAI/Anthropic API \u2192 kiro CLI" \
       org.opencontainers.image.source="https://github.com/ankitcharolia/kiro-gateway" \
       org.opencontainers.image.licenses="AGPL-3.0"
 
-# Copy kiro CLI from downloader stage
+# Copy kiro CLI (real or stub) from downloader stage
 COPY --from=kiro-downloader /usr/local/bin/kiro /usr/local/bin/kiro
 
 # Copy installed Python packages
