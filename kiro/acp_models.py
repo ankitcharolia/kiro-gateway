@@ -104,18 +104,21 @@ class JsonRpcRequest(BaseModel):
     params: Optional[Dict[str, Any]] = None
 
 
+class JsonRpcError(BaseModel):
+    """JSON-RPC 2.0 error object — must be defined before JsonRpcResponse."""
+    code: int
+    message: str
+    data: Optional[Any] = None
+
+
 class JsonRpcResponse(BaseModel):
     """JSON-RPC 2.0 response envelope."""
     jsonrpc: str = "2.0"
     id: Union[str, int, None] = None
     result: Optional[Any] = None
-    error: Optional[Dict[str, Any]] = None
-
-
-class JsonRpcError(BaseModel):
-    code: int
-    message: str
-    data: Optional[Any] = None
+    # Typed as JsonRpcError (not Dict) so Pydantic coerces the incoming dict
+    # and acp_client._call can access .code / .message / .data as attributes.
+    error: Optional[JsonRpcError] = None
 
 
 # Notification is a request that expects no response (no id required in reply)
