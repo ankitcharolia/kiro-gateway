@@ -6,7 +6,7 @@
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
 [![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
 
-A **fully ACP-compliant** bridge that lets any OpenAI-compatible or Anthropic-compatible AI harness use your **single** Kiro subscription — by routing every request through the official `kiro` CLI, never through reverse-engineered APIs.
+A **fully ACP-compliant** bridge that lets any OpenAI-compatible or Anthropic-compatible AI harness use your **single** Kiro subscription — by routing every request through the official `kiro-cli` binary, never through reverse-engineered APIs.
 
 ---
 
@@ -17,7 +17,7 @@ Kiro permits subscriptions to be used with:
 - ACP-compatible IDEs
 - Software-development automation (CI/CD reviews, etc.)
 
-This gateway **only** communicates with Kiro through the official `kiro` CLI binary.
+This gateway **only** communicates with Kiro through the official `kiro-cli` binary.
 It never calls private HTTP endpoints, never pools accounts, and never circumvents rate limits.
 
 ### Full request path
@@ -47,7 +47,7 @@ OpenCode / Hermes-agent / Kilo Code / Craft-agent / OpenClaw
                  └───────────┬──────────┘
                              │
                  ┌───────────▼──────────┐
-                 │     kiro  CLI        │  ← only official binary
+                 │     kiro-cli         │  ← only official binary
                  │  (official, authed)  │
                  └───────────┬──────────┘
                              │
@@ -56,7 +56,7 @@ OpenCode / Hermes-agent / Kilo Code / Craft-agent / OpenClaw
                  └──────────────────────┘
 ```
 
-> **Single-account enforcement** — the gateway validates at startup that only one kiro CLI session is active at any time (`kiro.compliance.validate_single_account_compliance`). Attempting to spin up parallel accounts raises a hard `ComplianceError`.
+> **Single-account enforcement** — the gateway validates at startup that only one kiro-cli session is active at any time (`kiro.compliance.validate_single_account_compliance`). Attempting to spin up parallel accounts raises a hard `ComplianceError`.
 
 ---
 
@@ -97,7 +97,7 @@ For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-
 
 | Requirement | Notes |
 |---|---|
-| **Kiro CLI** | Install from [kiro.dev](https://kiro.dev) and run `kiro auth login` |
+| **Kiro CLI** | Install from [kiro.dev](https://kiro.dev) and run `kiro-cli login` |
 | **Python 3.11+** | Required for the bare-metal path only |
 | **Docker** | Required for the container path only |
 
@@ -121,10 +121,10 @@ pip install -r requirements.txt
 cp .env.example .env
 # Open .env and set at minimum:
 #   PROXY_API_KEY=<your-chosen-secret-key>
-#   KIRO_CLI_COMMAND=kiro             # full path if not on $PATH
+#   KIRO_CLI_PATH=kiro-cli    # full path if not on $PATH
 
 # 5. Authenticate with Kiro (once)
-kiro auth login
+kiro-cli login
 
 # 6. Start the gateway
 python main.py
@@ -141,22 +141,22 @@ Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to the 
 # Pull the latest release
 docker pull ghcr.io/ankitcharolia/kiro-gateway:latest
 
-# Run — mount your kiro credentials so the container can call the CLI
+# Run — mount your kiro-cli credentials so the container can call the CLI
 docker run -d \
   --name kiro-gateway \
   -p 8000:8000 \
   -e PROXY_API_KEY=change-me \
-  -e KIRO_CLI_COMMAND=/usr/local/bin/kiro \
+  -e KIRO_CLI_PATH=/usr/local/bin/kiro-cli \
   -v "${HOME}/.kiro:/root/.kiro:ro" \
   ghcr.io/ankitcharolia/kiro-gateway:latest
 ```
 
-> **Credential mount** — Kiro stores its session tokens in `~/.kiro`. Mounting this directory read-only into the container lets the bundled `kiro` CLI authenticate without re-running `kiro auth login` inside the container.
+> **Credential mount** — Kiro stores its session tokens in `~/.kiro`. Mounting this directory read-only into the container lets the bundled `kiro-cli` authenticate without re-running `kiro-cli login` inside the container.
 
 #### Pinning a specific version
 
 ```bash
-docker pull ghcr.io/ankitcharolia/kiro-gateway:v2.1.0
+docker pull ghcr.io/ankitcharolia/kiro-gateway:vX.Y.Z
 ```
 
 ---
@@ -203,7 +203,7 @@ All settings are read from environment variables (or a `.env` file).
 PROXY_API_KEY=change-me          # Secret key clients must send as Bearer / x-api-key
 
 # ── CLI path ──────────────────────────────────────────────────────────
-KIRO_CLI_COMMAND=kiro            # Override if kiro is not on $PATH
+KIRO_CLI_PATH=kiro-cli           # Override if kiro-cli is not on $PATH
 
 # ── Feature flags ─────────────────────────────────────────────────────
 ACP_ENABLED=true
@@ -292,10 +292,10 @@ http://localhost:8000/acp/chat/stream  # SSE streaming
 
 Both shims support the full tool-call cycle:
 
-1. `kiro` CLI emits a `tool_call` ACP event during streaming.
+1. `kiro-cli` emits a `tool_call` ACP event during streaming.
 2. The shim translates it to the caller's format (`function_call` / `tool_use`) and streams it.
 3. The caller executes the tool and sends back results.
-4. The gateway injects results into a follow-up `session/prompt` so `kiro` CLI continues.
+4. The gateway injects results into a follow-up `session/prompt` so `kiro-cli` continues.
 
 Parallel tool calls are supported in the OpenAI shim via index-tracked `tool_calls` delta chunks.
 
@@ -303,7 +303,7 @@ Parallel tool calls are supported in the OpenAI shim via index-tracked `tool_cal
 
 ## Filesystem & terminal sandboxing
 
-Capability requests from `kiro` CLI are mediated by `CapabilityExecutor`:
+Capability requests from `kiro-cli` are mediated by `CapabilityExecutor`:
 
 | Capability | Behaviour |
 |---|---|
@@ -333,7 +333,7 @@ Capability requests from `kiro` CLI are mediated by `CapabilityExecutor`:
 
 | Component | File | Purpose |
 |---|---|---|
-| ACP bridge | `kiro/acp_client.py` | Spawns `kiro` CLI; exchanges JSON-RPC 2.0 over stdio; routes events to per-session queues |
+| ACP bridge | `kiro/acp_client.py` | Spawns `kiro-cli`; exchanges JSON-RPC 2.0 over stdio; routes events to per-session queues |
 | ACP models | `kiro/acp_models.py` | Pydantic models for all ACP types |
 | Capability sandbox | `kiro/capability_executor.py` | readFile / writeFile / listDirectory / runCommand with path + command sandboxing |
 | Orchestration | `kiro/shim_service.py` | Streaming, tool-call round-trips, capability mediation, session lifecycle |
@@ -377,10 +377,10 @@ Images are built and pushed automatically by GitHub Actions on every `v*` tag.
 
 ```bash
 # Create and push a release tag
-git tag v2.1.0
-git push origin v2.1.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 # → CI builds linux/amd64 + linux/arm64 and pushes:
-#     ghcr.io/ankitcharolia/kiro-gateway:v2.1.0
+#     ghcr.io/ankitcharolia/kiro-gateway:vX.Y.Z
 #     ghcr.io/ankitcharolia/kiro-gateway:latest
 ```
 
@@ -392,7 +392,7 @@ git push origin v2.1.0
 - Keep `filesystem_roots` scoped to the project directory and `write: false` unless the agent needs to create files.
 - Keep `terminal.allowed_commands` as narrow as possible.
 - Never share `PROXY_API_KEY` — treat it like any API secret.
-- All Kiro authentication lives in the `kiro` CLI. The gateway never touches credentials.
+- All Kiro authentication lives in `kiro-cli`. The gateway never touches credentials.
 
 ---
 

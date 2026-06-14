@@ -1,6 +1,6 @@
 # Kiro Gateway — Documentation
 
-A **fully ACP-compliant** bridge that lets any OpenAI-compatible or Anthropic-compatible AI tool use your single Kiro subscription — by routing every request through the official `kiro` CLI binary.
+A **fully ACP-compliant** bridge that lets any OpenAI-compatible or Anthropic-compatible AI tool use your single Kiro subscription — by routing every request through the official `kiro-cli` binary.
 
 ---
 
@@ -21,7 +21,7 @@ A **fully ACP-compliant** bridge that lets any OpenAI-compatible or Anthropic-co
 
 ## Architecture
 
-Every request flows through the official `kiro` CLI via JSON-RPC 2.0 over stdio — no private HTTP endpoints, no credential sharing, no account pooling.
+Every request flows through the official `kiro-cli` binary via JSON-RPC 2.0 over stdio — no private HTTP endpoints, no credential sharing, no account pooling.
 
 ```
 Any OpenAI / Anthropic client
@@ -37,7 +37,7 @@ routes_openai_shim   routes_anthropic_shim
        acp_client.py
     (JSON-RPC 2.0 over stdio)
              │
-         kiro CLI
+         kiro-cli
     (official, authenticated)
              │
        Kiro Backend
@@ -47,7 +47,7 @@ routes_openai_shim   routes_anthropic_shim
 
 | Component | File | Purpose |
 |---|---|---|
-| ACP bridge | `kiro/acp_client.py` | Spawns `kiro` CLI; JSON-RPC 2.0 over stdio |
+| ACP bridge | `kiro/acp_client.py` | Spawns `kiro-cli`; JSON-RPC 2.0 over stdio |
 | ACP models | `kiro/acp_models.py` | Pydantic models for all ACP types |
 | Capability sandbox | `kiro/capability_executor.py` | readFile / writeFile / listDirectory / runCommand sandboxing |
 | Orchestration | `kiro/shim_service.py` | Streaming, tool-call round-trips, session lifecycle |
@@ -68,7 +68,7 @@ routes_openai_shim   routes_anthropic_shim
 
 | Requirement | Notes |
 |---|---|
-| **Kiro CLI** | Install from [kiro.dev](https://kiro.dev), then run `kiro auth login` |
+| **Kiro CLI** | Install from [kiro.dev](https://kiro.dev), then run `kiro-cli login` |
 | **Python 3.11+** | Required for bare-metal path only |
 | **Docker** | Required for the container path only |
 
@@ -80,7 +80,7 @@ cd kiro-gateway
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # edit PROXY_API_KEY
-kiro auth login
+kiro-cli login
 python main.py
 ```
 
@@ -92,6 +92,7 @@ docker run -d \
   --name kiro-gateway \
   -p 8000:8000 \
   -e PROXY_API_KEY=change-me \
+  -e KIRO_CLI_PATH=/usr/local/bin/kiro-cli \
   -v "${HOME}/.kiro:/root/.kiro:ro" \
   ghcr.io/ankitcharolia/kiro-gateway:latest
 ```
@@ -123,8 +124,8 @@ All settings are read from environment variables or a `.env` file.
 # Required
 PROXY_API_KEY=change-me
 
-# CLI path (override if kiro is not on $PATH)
-KIRO_CLI_COMMAND=kiro
+# CLI path (override if kiro-cli is not on $PATH)
+KIRO_CLI_PATH=kiro-cli
 
 # Feature flags
 ACP_ENABLED=true
@@ -187,10 +188,10 @@ http://localhost:8000/acp/chat/stream   # SSE streaming
 
 Both shims support the full tool-call cycle:
 
-1. `kiro` CLI emits a `tool_call` ACP event during streaming.
+1. `kiro-cli` emits a `tool_call` ACP event during streaming.
 2. The shim translates it to the caller's format (`function_call` / `tool_use`) and streams it.
 3. The caller executes the tool and sends back results.
-4. The gateway injects results into a follow-up `session/prompt` so `kiro` CLI continues.
+4. The gateway injects results into a follow-up `session/prompt` so `kiro-cli` continues.
 
 Parallel tool calls are supported in the OpenAI shim via index-tracked `tool_calls` delta chunks.
 
@@ -245,10 +246,10 @@ pytest --cov=kiro --cov-report=term-missing
 ## Release Process
 
 ```bash
-git tag v2.1.0
-git push origin v2.1.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 # CI builds linux/amd64 + linux/arm64 and publishes:
-#   ghcr.io/ankitcharolia/kiro-gateway:v2.1.0
+#   ghcr.io/ankitcharolia/kiro-gateway:vX.Y.Z
 #   ghcr.io/ankitcharolia/kiro-gateway:latest
 # A GitHub Release with source archives is also created automatically.
 ```
