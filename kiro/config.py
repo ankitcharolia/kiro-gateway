@@ -6,9 +6,15 @@ from dataclasses import dataclass, field
 from typing import List
 
 # ---------------------------------------------------------------------------
-# Version
+# Version — sourced from package metadata which hatch-vcs populates from the
+# most recent git tag (e.g. v1.2.0 → "1.2.0").  Falls back to "dev" when
+# running directly from source without an installed package.
 # ---------------------------------------------------------------------------
-APP_VERSION: str = "2.1.0"
+try:
+    from importlib.metadata import version as _pkg_version
+    APP_VERSION: str = _pkg_version("kiro-gateway")
+except Exception:
+    APP_VERSION = "dev"
 
 # ---------------------------------------------------------------------------
 # Auth / API-key
@@ -44,8 +50,12 @@ DEBUG: bool = os.environ.get("DEBUG", "false").lower() == "true"
 
 # ---------------------------------------------------------------------------
 # Kiro / ACP
+#
+# KIRO_CLI_PATH is the single canonical env var for the Kiro CLI binary.
+# Set it to the binary name ("kiro-cli") or an absolute path
+# ("/usr/local/bin/kiro-cli") when the binary is not on $PATH.
 # ---------------------------------------------------------------------------
-KIRO_CLI_PATH: str = os.environ.get("KIRO_CLI_PATH", "kiro")
+KIRO_CLI_PATH: str = os.environ.get("KIRO_CLI_PATH", "kiro-cli")
 ACP_TIMEOUT: int = int(os.environ.get("ACP_TIMEOUT", "120"))
 
 
@@ -78,7 +88,6 @@ class _Settings:
 
     # Kiro / ACP
     KIRO_CLI_PATH: str = field(default_factory=lambda: KIRO_CLI_PATH)
-    KIRO_CLI_COMMAND: str = field(default_factory=lambda: KIRO_CLI_PATH)
     ACP_TIMEOUT: int = field(default_factory=lambda: ACP_TIMEOUT)
 
     # Feature flags (default enabled; override via env)
@@ -92,7 +101,7 @@ class _Settings:
         default_factory=lambda: os.environ.get("ANTHROPIC_SHIM_ENABLED", "true").lower() != "false"
     )
 
-    # App version
+    # App version (from git tag via importlib.metadata)
     APP_VERSION: str = field(default_factory=lambda: APP_VERSION)
 
 

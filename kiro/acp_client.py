@@ -40,15 +40,18 @@ class ACPClient:
 
     Lifetime: created once per gateway process, shared across requests.
     Thread-safety: all methods are coroutine-safe via asyncio locks.
+
+    The ``command`` parameter maps directly to the ``KIRO_CLI_PATH`` env var.
+    Default is ``"kiro-cli"`` — the binary name shipped by Kiro.
+    Override via env if your binary has a different name or needs an
+    absolute path: ``KIRO_CLI_PATH=/usr/local/bin/kiro-cli``.
     """
 
-    def __init__(self, command: str = "kiro"):
+    def __init__(self, command: str = "kiro-cli"):
         self._command = command
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._pending: dict[str, asyncio.Future] = {}
-        # Per-session queues for progress notifications
         self._progress_queues: dict[str, Queue] = {}
-        # Per-session queues for capability requests
         self._capability_queues: dict[str, Queue] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
@@ -113,9 +116,6 @@ class ACPClient:
         """
         Send session/prompt with stream=True and yield ProgressParams events
         as they arrive from kiro-cli.
-
-        Each yielded event is a real-time ACP progress notification —
-        the gateway does NOT buffer or re-aggregate them.
         """
         session_id = params.session_id
         queue: Queue = Queue()
@@ -123,12 +123,10 @@ class ACPClient:
 
         try:
             p = params.model_copy(update={"stream": True})
-            # Fire-and-forget the request; responses arrive as notifications
             asyncio.create_task(
                 self._send(JsonRpcRequest(method="session/prompt",
                                          params=p.model_dump(exclude_none=True)))
             )
-
             while True:
                 event: ProgressParams = await queue.get()
                 yield event
@@ -151,7 +149,7 @@ class ACPClient:
         try:
             while True:
                 item = await queue.get()
-                if item is None:  # sentinel
+                if item is None:
                     break
                 yield item
         finally:
@@ -185,7 +183,6 @@ class ACPClient:
     # ------------------------------------------------------------------
 
     async def _call(self, method: str, params: dict) -> Any:
-        """Send a request and await its response."""
         req_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[req_id] = future
@@ -231,12 +228,10 @@ class ACPClient:
             logger.warning(f"ACP: unparseable line: {line[:200]}")
             return
 
-        # Notification (no id field or id is null)
         if "method" in msg and not msg.get("id"):
             self._handle_notification(msg)
             return
 
-        # Response
         msg_id = str(msg.get("id", ""))
         future = self._pending.pop(msg_id, None)
         if future and not future.done():
@@ -259,7 +254,6 @@ class ACPClient:
             if cap_queue:
                 cap_queue.put_nowait((method, req_id, params))
             else:
-                # No capability handler registered — send not-supported error
                 asyncio.create_task(
                     self.send_capability_error(req_id, -32601, f"{method} not supported")
                 )

@@ -15,7 +15,7 @@ Architecture:
             ↓
         Kiro Backend
 
-See COMPLIANCE.md and README_ACP.md for details.
+See COMPLIANCE.md for details.
 """
 
 from contextlib import asynccontextmanager
@@ -53,10 +53,10 @@ logger.add(
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting Kiro Gateway (ACP mode)...")
-    logger.info(f"kiro-cli command: {settings.KIRO_CLI_COMMAND}")
+    logger.info(f"Starting Kiro Gateway v{APP_VERSION} (ACP mode)...")
+    logger.info(f"kiro-cli path: {settings.KIRO_CLI_PATH}")
 
-    acp_client = ACPClient(command=settings.KIRO_CLI_COMMAND)
+    acp_client = ACPClient(command=settings.KIRO_CLI_PATH)
     await acp_client.start()
     await acp_client.initialize()
 
@@ -82,7 +82,7 @@ app = FastAPI(
         "Optional OpenAI and Anthropic shims allow tools that cannot speak ACP natively "
         "to use their familiar APIs."
     ),
-    version="2.0.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -111,7 +111,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Kiro Gateway — ACP-compliant proxy for kiro-cli")
     parser.add_argument("-H", "--host", default=None, metavar="HOST")
     parser.add_argument("-p", "--port", type=int, default=None, metavar="PORT")
-    parser.add_argument("-v", "--version", action="version", version="%(prog)s 2.0.0")
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {APP_VERSION}")
     return parser.parse_args()
 
 

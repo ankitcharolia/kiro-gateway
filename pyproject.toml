@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "kiro-gateway"
-version = "2.1.0"
+dynamic = ["version"]
 description = "OpenAI & Anthropic-compatible API gateway for Kiro (single-account, compliance-mode)"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,13 +24,26 @@ dev = [
     "loguru>=0.7",
     "ruff>=0.4",
     "mypy>=1.10",
+    "hatch-vcs",
 ]
+
+# ---------------------------------------------------------------------------
+# hatch-vcs: derive package version from git tags (e.g. v1.2.0 -> "1.2.0").
+# Running `pip install -e .` or `pip install .` in a git repo with tags
+# will set the installed package version automatically.
+# Outside of a git repo (e.g. Docker build from sdist), hatch-vcs writes
+# the resolved version into kiro/_version.py at build time.
+# ---------------------------------------------------------------------------
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+version_scheme = "no-guess-dev"
 
 # ---------------------------------------------------------------------------
 # Hatchling build config
 # The project is called "kiro-gateway" but the importable package lives in
-# the "kiro/" directory.  Without this section hatchling looks for a
-# "kiro_gateway/" directory (the normalised name) and fails.
+# the "kiro/" directory.
 # ---------------------------------------------------------------------------
 [tool.hatch.build.targets.wheel]
 packages = ["kiro"]
