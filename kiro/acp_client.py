@@ -54,6 +54,7 @@ class ACPClient:
         self._progress_queues: dict[str, Queue] = {}
         self._capability_queues: dict[str, Queue] = {}
         self._reader_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
         self._session_id: Optional[str] = None
 
@@ -71,16 +72,21 @@ class ACPClient:
             stderr=asyncio.subprocess.PIPE,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
+        self._stderr_task = asyncio.create_task(self._stderr_loop())
         logger.info(f"kiro-cli ACP subprocess started (pid={self._proc.pid})")
+        # Give kiro-cli a moment to write any startup banner / ready signal
+        # before we fire the first JSON-RPC request.
+        await asyncio.sleep(0.1)
 
     async def stop(self) -> None:
         """Gracefully stop kiro-cli."""
-        if self._reader_task:
-            self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._reader_task, self._stderr_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         if self._proc and self._proc.returncode is None:
             try:
                 self._proc.stdin.close()
@@ -90,12 +96,21 @@ class ACPClient:
         logger.info("kiro-cli ACP subprocess stopped")
 
     async def initialize(self, capabilities: Optional[GatewayCapabilities] = None) -> SessionInitResult:
-        """Send session/initialize and store the session ID."""
+        """
+        Send the ACP initialize handshake and store the session ID.
+
+        kiro-cli uses the bare ``initialize`` method name (standard
+        JSON-RPC / LSP convention), not ``session/initialize``.
+        """
         params = SessionInitParams(
             capabilities=capabilities or GatewayCapabilities()
         )
-        result = await self._call("session/initialize", params.model_dump(exclude_none=True))
-        init_result = SessionInitResult(**result)
+        result = await self._call("initialize", params.model_dump(exclude_none=True))
+        # result may be a dict (raw) or already a SessionInitResult-compatible mapping
+        if isinstance(result, dict):
+            init_result = SessionInitResult(**result)
+        else:
+            init_result = result
         self._session_id = init_result.session_id
         logger.info(f"ACP session initialized: {self._session_id}")
         return init_result
@@ -214,11 +229,28 @@ class ACPClient:
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
+                logger.debug(f"kiro-cli stdout: {line[:500]}")
                 self._dispatch(line)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error(f"ACP read_loop error: {exc}")
+
+    async def _stderr_loop(self) -> None:
+        """Drain kiro-cli stderr and log every line at DEBUG level."""
+        assert self._proc and self._proc.stderr
+        while True:
+            try:
+                raw = await self._proc.stderr.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    logger.debug(f"kiro-cli stderr: {line}")
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error(f"ACP stderr_loop error: {exc}")
 
     def _dispatch(self, line: str) -> None:
         """Parse a JSON-RPC line and route it to the correct handler."""
