@@ -236,9 +236,11 @@ from kiro.config import PROXY_API_KEY
 def test_client():
     """Session-scoped FastAPI TestClient for integration tests.
 
-    ACPClient.start/stop/initialize are patched with async no-ops so that the
-    app lifespan does not attempt to spawn the real `kiro` binary, which is
-    not available in the CI test environment.
+    ACPClient lifecycle (start/stop/initialize) and the prompt path
+    (new_session/prompt/prompt_stream) are patched with async stand-ins so
+    the app lifespan never spawns the real ``kiro-cli`` binary and prompt
+    requests resolve instantly instead of waiting on the JSON-RPC timeout.
+    The real ShimService and routes are still exercised end-to-end.
     """
     async def _noop_start(self) -> None:
         self._proc = None
@@ -250,10 +252,28 @@ def test_client():
     async def _noop_initialize(self, capabilities=None) -> None:
         pass
 
+    async def _mock_new_session(self, capabilities=None, cwd=None) -> str:
+        return "test-session-id"
+
+    async def _mock_prompt(self, params) -> dict:
+        return {
+            "content": "Hello, world!",
+            "tool_calls": [],
+            "finish_reason": "stop",
+            "usage": {},
+        }
+
+    async def _mock_prompt_stream(self, params):
+        yield {"type": "text", "content": "Hello, world!"}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
     with (
         patch("kiro.acp_client.ACPClient.start", new=_noop_start),
         patch("kiro.acp_client.ACPClient.stop", new=_noop_stop),
         patch("kiro.acp_client.ACPClient.initialize", new=_noop_initialize),
+        patch("kiro.acp_client.ACPClient.new_session", new=_mock_new_session),
+        patch("kiro.acp_client.ACPClient.prompt", new=_mock_prompt),
+        patch("kiro.acp_client.ACPClient.prompt_stream", new=_mock_prompt_stream),
     ):
         with TestClient(app) as client:
             yield client

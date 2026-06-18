@@ -257,47 +257,53 @@ async def _stream_response(
             filesystem_roots=fs_roots,
             terminal=terminal,
         ):
-            if event.type == "text" and event.delta:
-                yield chunk({"content": event.delta})
+            etype = event.get("type")
 
-            elif event.type == "thinking" and event.delta:
-                # Surface thinking as content for clients that support it
-                yield chunk({"content": event.delta})
+            if etype == "text":
+                delta = event.get("content", "")
+                if delta:
+                    yield chunk({"content": delta})
 
-            elif event.type == "tool_call" and event.tool_call:
-                tc = event.tool_call
-                if tc.id not in active_tool_idx:
+            elif etype == "thinking":
+                # Reasoning is not emitted on the OpenAI surface to keep the
+                # assistant message clean; clients receive only final content.
+                continue
+
+            elif etype == "tool_call":
+                tc_id = event.get("id", str(uuid.uuid4()))
+                name = event.get("name", "")
+                arguments = event.get("arguments", {})
+                if tc_id not in active_tool_idx:
                     idx = tool_counter
-                    active_tool_idx[tc.id] = idx
+                    active_tool_idx[tc_id] = idx
                     tool_counter += 1
-                    # Header chunk: id + function name
                     yield chunk({"tool_calls": [{
                         "index": idx,
-                        "id": tc.id,
+                        "id": tc_id,
                         "type": "function",
-                        "function": {"name": tc.name, "arguments": ""},
+                        "function": {"name": name, "arguments": ""},
                     }]})
                 else:
-                    idx = active_tool_idx[tc.id]
+                    idx = active_tool_idx[tc_id]
 
-                # Arguments streaming chunk
-                args_str = json.dumps(tc.arguments) if tc.arguments else ""
+                args_str = json.dumps(arguments) if arguments else ""
                 if args_str:
                     yield chunk({"tool_calls": [{
                         "index": idx,
                         "function": {"arguments": args_str},
                     }]})
 
-            elif event.type == "done":
+            elif etype == "done":
                 finish_reason = "tool_calls" if active_tool_idx else (
-                    event.finish_reason or "stop"
+                    event.get("finish_reason") or "stop"
                 )
                 yield chunk({}, finish_reason=finish_reason)
                 yield "data: [DONE]\n\n"
                 break
 
-            elif event.type == "error":
-                error_payload = {"error": {"message": event.error or "Unknown error", "type": "acp_error"}}
+            elif etype == "error":
+                message = event.get("message") or event.get("error") or "Unknown error"
+                error_payload = {"error": {"message": message, "type": "acp_error"}}
                 yield f"data: {json.dumps(error_payload)}\n\n"
                 yield "data: [DONE]\n\n"
                 break

@@ -1,17 +1,45 @@
 # -*- coding: utf-8 -*-
 """
-ACP client — manages a kiro-cli subprocess via JSON-RPC 2.0 over stdio.
+ACP client — manages a kiro-cli subprocess via the Agent Client Protocol
+(ACP, the Zed JSON-RPC 2.0 protocol) over stdio.
 
-Protocol:
-  Gateway writes one JSON-RPC request per line to kiro-cli stdin.
-  kiro-cli writes one JSON-RPC message per line to stdout.
-  Progress events arrive as notifications (method="session/progress").
-  Capability requests arrive as notifications (method="capability/*").
+Wire protocol (as implemented by `kiro-cli acp`, agent version 2.x):
+
+  1. ``initialize`` (request, once per process)
+       params:  {"protocolVersion": 1, "clientCapabilities": {...}}
+       result:  {"protocolVersion", "agentCapabilities", "authMethods", ...}
+
+  2. ``session/new`` (request, once per conversation)
+       params:  {"cwd": "<abs path>", "mcpServers": []}
+       result:  {"sessionId": "<uuid>", "modes": {...}}
+
+  3. ``session/prompt`` (request, per user turn)
+       params:  {"sessionId", "prompt": [{"type": "text", "text": "..."}]}
+       result:  {"stopReason": "end_turn" | "max_tokens" | ...}
+
+     While a prompt is in flight the agent emits ``session/update``
+     notifications (no id) and may send ``session/request_permission``
+     requests (with id) back to the gateway.
+
+``session/update`` payloads carry an ``update.sessionUpdate`` discriminator:
+  - ``agent_message_chunk``   → assistant text delta
+  - ``agent_thought_chunk``   → reasoning/thinking delta
+  - ``tool_call``             → a tool invocation the agent is starting
+  - ``tool_call_update``      → status change for a running tool call
+
+The gateway translates these into a normalised internal event contract
+(plain dicts) consumed by ShimService and the shim routes:
+  - {"type": "text",      "content": str}
+  - {"type": "thinking",  "content": str}
+  - {"type": "tool_call", "id": str, "name": str, "arguments": dict}
+  - {"type": "done",      "finish_reason": str, "usage": dict}
+  - {"type": "error",     "message": str}
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from asyncio import Queue
 from typing import Any, AsyncIterator, Optional
@@ -19,15 +47,27 @@ from typing import Any, AsyncIterator, Optional
 from loguru import logger
 
 from kiro.acp_models import (
-    JsonRpcRequest, JsonRpcResponse, JsonRpcNotification,
-    SessionInitParams, SessionInitResult,
-    PromptParams, ProgressParams,
-    ReadFileParams, WriteFileParams, RunCommandParams, ListDirectoryParams,
+    JsonRpcRequest, JsonRpcResponse,
+    SessionInitResult,
+    PromptParams,
     GatewayCapabilities,
 )
 
 
+# Map ACP stopReason values to the gateway's normalised finish_reason.
+_STOP_REASON_MAP: dict[str, str] = {
+    "end_turn": "stop",
+    "max_tokens": "length",
+    "max_turn_requests": "length",
+    "tool_use": "tool_calls",
+    "refusal": "stop",
+    "cancelled": "stop",
+}
+
+
 class ACPError(Exception):
+    """Raised when the agent returns a JSON-RPC error response."""
+
     def __init__(self, code: int, message: str, data: Any = None):
         super().__init__(message)
         self.code = code
@@ -36,26 +76,32 @@ class ACPError(Exception):
 
 class ACPClient:
     """
-    Manages a single kiro-cli ACP subprocess.
+    Manages a single ``kiro-cli acp`` subprocess.
 
     Lifetime: created once per gateway process, shared across requests.
-    Thread-safety: all methods are coroutine-safe via asyncio locks.
+    Concurrency: coroutine-safe. ``initialize`` runs once at startup;
+    ``new_session`` is called per request to obtain an isolated sessionId,
+    so concurrent prompts never interfere.
 
     The ``command`` parameter maps directly to the ``KIRO_CLI_PATH`` env var.
-    Default is ``"kiro-cli"`` — the binary name shipped by Kiro.
-    Override via env if your binary has a different name or needs an
-    absolute path: ``KIRO_CLI_PATH=/usr/local/bin/kiro-cli``.
     """
 
-    def __init__(self, command: str = "kiro-cli"):
+    def __init__(self, command: str = "kiro-cli", trust_tools: bool = True):
         self._command = command
+        self._trust_tools = trust_tools
         self._proc: Optional[asyncio.subprocess.Process] = None
+        # Pending request id -> Future (for initialize / session/new).
         self._pending: dict[str, asyncio.Future] = {}
-        self._progress_queues: dict[str, Queue] = {}
-        self._capability_queues: dict[str, Queue] = {}
+        # Per-session event queues for streaming prompts.
+        self._event_queues: dict[str, Queue] = {}
+        # Prompt request id -> sessionId, so the final result can be routed
+        # to the correct session queue as a terminal "done" event.
+        self._prompt_sessions: dict[str, str] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
+        self._initialized = False
+        # Kept for backward-compatibility with older tests/callers.
         self._session_id: Optional[str] = None
 
     # ------------------------------------------------------------------
@@ -63,10 +109,11 @@ class ACPClient:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Spawn kiro-cli in ACP mode."""
-        logger.info(f"Spawning ACP subprocess: {self._command} acp")
+        """Spawn ``kiro-cli acp`` and begin reading its stdio."""
+        argv = [self._command, "acp"]
+        logger.info(f"Spawning ACP subprocess: {' '.join(argv)}")
         self._proc = await asyncio.create_subprocess_exec(
-            self._command, "acp",
+            *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -74,12 +121,9 @@ class ACPClient:
         self._reader_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._stderr_loop())
         logger.info(f"kiro-cli ACP subprocess started (pid={self._proc.pid})")
-        # Give kiro-cli a moment to write any startup banner / ready signal
-        # before we fire the first JSON-RPC request.
-        await asyncio.sleep(0.1)
 
     async def stop(self) -> None:
-        """Gracefully stop kiro-cli."""
+        """Gracefully stop the subprocess and cancel reader tasks."""
         for task in (self._reader_task, self._stderr_task):
             if task:
                 task.cancel()
@@ -89,121 +133,234 @@ class ACPClient:
                     pass
         if self._proc and self._proc.returncode is None:
             try:
-                self._proc.stdin.close()
+                if self._proc.stdin and not self._proc.stdin.is_closing():
+                    self._proc.stdin.close()
                 await asyncio.wait_for(self._proc.wait(), timeout=5.0)
-            except (asyncio.TimeoutError, Exception):
-                self._proc.kill()
+            except (asyncio.TimeoutError, ProcessLookupError, OSError):
+                try:
+                    self._proc.kill()
+                except ProcessLookupError:
+                    pass
         logger.info("kiro-cli ACP subprocess stopped")
 
-    async def initialize(self, capabilities: Optional[GatewayCapabilities] = None) -> SessionInitResult:
+    async def initialize(
+        self, capabilities: Optional[GatewayCapabilities] = None
+    ) -> SessionInitResult:
         """
-        Send the ACP initialize handshake and store the session ID.
+        Perform the one-time ACP ``initialize`` handshake.
 
-        kiro-cli uses the bare ``initialize`` method name (standard
-        JSON-RPC / LSP convention), not ``session/initialize``.
+        The gateway advertises *no* client-side filesystem or terminal
+        capabilities: kiro-cli runs its own built-in tools and only asks
+        the gateway for permission (``session/request_permission``).
+
+        Args:
+            capabilities: Reserved for forward-compatibility (currently unused
+                by the wire request, retained for API stability).
+
+        Returns:
+            SessionInitResult describing the negotiated protocol version.
         """
-        params = SessionInitParams(
-            capabilities=capabilities or GatewayCapabilities()
-        )
-        result = await self._call("initialize", params.model_dump(exclude_none=True))
-        # result may be a dict (raw) or already a SessionInitResult-compatible mapping
+        params = {
+            "protocolVersion": 1,
+            "clientCapabilities": {
+                "fs": {"readTextFile": False, "writeTextFile": False},
+                "terminal": False,
+            },
+        }
+        result = await self._call("initialize", params)
+        proto = "1"
         if isinstance(result, dict):
-            init_result = SessionInitResult(**result)
-        else:
-            init_result = result
-        self._session_id = init_result.session_id
-        logger.info(f"ACP session initialized: {self._session_id}")
-        return init_result
+            proto = str(result.get("protocolVersion", 1))
+            agent = result.get("agentInfo", {})
+            logger.info(
+                f"ACP initialized: agent={agent.get('name', 'unknown')} "
+                f"v{agent.get('version', '?')} protocol={proto}"
+            )
+        self._initialized = True
+        return SessionInitResult(session_id="", protocol_version=proto)
 
     # ------------------------------------------------------------------
-    # Prompt (non-streaming)
+    # Sessions
+    # ------------------------------------------------------------------
+
+    async def new_session(
+        self,
+        capabilities: Optional[GatewayCapabilities] = None,
+        cwd: Optional[str] = None,
+    ) -> str:
+        """
+        Create a fresh ACP session and return its id.
+
+        Args:
+            capabilities: Optional gateway capabilities; the ``filesystem``
+                roots are used to derive the working directory when ``cwd``
+                is not given explicitly.
+            cwd: Absolute working directory for the session. Defaults to the
+                first filesystem root, else the gateway process cwd.
+
+        Returns:
+            The agent-assigned ``sessionId``.
+        """
+        workdir = cwd or self._derive_cwd(capabilities)
+        params = {"cwd": workdir, "mcpServers": []}
+        result = await self._call("session/new", params)
+        if not isinstance(result, dict) or "sessionId" not in result:
+            raise ACPError(-32603, f"session/new returned no sessionId: {result!r}")
+        session_id = str(result["sessionId"])
+        self._session_id = session_id
+        logger.debug(f"ACP session created: {session_id} (cwd={workdir})")
+        return session_id
+
+    @staticmethod
+    def _derive_cwd(capabilities: Optional[GatewayCapabilities]) -> str:
+        """Pick a working directory from filesystem roots or fall back to cwd."""
+        if capabilities and capabilities.filesystem:
+            first = capabilities.filesystem[0]
+            path = None
+            if isinstance(first, dict):
+                path = first.get("path") or first.get("uri")
+            else:
+                path = getattr(first, "path", None) or getattr(first, "uri", None)
+            if path:
+                if path.startswith("file://"):
+                    path = path[len("file://"):]
+                if os.path.isdir(path):
+                    return path
+        return os.getcwd()
+
+    # ------------------------------------------------------------------
+    # Prompting
     # ------------------------------------------------------------------
 
     async def prompt(self, params: PromptParams) -> dict[str, Any]:
-        """Send session/prompt and wait for the full result."""
-        return await self._call("session/prompt", params.model_dump(exclude_none=True))
-
-    # ------------------------------------------------------------------
-    # Streaming prompt
-    # ------------------------------------------------------------------
-
-    async def prompt_stream(self, params: PromptParams) -> AsyncIterator[ProgressParams]:
         """
-        Send session/prompt with stream=True and yield ProgressParams events
-        as they arrive from kiro-cli.
+        Run a non-streaming prompt and return an aggregated result dict.
+
+        Internally consumes the same streaming pipeline as ``prompt_stream``
+        and accumulates text / tool calls into a single response.
+
+        Returns:
+            {"content": str, "tool_calls": list[dict],
+             "finish_reason": str, "usage": dict}
+        """
+        content_parts: list[str] = []
+        tool_calls: list[dict] = []
+        finish_reason = "stop"
+        usage: dict[str, Any] = {}
+
+        async for event in self.prompt_stream(params):
+            etype = event.get("type")
+            if etype == "text":
+                content_parts.append(event.get("content", ""))
+            elif etype == "tool_call":
+                tool_calls.append({
+                    "id": event.get("id", ""),
+                    "name": event.get("name", ""),
+                    "arguments": event.get("arguments", {}),
+                })
+            elif etype == "done":
+                finish_reason = event.get("finish_reason", "stop")
+                usage = event.get("usage", {}) or {}
+            elif etype == "error":
+                raise ACPError(-32000, event.get("message", "ACP prompt failed"))
+
+        return {
+            "content": "".join(content_parts),
+            "tool_calls": tool_calls,
+            "finish_reason": finish_reason,
+            "usage": usage,
+        }
+
+    async def prompt_stream(self, params: PromptParams) -> AsyncIterator[dict[str, Any]]:
+        """
+        Stream normalised events for a ``session/prompt`` turn.
+
+        Yields dict events (see module docstring) as they arrive, terminating
+        after the ``done`` (or ``error``) event.
         """
         session_id = params.session_id
+        if not session_id:
+            raise ACPError(-32602, "prompt_stream requires a session_id")
+
+        prompt_blocks = self._build_prompt_blocks(params.messages)
         queue: Queue = Queue()
-        self._progress_queues[session_id] = queue
+        self._event_queues[session_id] = queue
+
+        req_id = str(uuid.uuid4())
+        self._prompt_sessions[req_id] = session_id
 
         try:
-            p = params.model_copy(update={"stream": True})
-            asyncio.create_task(
-                self._send(JsonRpcRequest(method="session/prompt",
-                                         params=p.model_dump(exclude_none=True)))
-            )
+            await self._send(JsonRpcRequest(
+                id=req_id,
+                method="session/prompt",
+                params={"sessionId": session_id, "prompt": prompt_blocks},
+            ))
             while True:
-                event: ProgressParams = await queue.get()
+                event = await queue.get()
                 yield event
-                if event.type in ("done", "error"):
+                if event.get("type") in ("done", "error"):
                     break
         finally:
-            self._progress_queues.pop(session_id, None)
+            self._event_queues.pop(session_id, None)
+            self._prompt_sessions.pop(req_id, None)
 
-    # ------------------------------------------------------------------
-    # Capability request handling (kiro-cli → gateway)
-    # ------------------------------------------------------------------
-
-    async def capability_requests(self, session_id: str) -> AsyncIterator[tuple[str, dict]]:
+    @staticmethod
+    def _build_prompt_blocks(messages: list) -> list[dict]:
         """
-        Yield (method, params) capability requests that kiro-cli sends
-        to the gateway during a session (readFile, writeFile, etc.).
+        Render a conversation into ACP prompt content blocks.
+
+        A fresh session is created per gateway request, so the entire
+        conversation is serialised into a single text block. A lone user
+        message is sent verbatim; multi-turn histories are rendered with
+        ``Role:`` labels so the agent retains context.
         """
-        queue: Queue = Queue()
-        self._capability_queues[session_id] = queue
-        try:
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                yield item
-        finally:
-            self._capability_queues.pop(session_id, None)
+        label = {"user": "User", "assistant": "Assistant", "system": "System"}
+        parts: list[tuple[str, str]] = []
+        for m in messages:
+            role = getattr(m, "role", None) if not isinstance(m, dict) else m.get("role")
+            content = getattr(m, "content", None) if not isinstance(m, dict) else m.get("content")
+            text = ACPClient._flatten_content(content)
+            parts.append((role or "user", text))
 
-    async def send_capability_result(self, request_id: str, result: Any) -> None:
-        """Send a capability result back to kiro-cli."""
-        response = JsonRpcResponse(id=request_id, result=result)
-        await self._write_line(response.model_dump_json())
+        if not parts:
+            return [{"type": "text", "text": ""}]
+        if len(parts) == 1 and parts[0][0] == "user":
+            return [{"type": "text", "text": parts[0][1]}]
+        rendered = "\n\n".join(f"{label.get(r, 'User')}: {c}" for r, c in parts)
+        return [{"type": "text", "text": rendered}]
 
-    async def send_capability_error(self, request_id: str, code: int, message: str) -> None:
-        """Send a capability error back to kiro-cli."""
-        from kiro.acp_models import JsonRpcError
-        response = JsonRpcResponse(
-            id=request_id,
-            error=JsonRpcError(code=code, message=message)
-        )
-        await self._write_line(response.model_dump_json())
-
-    # ------------------------------------------------------------------
-    # New session (for concurrent requests)
-    # ------------------------------------------------------------------
-
-    async def new_session(self, capabilities: Optional[GatewayCapabilities] = None) -> str:
-        """Initialize a fresh session and return its ID."""
-        result = await self.initialize(capabilities)
-        return result.session_id
+    @staticmethod
+    def _flatten_content(content: Any) -> str:
+        """Flatten str | list[content_part] into plain text."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    chunks.append(str(part.get("text") or part.get("content") or ""))
+                else:
+                    chunks.append(str(part))
+            return "\n".join(c for c in chunks if c)
+        return str(content)
 
     # ------------------------------------------------------------------
     # Internal: JSON-RPC plumbing
     # ------------------------------------------------------------------
 
-    async def _call(self, method: str, params: dict) -> Any:
+    async def _call(self, method: str, params: dict, timeout: float = 120.0) -> Any:
+        """Send a request and await its response (used for init / session/new)."""
         req_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[req_id] = future
-        req = JsonRpcRequest(id=req_id, method=method, params=params)
-        await self._send(req)
-        response: JsonRpcResponse = await asyncio.wait_for(future, timeout=120.0)
+        await self._send(JsonRpcRequest(id=req_id, method=method, params=params))
+        try:
+            response: JsonRpcResponse = await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            raise ACPError(-32000, f"ACP {method} timed out after {timeout}s")
         if response.error:
             raise ACPError(response.error.code, response.error.message, response.error.data)
         return response.result
@@ -218,13 +375,14 @@ class ACPClient:
                 await self._proc.stdin.drain()
 
     async def _read_loop(self) -> None:
-        """Read lines from kiro-cli stdout and dispatch to waiters or queues."""
+        """Read JSON-RPC messages from stdout and dispatch them."""
         assert self._proc and self._proc.stdout
         while True:
             try:
                 raw = await self._proc.stdout.readline()
                 if not raw:
                     logger.warning("kiro-cli stdout closed")
+                    self._fail_all("kiro-cli subprocess exited")
                     break
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line:
@@ -233,11 +391,11 @@ class ACPClient:
                 self._dispatch(line)
             except asyncio.CancelledError:
                 break
-            except Exception as exc:
-                logger.error(f"ACP read_loop error: {exc}")
+            except (json.JSONDecodeError, KeyError, ValueError) as exc:
+                logger.error(f"ACP read_loop parse error: {exc}")
 
     async def _stderr_loop(self) -> None:
-        """Drain kiro-cli stderr and log every line at DEBUG level."""
+        """Drain stderr and log it at DEBUG level."""
         assert self._proc and self._proc.stderr
         while True:
             try:
@@ -249,46 +407,183 @@ class ACPClient:
                     logger.debug(f"kiro-cli stderr: {line}")
             except asyncio.CancelledError:
                 break
-            except Exception as exc:
+            except (UnicodeDecodeError, ValueError) as exc:
                 logger.error(f"ACP stderr_loop error: {exc}")
 
+    def _fail_all(self, message: str) -> None:
+        """Propagate a fatal error to every pending future and active queue."""
+        for fut in list(self._pending.values()):
+            if not fut.done():
+                fut.set_exception(ACPError(-32000, message))
+        self._pending.clear()
+        for queue in list(self._event_queues.values()):
+            queue.put_nowait({"type": "error", "message": message})
+
     def _dispatch(self, line: str) -> None:
-        """Parse a JSON-RPC line and route it to the correct handler."""
+        """Route a single JSON-RPC line to the right handler."""
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
             logger.warning(f"ACP: unparseable line: {line[:200]}")
             return
 
-        if "method" in msg and not msg.get("id"):
+        method = msg.get("method")
+        has_id = msg.get("id") is not None
+
+        if method and has_id:
+            # Agent -> gateway request (e.g. session/request_permission).
+            asyncio.create_task(self._handle_agent_request(msg))
+            return
+        if method:
+            # Notification (no id) such as session/update.
             self._handle_notification(msg)
             return
 
+        # Response to one of our outstanding requests.
         msg_id = str(msg.get("id", ""))
         future = self._pending.pop(msg_id, None)
         if future and not future.done():
             future.set_result(JsonRpcResponse(**msg))
+            return
+        # Otherwise it may be the terminal result of a streaming prompt.
+        self._finish_prompt(msg_id, msg)
+
+    def _finish_prompt(self, req_id: str, msg: dict) -> None:
+        """Translate a session/prompt response into a terminal queue event."""
+        session_id = self._prompt_sessions.get(req_id)
+        if not session_id:
+            return
+        queue = self._event_queues.get(session_id)
+        if not queue:
+            return
+        if msg.get("error"):
+            err = msg["error"]
+            queue.put_nowait({
+                "type": "error",
+                "message": err.get("message", "ACP prompt error"),
+            })
+            return
+        result = msg.get("result") or {}
+        stop_reason = result.get("stopReason", "end_turn") if isinstance(result, dict) else "end_turn"
+        queue.put_nowait({
+            "type": "done",
+            "finish_reason": _STOP_REASON_MAP.get(stop_reason, "stop"),
+            "usage": {},
+        })
 
     def _handle_notification(self, msg: dict) -> None:
+        """Translate ``session/update`` notifications into gateway events."""
         method = msg.get("method", "")
         params = msg.get("params", {})
-        session_id = params.get("session_id", self._session_id or "")
 
-        if method == "session/progress":
-            queue = self._progress_queues.get(session_id)
-            if queue:
-                queue.put_nowait(ProgressParams(**params))
+        if method != "session/update":
+            # _kiro.dev/* metadata, commands, etc. are not part of the
+            # OpenAI/Anthropic surface — ignore them.
+            logger.debug(f"ACP notification ignored: {method}")
             return
 
-        if method.startswith("capability/"):
-            cap_queue = self._capability_queues.get(session_id)
-            req_id = str(msg.get("id", ""))
-            if cap_queue:
-                cap_queue.put_nowait((method, req_id, params))
-            else:
-                asyncio.create_task(
-                    self.send_capability_error(req_id, -32601, f"{method} not supported")
-                )
+        session_id = params.get("sessionId", "")
+        queue = self._event_queues.get(session_id)
+        if not queue:
             return
 
-        logger.debug(f"ACP unhandled notification: {method}")
+        update = params.get("update", {})
+        kind = update.get("sessionUpdate")
+
+        if kind == "agent_message_chunk":
+            text = self._extract_text(update.get("content"))
+            if text:
+                queue.put_nowait({"type": "text", "content": text})
+        elif kind == "agent_thought_chunk":
+            text = self._extract_text(update.get("content"))
+            if text:
+                queue.put_nowait({"type": "thinking", "content": text})
+        elif kind == "tool_call":
+            queue.put_nowait({
+                "type": "tool_call",
+                "id": update.get("toolCallId", str(uuid.uuid4())),
+                "name": update.get("title") or update.get("kind") or "tool",
+                "arguments": update.get("rawInput", {}) or {},
+            })
+        # tool_call_update / plan / available_commands_update: status only,
+        # not surfaced as caller-visible content.
+
+    @staticmethod
+    def _extract_text(content: Any) -> str:
+        """Extract text from a session/update content object."""
+        if isinstance(content, dict):
+            return content.get("text", "")
+        if isinstance(content, str):
+            return content
+        return ""
+
+    # ------------------------------------------------------------------
+    # Agent -> gateway requests
+    # ------------------------------------------------------------------
+
+    async def _handle_agent_request(self, msg: dict) -> None:
+        """Respond to a request the agent sends back to the gateway."""
+        method = msg.get("method", "")
+        req_id = msg.get("id")
+        params = msg.get("params", {})
+
+        if method == "session/request_permission":
+            option_id = self._select_permission_option(params.get("options", []))
+            await self._respond(req_id, {"outcome": {"outcome": "selected", "optionId": option_id}})
+            return
+
+        # We advertise no fs/terminal capabilities, so kiro-cli should never
+        # ask us to perform them. If it does, decline cleanly.
+        await self._respond_error(req_id, -32601, f"{method} not supported by gateway")
+
+    def _select_permission_option(self, options: list[dict]) -> str:
+        """
+        Choose a permission option.
+
+        When ``trust_tools`` is enabled the gateway auto-approves a single
+        invocation (``allow_once``); otherwise it rejects (``reject_once``).
+        Falls back to matching by ``kind`` then to the first option.
+        """
+        wanted_kinds = (
+            ("allow_once", "allow_always", "allow")
+            if self._trust_tools
+            else ("reject_once", "reject_always", "reject")
+        )
+        for kind in wanted_kinds:
+            for opt in options:
+                if opt.get("kind") == kind or opt.get("optionId") == kind:
+                    return opt.get("optionId", kind)
+        # Fall back: any option whose kind/id contains the desired verb.
+        verb = "allow" if self._trust_tools else "reject"
+        for opt in options:
+            if verb in str(opt.get("kind", "")) or verb in str(opt.get("optionId", "")):
+                return opt.get("optionId", verb)
+        return options[0].get("optionId", "allow_once") if options else "allow_once"
+
+    async def _respond(self, req_id: Any, result: Any) -> None:
+        await self._write_line(JsonRpcResponse(id=req_id, result=result).model_dump_json())
+
+    async def _respond_error(self, req_id: Any, code: int, message: str) -> None:
+        from kiro.acp_models import JsonRpcError
+        await self._write_line(
+            JsonRpcResponse(id=req_id, error=JsonRpcError(code=code, message=message)).model_dump_json()
+        )
+
+    # ------------------------------------------------------------------
+    # Backward-compatible capability hooks (retained for shim_service/tests)
+    # ------------------------------------------------------------------
+
+    async def capability_requests(self, session_id: str) -> AsyncIterator[tuple[str, str, dict]]:
+        """
+        Deprecated: capability/permission handling now happens inside the
+        read loop. Kept as an empty async generator for API compatibility.
+        """
+        if False:  # pragma: no cover - keeps this an async generator
+            yield ("", "", {})
+        return
+
+    async def send_capability_result(self, request_id: str, result: Any) -> None:
+        await self._respond(request_id, result)
+
+    async def send_capability_error(self, request_id: str, code: int, message: str) -> None:
+        await self._respond_error(request_id, code, message)

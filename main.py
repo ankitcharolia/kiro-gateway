@@ -27,6 +27,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+# Load .env before importing kiro.config so Option-A (bare metal) deployments
+# that configure the gateway via a .env file are honoured. Existing environment
+# variables always take precedence over .env values.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:  # python-dotenv is optional at runtime
+    pass
+
 from kiro.acp_client import ACPClient
 from kiro.config import settings, APP_VERSION
 from kiro.routes_acp import router as acp_router
@@ -55,8 +64,12 @@ logger.add(
 async def lifespan(app: FastAPI):
     logger.info(f"Starting Kiro Gateway v{APP_VERSION} (ACP mode)...")
     logger.info(f"kiro-cli path: {settings.KIRO_CLI_PATH}")
+    logger.info(f"tool auto-approval: {'on' if settings.ACP_TRUST_TOOLS else 'off'}")
 
-    acp_client = ACPClient(command=settings.KIRO_CLI_PATH)
+    acp_client = ACPClient(
+        command=settings.KIRO_CLI_PATH,
+        trust_tools=settings.ACP_TRUST_TOOLS,
+    )
     await acp_client.start()
     await acp_client.initialize()
 

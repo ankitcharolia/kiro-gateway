@@ -1,42 +1,39 @@
 # -*- coding: utf-8 -*-
 """
-ShimService — shared orchestration for OpenAI and Anthropic shims.
+ShimService — shared orchestration for the OpenAI, Anthropic and ACP routes.
 
-Handles:
-  1. Real-time streaming: ACP progress events are yielded token-by-token,
-     not buffered. Shim routes call stream_tokens() and translate events
-     to SSE on the fly.
+Responsibilities
+----------------
+1. Session lifecycle: create a fresh ACP session per request (via
+   ``ACPClient.new_session``) so concurrent requests stay isolated.
 
-  2. Tool-calling round-trips: tool_use events from kiro-cli are collected,
-     translated to the caller's format (OpenAI function_call / Anthropic
-     tool_use), and the caller's tool_result is injected back as a follow-up
-     session/prompt so kiro-cli sees the result.
+2. Real-time streaming: ``stream_tokens`` yields the ACP client's normalised
+   dict events (text / thinking / tool_call / done / error) as they arrive.
+   The shim routes translate them to OpenAI or Anthropic SSE on the fly.
 
-  3. Capability mediation: readFile, writeFile, runCommand, listDirectory
-     requests from kiro-cli are handled by CapabilityExecutor when no native
-     ACP client is present.
+3. Non-streaming completion: ``complete`` aggregates the same pipeline into a
+   single response dict.
+
+Permission and tool execution are handled inside ``ACPClient`` (kiro-cli runs
+its own built-in tools and asks the gateway only for permission), so this
+layer no longer mediates capabilities directly.
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Any, AsyncIterator, Optional
 
 from loguru import logger
 
-from kiro.acp_client import ACPClient, ACPError
+from kiro.acp_client import ACPClient
 from kiro.acp_models import (
-    PromptParams, PromptMessage, ProgressParams,
-    ToolCall, ToolResult,
+    PromptParams, PromptMessage,
+    ToolResult,
     FilesystemRoot, TerminalCapability, GatewayCapabilities,
 )
-from kiro.capability_executor import CapabilityExecutor, CapabilityError
 
 
 class ShimService:
-    """
-    Stateless service layer shared by OpenAI and Anthropic shim routes.
-    One instance lives on app.state and is used concurrently.
-    """
+    """Stateless orchestration layer shared by all route families."""
 
     def __init__(
         self,
@@ -45,10 +42,8 @@ class ShimService:
         terminal: Optional[TerminalCapability] = None,
     ):
         self._acp = acp_client
-        self._capability_executor = CapabilityExecutor(
-            filesystem_roots=filesystem_roots or [],
-            terminal=terminal,
-        )
+        self._default_fs_roots = filesystem_roots or []
+        self._default_terminal = terminal
 
     # ------------------------------------------------------------------
     # Non-streaming completion
@@ -65,11 +60,13 @@ class ShimService:
         terminal: Optional[TerminalCapability] = None,
     ) -> dict[str, Any]:
         """
-        Run a full non-streaming completion including any tool-call round-trips.
-        Returns a dict with: content, tool_calls, finish_reason, usage.
+        Run a full non-streaming completion.
+
+        Returns:
+            {"content": str, "tool_calls": list[dict],
+             "finish_reason": str, "usage": dict}
         """
         session_id = await self._new_session(filesystem_roots, terminal)
-
         params = PromptParams(
             session_id=session_id,
             messages=messages,
@@ -79,7 +76,6 @@ class ShimService:
             tools=tools or [],
             stream=False,
         )
-
         result = await self._acp.prompt(params)
         return self._normalize_result(result)
 
@@ -96,20 +92,14 @@ class ShimService:
         tools: Optional[list[dict]] = None,
         filesystem_roots: Optional[list[FilesystemRoot]] = None,
         terminal: Optional[TerminalCapability] = None,
-    ) -> AsyncIterator[ProgressParams]:
+    ) -> AsyncIterator[dict[str, Any]]:
         """
-        Stream ACP progress events directly to the caller.
+        Stream normalised ACP events to the caller as they arrive.
 
-        Events are yielded as they arrive from kiro-cli — no buffering.
-        The caller (OpenAI/Anthropic shim route) translates each event
-        to the appropriate SSE format on the fly.
-
-        Capability requests that arrive during streaming are handled
-        transparently by CapabilityExecutor. They never interrupt the
-        token stream from the caller's perspective.
+        Each yielded item is a plain dict with a ``type`` of ``text``,
+        ``thinking``, ``tool_call``, ``done`` or ``error``.
         """
         session_id = await self._new_session(filesystem_roots, terminal)
-
         params = PromptParams(
             session_id=session_id,
             messages=messages,
@@ -119,24 +109,11 @@ class ShimService:
             tools=tools or [],
             stream=True,
         )
-
-        # Run capability handling concurrently with the main stream
-        cap_task = asyncio.create_task(
-            self._handle_capabilities_during_stream(session_id)
-        )
-
-        try:
-            async for event in self._acp.prompt_stream(params):
-                yield event
-        finally:
-            cap_task.cancel()
-            try:
-                await cap_task
-            except asyncio.CancelledError:
-                pass
+        async for event in self._acp.prompt_stream(params):
+            yield event
 
     # ------------------------------------------------------------------
-    # Tool-call round-trip (non-streaming)
+    # Tool-result round-trip (non-streaming)
     # ------------------------------------------------------------------
 
     async def complete_with_tools(
@@ -149,10 +126,7 @@ class ShimService:
         temperature: Optional[float] = None,
         tools: Optional[list[dict]] = None,
     ) -> dict[str, Any]:
-        """
-        Submit tool results back to an existing session and get the
-        follow-up completion.
-        """
+        """Submit tool results to an existing session and get the follow-up."""
         params = PromptParams(
             session_id=session_id,
             messages=messages,
@@ -170,33 +144,20 @@ class ShimService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _new_session(self, fs_roots=None, terminal=None) -> str:
+    async def _new_session(
+        self,
+        fs_roots: Optional[list[FilesystemRoot]] = None,
+        terminal: Optional[TerminalCapability] = None,
+    ) -> str:
         caps = GatewayCapabilities(
-            filesystem=fs_roots or [],
-            terminal=terminal,
+            filesystem=fs_roots or self._default_fs_roots or [],
+            terminal=terminal or self._default_terminal,
         )
         return await self._acp.new_session(caps)
 
-    async def _handle_capabilities_during_stream(self, session_id: str) -> None:
-        """
-        Drain capability requests from kiro-cli and execute them via
-        CapabilityExecutor during a streaming prompt.
-        """
-        try:
-            async for method, req_id, params in self._acp.capability_requests(session_id):
-                try:
-                    result = await self._capability_executor.handle(method, params)
-                    await self._acp.send_capability_result(req_id, result)
-                except CapabilityError as e:
-                    await self._acp.send_capability_error(req_id, e.code, str(e))
-                except Exception as e:
-                    await self._acp.send_capability_error(req_id, -32000, str(e))
-        except asyncio.CancelledError:
-            pass
-
     @staticmethod
     def _normalize_result(result: Any) -> dict[str, Any]:
-        """Normalize an ACP prompt result dict into a standard internal shape."""
+        """Coerce an ACP prompt result into the standard internal shape."""
         if isinstance(result, dict):
             return {
                 "content": result.get("content", ""),
@@ -204,5 +165,4 @@ class ShimService:
                 "finish_reason": result.get("finish_reason", "stop"),
                 "usage": result.get("usage", {}),
             }
-        # Fallback: result may be a string content directly
         return {"content": str(result), "tool_calls": [], "finish_reason": "stop", "usage": {}}

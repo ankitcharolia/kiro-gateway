@@ -107,9 +107,9 @@ async def acp_chat_stream(
                 filesystem_roots=body.filesystem_roots or [],
                 terminal=body.terminal,
             ):
-                data = event.model_dump(exclude_none=True)
-                yield f"event: acp_{event.type}\ndata: {json.dumps(data)}\n\n"
-                if event.type in ("done", "error"):
+                etype = event.get("type", "text")
+                yield f"event: acp_{etype}\ndata: {json.dumps(event)}\n\n"
+                if etype in ("done", "error"):
                     break
         except Exception as exc:
             logger.error(f"ACP stream error: {exc}")

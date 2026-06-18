@@ -282,7 +282,12 @@ async def _stream_response(
             filesystem_roots=fs_roots,
             terminal=terminal,
         ):
-            if event.type == "text" and event.delta:
+            etype = event.get("type")
+
+            if etype == "text":
+                delta = event.get("content", "")
+                if not delta:
+                    continue
                 if not in_text_block:
                     yield sse("content_block_start", {
                         "type": "content_block_start",
@@ -293,69 +298,66 @@ async def _stream_response(
                 yield sse("content_block_delta", {
                     "type": "content_block_delta",
                     "index": block_idx,
-                    "delta": {"type": "text_delta", "text": event.delta},
+                    "delta": {"type": "text_delta", "text": delta},
                 })
                 output_tokens += 1  # rough count until usage arrives in done event
 
-            elif event.type == "thinking" and event.delta:
-                if not in_text_block:
-                    yield sse("content_block_start", {
-                        "type": "content_block_start",
-                        "index": block_idx,
-                        "content_block": {"type": "text", "text": ""},
-                    })
-                    in_text_block = True
-                yield sse("content_block_delta", {
-                    "type": "content_block_delta",
-                    "index": block_idx,
-                    "delta": {"type": "text_delta", "text": event.delta},
-                })
+            elif etype == "thinking":
+                # Reasoning is not surfaced on the Anthropic content stream.
+                continue
 
-            elif event.type == "tool_call" and event.tool_call:
-                tc = event.tool_call
+            elif etype == "tool_call":
+                tc_id = event.get("id", str(uuid.uuid4()))
+                name = event.get("name", "")
+                arguments = event.get("arguments", {})
 
-                if tc.id not in active_tool_blocks:
+                if tc_id not in active_tool_blocks:
                     # Close the text block if open
                     if in_text_block:
                         yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
                         block_idx += 1
                         in_text_block = False
 
-                    active_tool_blocks[tc.id] = block_idx
+                    active_tool_blocks[tc_id] = block_idx
                     yield sse("content_block_start", {
                         "type": "content_block_start",
                         "index": block_idx,
                         "content_block": {
                             "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
+                            "id": tc_id,
+                            "name": name,
                             "input": {},
                         },
                     })
 
                     # Stream arguments as input_json_delta
-                    if tc.arguments:
+                    if arguments:
                         yield sse("content_block_delta", {
                             "type": "content_block_delta",
                             "index": block_idx,
                             "delta": {
                                 "type": "input_json_delta",
-                                "partial_json": json.dumps(tc.arguments),
+                                "partial_json": json.dumps(arguments),
                             },
                         })
 
                     yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
                     block_idx += 1
 
-            elif event.type == "done":
+            elif etype == "done":
                 # Close open text block
                 if in_text_block:
                     yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
 
-                usage = event.usage or {}
+                usage = event.get("usage", {}) or {}
                 stop_reason = "tool_use" if active_tool_blocks else (
-                    event.finish_reason or "end_turn"
+                    event.get("finish_reason") or "end_turn"
                 )
+                # Normalise OpenAI-style finish reasons to Anthropic vocabulary.
+                if stop_reason == "stop":
+                    stop_reason = "end_turn"
+                elif stop_reason == "length":
+                    stop_reason = "max_tokens"
 
                 yield sse("message_delta", {
                     "type": "message_delta",
@@ -370,12 +372,13 @@ async def _stream_response(
                 yield sse("message_stop", {"type": "message_stop"})
                 break
 
-            elif event.type == "error":
+            elif etype == "error":
+                message = event.get("message") or event.get("error") or "Unknown ACP error"
                 yield sse("error", {
                     "type": "error",
                     "error": {
                         "type": "api_error",
-                        "message": event.error or "Unknown ACP error",
+                        "message": message,
                     },
                 })
                 break
