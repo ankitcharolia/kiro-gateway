@@ -56,7 +56,24 @@ def test_log_level_lowercase():
 
 
 def test_kiro_cli_path_default():
-    assert KIRO_CLI_PATH == "kiro"
+    """KIRO_CLI_PATH defaults to the shipped binary name 'kiro-cli'.
+
+    Evaluated in an isolated subprocess with KIRO_CLI_PATH removed from the
+    environment so the result reflects the code default rather than any
+    ambient override (e.g. when the suite runs inside a kiro-cli session).
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    env = {k: v for k, v in os.environ.items() if k != "KIRO_CLI_PATH"}
+    out = subprocess.check_output(
+        [sys.executable, "-c", "from kiro.config import KIRO_CLI_PATH; print(KIRO_CLI_PATH)"],
+        env=env,
+        cwd=str(repo_root),
+    ).decode().strip()
+    assert out == "kiro-cli"
 
 
 def test_settings_object_exists():
