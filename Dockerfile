@@ -1,46 +1,33 @@
 # syntax=docker/dockerfile:1
 
 # ────────────────────────────────────────────────────────────────────────────
-# Stage 1: kiro CLI placeholder
+# Stage 1: Install the official Kiro CLI
 #
-# The kiro CLI binary is NOT distributed as a public tarball on kiro.dev.
-# Provide the binary at build time via one of these methods:
+# The Kiro CLI is installed from the official installer (https://cli.kiro.dev/
+# install) so the image is self-contained — no need to bind-mount the binary
+# at runtime. The installer downloads the signed, checksum-verified Linux build
+# of `kiro-cli` / `kiro-cli-chat` (the ACP agent) into ~/.local/bin.
 #
-#   Option A – build-arg path to a local binary:
-#     docker build --build-arg KIRO_BINARY=./kiro-linux-x86_64 -t kiro-gateway .
+# Pin a channel with --build-arg KIRO_CHANNEL=stable (default).
 #
-#   Option B – mount a pre-downloaded binary in CI:
-#     docker build --secret id=kiro,src=./kiro -t kiro-gateway .
-#
-#   Option C (runtime-only) – bind-mount the host binary:
-#     docker run -v $(which kiro):/usr/local/bin/kiro:ro kiro-gateway
-#
-# The stub below satisfies the COPY --from step so the image builds even
-# when no real binary is provided; the gateway will fail at runtime if kiro
-# is actually needed and no real binary is mounted.
+# NOTE: the resulting image contains the proprietary Kiro CLI. That is fine for
+# your own/local images; do not redistribute the image publicly unless the Kiro
+# CLI license permits it.
 # ────────────────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS kiro-downloader
+FROM python:3.14-slim AS kiro-installer
 
-ARG TARGETARCH
-ARG KIRO_BINARY=""
+ARG KIRO_CHANNEL=stable
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates \
+        curl unzip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# If a local binary path is provided via --build-arg KIRO_BINARY=<path>,
-# it will be COPYed in the next step.  Otherwise we create a stub that
-# prints a helpful error at runtime so the build never fails with a 404.
-RUN mkdir -p /usr/local/bin
-
-# Try to copy a real binary if KIRO_BINARY was supplied; fall through to stub.
-COPY ${KIRO_BINARY:-docker/kiro-stub.sh} /tmp/kiro-candidate
-RUN if [ -s /tmp/kiro-candidate ] && file /tmp/kiro-candidate 2>/dev/null | grep -q 'ELF'; then \
-        cp /tmp/kiro-candidate /usr/local/bin/kiro; \
-    else \
-        printf '#!/bin/sh\necho "kiro binary not installed. Mount the real kiro binary at /usr/local/bin/kiro" >&2\nexit 1\n' > /usr/local/bin/kiro; \
-    fi; \
-    chmod +x /usr/local/bin/kiro
+# Install into a throwaway HOME, then promote the binaries to /usr/local/bin.
+RUN export HOME=/opt/kiro-install && mkdir -p "$HOME" \
+    && curl -fsSL https://cli.kiro.dev/install | bash -s -- --channel "${KIRO_CHANNEL}" \
+    && install -m 0755 "$HOME/.local/bin/kiro-cli"      /usr/local/bin/kiro-cli \
+    && install -m 0755 "$HOME/.local/bin/kiro-cli-chat" /usr/local/bin/kiro-cli-chat \
+    && /usr/local/bin/kiro-cli-chat --version
 
 # ────────────────────────────────────────────────────────────────────────────
 # Stage 2: Python dependency build
@@ -58,12 +45,18 @@ RUN pip install --no-cache-dir --upgrade pip && \
 FROM python:3.14-slim AS runtime
 
 LABEL org.opencontainers.image.title="kiro-gateway" \
-      org.opencontainers.image.description="ACP-compliant bridge: OpenAI/Anthropic API \u2192 kiro CLI" \
+      org.opencontainers.image.description="ACP-compliant bridge: OpenAI/Anthropic API → kiro CLI" \
       org.opencontainers.image.source="https://github.com/ankitcharolia/kiro-gateway" \
       org.opencontainers.image.licenses="AGPL-3.0"
 
-# Copy kiro CLI (real or stub) from downloader stage
-COPY --from=kiro-downloader /usr/local/bin/kiro /usr/local/bin/kiro
+# ca-certificates is needed for the Kiro CLI's outbound TLS calls.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bundle the official Kiro CLI (real binary, not a stub).
+COPY --from=kiro-installer /usr/local/bin/kiro-cli      /usr/local/bin/kiro-cli
+COPY --from=kiro-installer /usr/local/bin/kiro-cli-chat /usr/local/bin/kiro-cli-chat
 
 # Copy installed Python packages
 COPY --from=builder /install /usr/local
@@ -71,15 +64,23 @@ COPY --from=builder /install /usr/local
 WORKDIR /app
 COPY . .
 
-# The gateway never needs root after startup
+# The gateway never needs root. A world-writable HOME lets the container run as
+# an arbitrary host uid (recommended: --user "$(id -u):$(id -g)") so it can read
+# the bind-mounted credentials AND write the per-user runtime state the Kiro CLI
+# creates on first use (~/.local/share/kiro-cli: token-refresh state + helpers).
 RUN useradd --no-create-home --shell /bin/false gateway && \
+    mkdir -p /home/gateway && chmod 0777 /home/gateway && \
     chown -R gateway:gateway /app
 USER gateway
 
-# Kiro credentials are mounted at runtime via -v ~/.kiro:/home/gateway/.kiro:ro
-# The HOME override makes kiro CLI find its tokens in the right place
+# Only credentials are mounted at runtime (read-write — the token in
+# ~/.aws/sso/cache is refreshed in place and session files are written to
+# ~/.kiro):
+#   -v ~/.aws:/home/gateway/.aws  -v ~/.kiro:/home/gateway/.kiro
+# KIRO_CLI_PATH points at the bundled ACP agent (kiro-cli-chat).
 ENV HOME=/home/gateway \
-    KIRO_CLI_COMMAND=/usr/local/bin/kiro \
+    KIRO_CLI_PATH=/usr/local/bin/kiro-cli-chat \
+    ACP_TRUST_TOOLS=false \
     SERVER_HOST=0.0.0.0 \
     SERVER_PORT=8000
 
