@@ -133,25 +133,48 @@ python main.py
 
 ---
 
+### Docker credentials & state
+
+The Docker image **bundles the Kiro CLI** (installed from the official
+`https://cli.kiro.dev/install` at build time), so you never mount the binary.
+You only mount your per-user Kiro credentials/state, which the CLI needs to
+authenticate and cannot be baked into an image:
+
+| Host path | Purpose | Mode |
+|---|---|---|
+| `~/.aws` | SSO token cache | read-write |
+| `~/.kiro` | sessions, settings | read-write |
+| `~/.local/share/kiro-cli` | OAuth token secret store (`data.sqlite3`) + helper binaries | read-write |
+
+Mounts must be **read-write** (the CLI refreshes the auth token in place and
+writes session files). Run the container as **your own UID/GID** so it can read
+and write those files: `--user "$(id -u):$(id -g)"`. Run `kiro-cli login` on the
+host once before starting the container.
+
+---
+
 ### Option B — Docker (published image)
 
-Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to the GitHub Container Registry on every release.
+Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to the
+GitHub Container Registry on every release.
 
 ```bash
-# Pull the latest release
 docker pull ghcr.io/ankitcharolia/kiro-gateway:latest
 
-# Run — mount your kiro-cli credentials so the container can call the CLI
 docker run -d \
   --name kiro-gateway \
   -p 8000:8000 \
+  --user "$(id -u):$(id -g)" \
   -e PROXY_API_KEY=change-me \
-  -e KIRO_CLI_PATH=/usr/local/bin/kiro-cli \
-  -v "${HOME}/.kiro:/root/.kiro:ro" \
+  -v "${HOME}/.aws:/home/gateway/.aws" \
+  -v "${HOME}/.kiro:/home/gateway/.kiro" \
+  -v "${HOME}/.local/share/kiro-cli:/home/gateway/.local/share/kiro-cli" \
   ghcr.io/ankitcharolia/kiro-gateway:latest
 ```
 
-> **Credential mount** — Kiro stores its session tokens in `~/.kiro`. Mounting this directory read-only into the container lets the bundled `kiro-cli` authenticate without re-running `kiro-cli login` inside the container.
+> The published image must be built from a release that includes the bundled
+> Kiro CLI. If you pulled an older release, build locally (Option D) until a new
+> release is published.
 
 #### Pinning a specific version
 
@@ -168,15 +191,21 @@ git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
 cp .env.example .env
 # edit .env: set PROXY_API_KEY
+# add your UID/GID so the container can read your mounted credentials:
+printf 'UID=%s\nGID=%s\n' "$(id -u)" "$(id -g)" >> .env
 
 docker compose up -d
 ```
 
-The included `docker-compose.yml` mounts `~/.kiro` automatically.
+The included `docker-compose.yml` runs as your UID/GID and mounts `~/.aws`,
+`~/.kiro` and `~/.local/share/kiro-cli`. It uses the published image by default;
+to run the local source, comment out `image:` and uncomment `build: .`.
 
 ---
 
 ### Option D — Build the Docker image locally
+
+The build installs the Kiro CLI into the image, so it is self-contained.
 
 ```bash
 git clone https://github.com/ankitcharolia/kiro-gateway.git
@@ -187,8 +216,11 @@ docker build -t kiro-gateway:local .
 docker run -d \
   --name kiro-gateway \
   -p 8000:8000 \
+  --user "$(id -u):$(id -g)" \
   -e PROXY_API_KEY=change-me \
-  -v "${HOME}/.kiro:/root/.kiro:ro" \
+  -v "${HOME}/.aws:/home/gateway/.aws" \
+  -v "${HOME}/.kiro:/home/gateway/.kiro" \
+  -v "${HOME}/.local/share/kiro-cli:/home/gateway/.local/share/kiro-cli" \
   kiro-gateway:local
 ```
 
@@ -204,6 +236,14 @@ PROXY_API_KEY=change-me          # Secret key clients must send as Bearer / x-ap
 
 # ── CLI path ──────────────────────────────────────────────────────────
 KIRO_CLI_PATH=kiro-cli           # Override if kiro-cli is not on $PATH
+
+# ── Tool execution ────────────────────────────────────────────────────
+# kiro-cli runs its own built-in tools (file edits, command execution) and
+# asks the gateway for permission first. true = auto-approve each request,
+# false = reject (read/answer-only posture).
+ACP_TRUST_TOOLS=true
+ACP_WORKSPACE_DIR=               # Default session cwd (defaults to process cwd)
+ACP_TIMEOUT=120                  # Seconds to await a JSON-RPC response
 
 # ── Feature flags ─────────────────────────────────────────────────────
 ACP_ENABLED=true
@@ -290,42 +330,49 @@ http://localhost:8000/acp/chat/stream  # SSE streaming
 
 ## Tool-call round-trips
 
-Both shims support the full tool-call cycle:
+Both shims surface the tool activity that `kiro-cli` performs:
 
-1. `kiro-cli` emits a `tool_call` ACP event during streaming.
-2. The shim translates it to the caller's format (`function_call` / `tool_use`) and streams it.
-3. The caller executes the tool and sends back results.
-4. The gateway injects results into a follow-up `session/prompt` so `kiro-cli` continues.
+1. `kiro-cli` decides to run one of its built-in tools and asks the gateway for
+   permission via `session/request_permission`.
+2. The gateway approves or rejects based on `ACP_TRUST_TOOLS` (see below).
+3. The tool invocation is streamed to the caller as a `tool_call` event,
+   translated to the caller's format (`tool_calls` / `tool_use`).
+4. `kiro-cli` executes the tool itself and continues the same turn, streaming
+   the resulting assistant text.
 
-Parallel tool calls are supported in the OpenAI shim via index-tracked `tool_calls` delta chunks.
+Parallel tool calls are surfaced in the OpenAI shim via index-tracked
+`tool_calls` delta chunks. Because each gateway request opens a fresh ACP
+session, tool execution and continuation happen entirely inside `kiro-cli`
+within a single turn — callers receive the tool activity for visibility rather
+than having to execute tools themselves.
 
 ---
 
-## Filesystem & terminal sandboxing
+## Tool execution & permissions
 
-Capability requests from `kiro-cli` are mediated by `CapabilityExecutor`:
+`kiro-cli` ships its **own** built-in tools (file reads/edits, command
+execution, search, …) and runs them itself inside the session working
+directory. The gateway advertises **no** client-side filesystem or terminal
+capabilities, so it never executes tools on the agent's behalf — it only
+answers the permission requests the agent sends back:
 
-| Capability | Behaviour |
+| Agent request | Gateway behaviour |
 |---|---|
-| `capability/readFile` | Allowed only within configured `filesystem_roots` with `read: true`. Max 10 MB. |
-| `capability/writeFile` | Allowed only within roots with `write: true`. Creates parent dirs. |
-| `capability/listDirectory` | Lists entries (name, type, size, URI) within allowed roots. |
-| `capability/runCommand` | Executes only commands in `terminal.allowed_commands`. Enforces timeout. |
+| `session/request_permission` | Auto-approves a single invocation (`allow_once`) when `ACP_TRUST_TOOLS=true`; rejects (`reject_once`) when `false`. |
 
-```json
-{
-  "model": "claude-sonnet-4-5",
-  "messages": [{ "role": "user", "content": "Review my code" }],
-  "filesystem_roots": [
-    { "uri": "file:///home/user/project", "name": "project", "read": true, "write": false }
-  ],
-  "terminal": {
-    "allowed_commands": ["git", "npm"],
-    "working_directory": "/home/user/project",
-    "timeout_seconds": 30
-  }
-}
+```env
+ACP_TRUST_TOOLS=true     # auto-approve built-in tool runs (file edits, commands)
+ACP_TRUST_TOOLS=false    # answer-only: every tool permission request is denied
+ACP_WORKSPACE_DIR=/path  # working directory kiro-cli operates in (default: process cwd)
 ```
+
+> **Security:** with `ACP_TRUST_TOOLS=true` the agent can write files and run
+> commands in `ACP_WORKSPACE_DIR` without human confirmation. Use `false` for a
+> read/answer-only deployment, and scope `ACP_WORKSPACE_DIR` to a project
+> directory.
+
+A request may also pass `filesystem_roots` to set the session's working
+directory; the first root's path is used as the `cwd` for `session/new`.
 
 ---
 
@@ -335,8 +382,8 @@ Capability requests from `kiro-cli` are mediated by `CapabilityExecutor`:
 |---|---|---|
 | ACP bridge | `kiro/acp_client.py` | Spawns `kiro-cli`; exchanges JSON-RPC 2.0 over stdio; routes events to per-session queues |
 | ACP models | `kiro/acp_models.py` | Pydantic models for all ACP types |
-| Capability sandbox | `kiro/capability_executor.py` | readFile / writeFile / listDirectory / runCommand with path + command sandboxing |
-| Orchestration | `kiro/shim_service.py` | Streaming, tool-call round-trips, capability mediation, session lifecycle |
+| Permission handling | `kiro/acp_client.py` | Answers `session/request_permission` (auto-approve / reject via `ACP_TRUST_TOOLS`) |
+| Orchestration | `kiro/shim_service.py` | Per-request session creation, streaming passthrough, non-streaming aggregation |
 | ACP routes | `kiro/routes_acp.py` | `/acp/chat`, `/acp/chat/stream` |
 | OpenAI shim | `kiro/routes_openai_shim.py` | `/v1/chat/completions`, `/v1/models` |
 | Anthropic shim | `kiro/routes_anthropic_shim.py` | `/v1/messages`, `/v1/models` |
@@ -367,7 +414,7 @@ The test suite verifies:
 - No private Kiro API URLs appear in source files
 - Single-account `ComplianceError` is raised for 2+ sessions
 - OpenAI + Anthropic shim endpoints return spec-compliant responses
-- `CapabilityExecutor` sandbox enforces path + command boundaries
+- `session/request_permission` is auto-approved or rejected per `ACP_TRUST_TOOLS`
 
 ---
 
@@ -384,13 +431,18 @@ git push origin vX.Y.Z
 #     ghcr.io/ankitcharolia/kiro-gateway:latest
 ```
 
+> **Licensing note** — the image installs the Kiro CLI at build time, so a
+> published image contains the proprietary Kiro CLI binary. Confirm that the
+> Kiro CLI license permits redistribution before publishing the image to a
+> public registry. For private/local use this is not a concern.
+
 ---
 
 ## Recommended practices
 
 - Prefer **ACP-native IDEs** whenever available — zero translation overhead.
-- Keep `filesystem_roots` scoped to the project directory and `write: false` unless the agent needs to create files.
-- Keep `terminal.allowed_commands` as narrow as possible.
+- Scope `ACP_WORKSPACE_DIR` to a single project directory.
+- Set `ACP_TRUST_TOOLS=false` for an answer-only deployment where the agent must not edit files or run commands.
 - Never share `PROXY_API_KEY` — treat it like any API secret.
 - All Kiro authentication lives in `kiro-cli`. The gateway never touches credentials.
 

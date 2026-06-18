@@ -12,7 +12,7 @@ Uma ponte **totalmente compatível com ACP** que permite que qualquer ferramenta
 4. [Configuração do Cliente](#configuração-do-cliente)
 5. [Endpoints da API](#endpoints-da-api)
 6. [Chamadas de Ferramentas](#chamadas-de-ferramentas)
-7. [Sandbox de Arquivos e Terminal](#sandbox-de-arquivos-e-terminal)
+7. [Execução de Ferramentas e Permissões](#execução-de-ferramentas-e-permissões)
 8. [Eventos de Streaming](#eventos-de-streaming)
 9. [Executando Testes](#executando-testes)
 10. [Processo de Lançamento](#processo-de-lançamento)
@@ -49,7 +49,7 @@ routes_openai_shim    routes_anthropic_shim
 |---|---|---|
 | Ponte ACP | `kiro/acp_client.py` | Lança o CLI `kiro`; JSON-RPC 2.0 sobre stdio |
 | Modelos ACP | `kiro/acp_models.py` | Modelos Pydantic para todos os tipos ACP |
-| Sandbox de capacidades | `kiro/capability_executor.py` | Sandbox de readFile/writeFile/listDirectory/runCommand |
+| Tratamento de permissoes | `kiro/acp_client.py` | Responde a `session/request_permission` (aprovacao automatica ou rejeicao via `ACP_TRUST_TOOLS`) |
 | Orquestração | `kiro/shim_service.py` | Streaming, viagens de ferramentas, ciclo de vida de sessão |
 | Rotas ACP | `kiro/routes_acp.py` | `/acp/chat`, `/acp/chat/stream` |
 | Shim OpenAI | `kiro/routes_openai_shim.py` | `/v1/chat/completions`, `/v1/models` |
@@ -113,7 +113,10 @@ docker compose up -d
 # Obrigatório
 PROXY_API_KEY=change-me
 
-KIRO_CLI_COMMAND=kiro
+KIRO_CLI_PATH=kiro-cli
+ACP_TRUST_TOOLS=true        # kiro-cli executa suas proprias ferramentas e pede permissao; true = aprovar, false = rejeitar
+ACP_WORKSPACE_DIR=          # Diretorio de trabalho da sessao (padrao: cwd do processo)
+ACP_TIMEOUT=120             # Segundos de espera por uma resposta JSON-RPC
 ACP_ENABLED=true
 OPENAI_SHIM_ENABLED=true
 ANTHROPIC_SHIM_ENABLED=true
@@ -121,6 +124,34 @@ SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
 COMPLIANCE_MODE=true
 ```
+
+---
+
+## Execução de Ferramentas e Permissões
+
+O `kiro` CLI fornece suas **próprias** ferramentas integradas (leitura/edição de
+arquivos, execução de comandos, busca) e as executa ele mesmo dentro do
+diretório de trabalho da sessão. O gateway **não** anuncia nenhuma capacidade de
+sistema de arquivos ou terminal do lado do cliente, portanto nunca executa
+ferramentas em nome do agente — ele apenas responde às solicitações de permissão
+que o agente envia de volta.
+
+| Solicitação do agente | Comportamento do gateway |
+|---|---|
+| `session/request_permission` | Aprova automaticamente uma única invocação (`allow_once`) quando `ACP_TRUST_TOOLS=true`; rejeita (`reject_once`) quando `false`. |
+
+```env
+ACP_TRUST_TOOLS=true     # aprovar automaticamente execuções de ferramentas integradas (edições de arquivos, comandos)
+ACP_TRUST_TOOLS=false    # somente resposta: toda solicitação de permissão de ferramenta é negada
+ACP_WORKSPACE_DIR=/path  # diretório de trabalho onde o kiro CLI opera (padrão: cwd do processo)
+```
+
+Uma solicitação também pode passar `filesystem_roots`; o caminho do primeiro
+root torna-se o `cwd` para `session/new`.
+
+> **Segurança:** com `ACP_TRUST_TOOLS=true` o agente pode escrever arquivos e
+> executar comandos no diretório de trabalho sem confirmação humana. Use `false`
+> para uma implantação somente de leitura/resposta.
 
 ---
 

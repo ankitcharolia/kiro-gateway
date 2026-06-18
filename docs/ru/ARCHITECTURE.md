@@ -1,821 +1,353 @@
-# Архитектурный Обзор: Kiro Gateway
+# Архитектурный обзор: Kiro Gateway
 
-## 1. Назначение и Цели Системы
+## 1. Назначение
 
-Проект представляет собой высокоуровневый прокси-шлюз, реализующий структурный паттерн проектирования **"Адаптер" (Adapter)**.
+Kiro Gateway — это **мост, ориентированный на соблюдение правил (compliance-first)**, который позволяет любому инструменту, работающему с API OpenAI, Anthropic или с нативным протоколом ACP, использовать единственную подписку Kiro.
 
-Основная цель системы — обеспечить прозрачную совместимость между несколькими гетерогенными интерфейсами:
+Ключевой принцип: **каждый запрос обслуживается путём обращения к официальному бинарному файлу `kiro-cli` в режиме `acp`** через Agent Client Protocol (ACP) — то есть через JSON-RPC 2.0 поверх stdio.
 
-### Поддерживаемые API форматы
+Шлюз **никогда**:
 
-| API | Эндпоинты | Статус |
-|-----|-----------|--------|
-| **OpenAI** | `/v1/models`, `/v1/chat/completions` | ✅ Поддерживается |
-| **Anthropic** | `/v1/messages` | ✅ Поддерживается |
+- не вызывает приватные HTTP-API Kiro;
+- не объединяет учётные записи в пул;
+- не работает с учётными данными напрямую — вся аутентификация выполняется внутри `kiro-cli` командой `kiro-cli login`.
+
+Ценность шлюза — **трансляция протоколов**: он переводит формы запросов и ответов между API OpenAI/Anthropic, нативным ACP и протоколом `kiro-cli`, не искажая и не отбрасывая содержимое пользователя.
+
+### Поддерживаемые форматы API
+
+| Формат | Эндпоинты | Аутентификация |
+|--------|-----------|----------------|
+| **Native ACP** | `POST /acp/chat`, `POST /acp/chat/stream` | — |
+| **OpenAI** | `GET /v1/models`, `POST /v1/chat/completions` | `Authorization: Bearer <PROXY_API_KEY>` |
+| **Anthropic** | `GET /v1/models`, `POST /v1/messages` | `x-api-key: <PROXY_API_KEY>` |
+
+Все форматы работают одновременно на одном сервере.
 
 ### Архитектурная модель
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Клиенты                                 │
-│  ┌─────────────────────┐       ┌─────────────────────┐         │
-│  │  OpenAI SDK/Tools   │       │ Anthropic SDK/Tools │         │
-│  │  (Cursor, Cline,    │       │ (Claude Code,       │         │
-│  │   Continue, etc.)   │       │  Anthropic SDK)     │         │
-│  └──────────┬──────────┘       └──────────┬──────────┘         │
-└─────────────┼──────────────────────────────┼───────────────────┘
-              │                              │
-              ▼                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Kiro Gateway                               │
-│  ┌─────────────────────┐       ┌─────────────────────┐         │
-│  │  OpenAI Adapter     │       │  Anthropic Adapter  │         │
-│  │  /v1/chat/...       │       │  /v1/messages       │         │
-│  └──────────┬──────────┘       └──────────┬──────────┘         │
-│             └──────────────┬───────────────┘                    │
-│                            ▼                                    │
-│             ┌─────────────────────────────┐                     │
-│             │      Core Layer             │                     │
-│             │  (Общая логика конвертации) │                     │
-│             └──────────────┬──────────────┘                     │
-└────────────────────────────┼────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        Kiro API                                 │
-│              (AWS CodeWhisperer Backend)                        │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                            Клиенты                                  │
+│  ┌──────────────┐   ┌──────────────────┐   ┌────────────────────┐  │
+│  │ OpenAI-       │   │ Anthropic-       │   │ Нативные           │  │
+│  │ совместимые   │   │ совместимые      │   │ ACP-клиенты        │  │
+│  │ (Cursor,      │   │ (Claude Code,    │   │ (Zed, плагины IDE) │  │
+│  │  Cline, ...)  │   │  Kilo Code, ...) │   │                    │  │
+│  └──────┬───────┘   └────────┬─────────┘   └──────────┬─────────┘  │
+└─────────┼────────────────────┼────────────────────────┼────────────┘
+          │                    │                        │
+          ▼                    ▼                        ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                          Kiro Gateway                               │
+│  routes_openai_shim.py   routes_anthropic_shim.py   routes_acp.py   │
+│            └──────────────────┬─────────────────────────┘           │
+│                               ▼                                     │
+│                        shim_service.py                              │
+│             (жизненный цикл сессии на запрос,                       │
+│              проброс/агрегация событий)                             │
+│                               ▼                                     │
+│                         acp_client.py                               │
+│              (один подпроцесс kiro-cli,                            │
+│               JSON-RPC 2.0 поверх stdio)                           │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+                  ┌───────────────────────────┐
+                  │      kiro-cli acp         │  ← только официальный бинарь
+                  │  (официальный, авториз.)  │
+                  └─────────────┬─────────────┘
+                                │
+                                ▼
+                  ┌───────────────────────────┐
+                  │      Kiro Backend         │
+                  └───────────────────────────┘
 ```
 
-Система выступает в роли "переводчика", позволяя использовать любые инструменты, библиотеки и IDE-плагины, разработанные для экосистем OpenAI и Anthropic, с моделями Claude через Kiro API.
+> **Контроль единственной учётной записи.** При запуске шлюз проверяет, что одновременно активна не более чем одна сессия `kiro-cli` (`kiro.compliance.validate_single_account_compliance`). Попытка запустить параллельные учётные записи вызывает жёсткую ошибку `ComplianceError`.
 
-**Оба API работают одновременно** на одном сервере без необходимости переключения в настройках.
-
-## 2. Структура Проекта
-
-Проект организован в виде модульного Python-пакета `kiro/`:
+## 2. Структура проекта
 
 ```
 kiro-gateway/
-├── main.py                    # Точка входа, создание FastAPI приложения
-├── requirements.txt           # Зависимости Python
-├── .env.example               # Пример конфигурации окружения
-│
-├── kiro/              # Основной пакет
-│   ├── __init__.py            # Экспорты пакета, версия
-│   │
-│   │   # ═══════════════════════════════════════════════════════
-│   │   # SHARED LAYER - Переиспользуется всеми API
-│   │   # ═══════════════════════════════════════════════════════
-│   ├── config.py              # Конфигурация и константы
-│   ├── auth.py                # KiroAuthManager - управление токенами
-│   ├── cache.py               # ModelInfoCache - кэш моделей
-│   ├── http_client.py         # HTTP клиент с retry логикой
-│   ├── parsers.py             # Парсеры AWS SSE потоков
-│   ├── utils.py               # Вспомогательные утилиты
-│   ├── tokenizer.py           # Подсчёт токенов (tiktoken)
-│   ├── debug_logger.py        # Отладочное логирование запросов
-│   ├── exceptions.py          # Обработчики исключений
-│   ├── thinking_parser.py     # Парсер thinking блоков
-│   │
-│   │   # ═══════════════════════════════════════════════════════
-│   │   # CORE LAYER - Общее ядро для всех API
-│   │   # ═══════════════════════════════════════════════════════
-│   ├── converters_core.py     # Общая логика построения Kiro payload
-│   ├── streaming_core.py      # Общая логика парсинга Kiro stream
-│   │
-│   │   # ═══════════════════════════════════════════════════════
-│   │   # OPENAI API LAYER
-│   │   # ═══════════════════════════════════════════════════════
-│   ├── models_openai.py       # Pydantic модели OpenAI API
-│   ├── converters_openai.py   # OpenAI → Kiro адаптер
-│   ├── routes_openai.py       # FastAPI роуты OpenAI
-│   ├── streaming_openai.py    # Kiro → OpenAI SSE форматтер
-│   │
-│   │   # ═══════════════════════════════════════════════════════
-│   │   # ANTHROPIC API LAYER
-│   │   # ═══════════════════════════════════════════════════════
-│   ├── models_anthropic.py    # Pydantic модели Anthropic API
-│   ├── converters_anthropic.py # Anthropic → Kiro адаптер
-│   ├── routes_anthropic.py    # FastAPI роуты Anthropic
-│   └── streaming_anthropic.py # Kiro → Anthropic SSE форматтер
-│
-├── tests/                     # Тесты
-│   ├── conftest.py            # Pytest fixtures
-│   ├── unit/                  # Юнит-тесты
-│   └── integration/           # Интеграционные тесты
-│
-├── docs/                      # Документация
-│   ├── ru/                    # Русская версия
-│   └── en/                    # Английская версия
-│
-└── debug_logs/                # Отладочные логи (генерируются при DEBUG_MODE=all или DEBUG_MODE=errors)
+├── main.py                       # Точка входа + lifespan: загрузка .env,
+│                                 # запуск ACPClient, однократная initialize
+├── kiro/
+│   ├── acp_client.py             # Подпроцесс kiro-cli + JSON-RPC мост +
+│   │                             # трансляция протокола + обработка разрешений
+│   ├── acp_models.py             # Pydantic-модели (конверты JSON-RPC,
+│   │                             # параметры prompt, блоки контента)
+│   ├── shim_service.py           # session/new на запрос, проброс стрима,
+│   │                             # агрегация для non-streaming
+│   ├── routes_openai_shim.py     # /v1/chat/completions, /v1/models
+│   ├── routes_anthropic_shim.py  # /v1/messages, /v1/models
+│   ├── routes_acp.py             # /acp/chat, /acp/chat/stream
+│   ├── config.py                 # Настройки из окружения (объект settings
+│   │                             # + модульные константы)
+│   ├── compliance.py             # Контроль единственной учётной записи
+│   └── capability_executor.py    # Заглушка (сохранена, НЕ в активном пути)
+├── tests/                        # conftest.py + unit/ + integration/
+├── docs/                         # Переводы документации (en, ru, ...)
+├── .env.example                  # Шаблон конфигурации
+├── requirements.txt
+└── pytest.ini
 ```
 
-### Принцип организации: Общее ядро + тонкие адаптеры
+> Некоторые устаревшие модули могут оставаться в `kiro/`, но активный путь ACP составляют именно перечисленные выше файлы. `capability_executor.py` сохранён ради совместимости, но в живом пути обработки запросов не участвует.
 
-Архитектура построена на принципе **максимального переиспользования кода**:
+## 3. Архитектурная топология и компоненты
 
-| Слой | Назначение | Файлы |
-|------|------------|-------|
-| **Shared Layer** | Инфраструктура, не зависящая от формата API | `auth.py`, `http_client.py`, `cache.py`, `parsers.py`, `tokenizer.py` |
-| **Core Layer** | Общая бизнес-логика конвертации | `converters_core.py`, `streaming_core.py` |
-| **API Layer** | Тонкие адаптеры для конкретных форматов | `*_openai.py`, `*_anthropic.py` |
-
-## 3. Архитектурная Топология и Компоненты
-
-Система построена на базе асинхронного фреймворка `FastAPI` и использует событийную модель управления жизненным циклом (`Lifespan Events`).
+Система построена на асинхронном фреймворке FastAPI и использует событийную модель управления жизненным циклом (`lifespan`).
 
 ### 3.1. Точка входа (`main.py`)
 
-Файл `main.py` отвечает за:
-
-1. **Конфигурацию логирования** — настройка Loguru с цветным выводом
-2. **Валидацию конфигурации** — функция `validate_configuration()` проверяет:
-   - Наличие файла `.env`
-   - Наличие credentials (REFRESH_TOKEN или KIRO_CREDS_FILE)
-3. **Lifespan Manager** — создание и инициализация:
-   - `KiroAuthManager` для управления токенами
-   - `ModelInfoCache` для кэширования моделей
-4. **Регистрация обработчиков ошибок** — `validation_exception_handler` для ошибок 422
-5. **Подключение роутов** — `app.include_router(router)`
-
-### 3.2. Модуль конфигурации (`kiro/config.py`)
-
-Централизованное хранение всех настроек:
-
-| Параметр | Описание | Значение по умолчанию |
-|----------|----------|----------------------|
-| `PROXY_API_KEY` | API ключ для доступа к прокси | `changeme_proxy_secret` |
-| `REFRESH_TOKEN` | Refresh token Kiro | из `.env` |
-| `PROFILE_ARN` | ARN профиля AWS CodeWhisperer | из `.env` |
-| `REGION` | Регион AWS | `us-east-1` |
-| `KIRO_CREDS_FILE` | Путь к JSON файлу credentials | из `.env` |
-| `TOKEN_REFRESH_THRESHOLD` | Время до обновления токена | 600 сек (10 мин) |
-| `MAX_RETRIES` | Макс. количество повторов | 3 |
-| `BASE_RETRY_DELAY` | Базовая задержка retry | 1.0 сек |
-| `MODEL_CACHE_TTL` | TTL кэша моделей | 3600 сек (1 час) |
-| `DEFAULT_MAX_INPUT_TOKENS` | Макс. input токенов по умолчанию | 200000 |
-| `TOOL_DESCRIPTION_MAX_LENGTH` | Макс. длина описания tool | 10000 символов |
-| `DEBUG_MODE` | Режим отладочного логирования | `off` (off/errors/all) |
-| `DEBUG_DIR` | Директория для debug логов | `debug_logs` |
-| `APP_VERSION` | Версия приложения | `0.0.0` |
-
-**Вспомогательные функции:**
-- `get_kiro_refresh_url(region)` — URL для обновления токена
-- `get_kiro_api_host(region)` — хост основного API
-- `get_kiro_q_host(region)` — хост Q API
-- `get_internal_model_id(external_model)` — конвертация имени модели
-
-### 3.3. Pydantic Модели (`kiro/models_openai.py`)
-
-#### Модели для `/v1/models`
-
-| Модель | Описание |
-|--------|----------|
-| `OpenAIModel` | Описание AI модели (id, object, created, owned_by) |
-| `ModelList` | Список моделей для ответа endpoint |
-
-#### Модели для `/v1/chat/completions`
-
-| Модель | Описание |
-|--------|----------|
-| `ChatMessage` | Сообщение чата (role, content, tool_calls, tool_call_id) |
-| `ToolFunction` | Описание функции инструмента (name, description, parameters) |
-| `Tool` | Инструмент OpenAI формата (type, function) |
-| `ChatCompletionRequest` | Запрос на генерацию (model, messages, stream, tools, ...) |
-
-#### Модели ответов
-
-| Модель | Описание |
-|--------|----------|
-| `ChatCompletionChoice` | Один вариант ответа |
-| `ChatCompletionUsage` | Информация о токенах (prompt_tokens, completion_tokens, credits_used) |
-| `ChatCompletionResponse` | Полный ответ (non-streaming) |
-| `ChatCompletionChunk` | Streaming chunk |
-| `ChatCompletionChunkDelta` | Дельта изменений в chunk |
-| `ChatCompletionChunkChoice` | Вариант в streaming chunk |
-
-### 3.4. Управление Состоянием (State Management Layer)
-
-#### KiroAuthManager (`kiro/auth.py`)
-
-**Роль:** Stateful-синглтон, инкапсулирующий логику управления токенами Kiro.
-
-**Возможности:**
-- Загрузка credentials из `.env` или JSON файла
-- Поддержка `expiresAt` для проверки времени истечения токена
-- Автоматическое обновление токена за 10 минут до истечения
-- Сохранение обновлённых токенов обратно в JSON файл
-- Поддержка разных регионов AWS
-- Генерация уникального fingerprint для User-Agent
-
-**Concurrency Control:** Использует `asyncio.Lock` для защиты от состояния гонки.
-
-**Основные методы:**
-- `get_access_token()` — возвращает действительный токен, обновляя при необходимости
-- `force_refresh()` — принудительное обновление токена (при 403)
-- `is_token_expiring_soon()` — проверка времени истечения
-
-**Properties:**
-- `profile_arn` — ARN профиля
-- `region` — регион AWS
-- `api_host` — хост API для региона
-- `q_host` — хост Q API для региона
-- `fingerprint` — уникальный fingerprint машины
-
-```python
-# Пример использования
-auth_manager = KiroAuthManager(
-    refresh_token="your_token",
-    region="us-east-1",
-    creds_file="~/.aws/sso/cache/kiro-auth-token.json"
-)
-token = await auth_manager.get_access_token()
-```
-
-#### ModelInfoCache (`kiro/cache.py`)
+При старте приложения `main.py`:
 
-**Роль:** Потокобезопасное хранилище конфигураций моделей.
-
-**Стратегия Заполнения:** 
-- Lazy Loading через `/ListAvailableModels`
-- TTL кэша: 1 час
-- Fallback на статический список моделей
+1. **Загружает `.env`** (через `python-dotenv`) до импорта `kiro.config`, при этом реальные переменные окружения имеют приоритет над значениями из `.env`.
+2. **Настраивает логирование** через loguru (цветной вывод, уровень `INFO`).
+3. **В `lifespan`** создаёт единственный экземпляр `ACPClient`, запускает подпроцесс `kiro-cli acp` (`acp_client.start()`) и однократно выполняет ACP-рукопожатие `initialize` (`acp_client.initialize()`).
+4. **Сохраняет состояние** в `app.state.acp_client` и `app.state.shim_service` (один общий `ShimService` на процесс).
+5. **Подключает роутеры** в зависимости от флагов `ACP_ENABLED`, `OPENAI_SHIM_ENABLED`, `ANTHROPIC_SHIM_ENABLED`, добавляет CORS-middleware и эндпоинт `GET /health`.
+6. **При остановке** корректно завершает подпроцесс `kiro-cli` (`acp_client.stop()`).
 
-**Основные методы:**
-- `update(models_data)` — обновление кэша
-- `get(model_id)` — получение информации о модели
-- `get_max_input_tokens(model_id)` — получение лимита токенов
-- `is_empty()` / `is_stale()` — проверка состояния кэша
-- `get_all_model_ids()` — список всех ID моделей
+### 3.2. ACP-клиент (`kiro/acp_client.py`)
 
-### 3.5. Вспомогательные Утилиты (`kiro/utils.py`)
+`ACPClient` управляет одним подпроцессом `kiro-cli acp` на весь процесс шлюза. Он безопасен для конкурентного использования: `initialize` выполняется один раз при старте, а `new_session` вызывается на каждый запрос, что обеспечивает изоляцию параллельных промптов.
 
-| Функция | Описание |
-|---------|----------|
-| `get_machine_fingerprint()` | SHA256 хеш `{hostname}-{username}-kiro-gateway` |
-| `get_kiro_headers(auth_manager, token)` | Формирование заголовков для Kiro API |
-| `generate_completion_id()` | ID в формате `chatcmpl-{uuid_hex}` |
-| `generate_conversation_id()` | UUID для разговора |
-| `generate_tool_call_id()` | ID в формате `call_{uuid_hex[:8]}` |
+Ответственность компонента:
 
-### 3.6. Слой Конвертации (`kiro/converters_openai.py`)
+- **Запуск подпроцесса** и чтение его stdout/stderr в отдельных asyncio-задачах.
+- **JSON-RPC плумбинг**: отправка запросов, сопоставление ответов по `id` через `Future`, маршрутизация уведомлений `session/update` в очереди событий по `sessionId`.
+- **Трансляция протокола**: преобразование «сырых» ACP-форм в нормализованный внутренний контракт событий (см. раздел 3.4).
+- **Обработка разрешений**: ответы на запросы `session/request_permission`, приходящие от агента.
 
-#### Конвертация сообщений
+Параметр `command` напрямую соответствует переменной окружения `KIRO_CLI_PATH`.
 
-OpenAI messages преобразуются в Kiro conversationState:
+### 3.3. Протокол ACP (формат обмена по stdio)
 
-1. **System prompt** — добавляется к первому user сообщению
-2. **История сообщений** — полностью передаётся в `history` array
-3. **Объединение соседних сообщений** — сообщения с одинаковой ролью мерджатся
-4. **Tool calls** — поддержка OpenAI tools формата
-5. **Tool results** — корректная передача результатов вызова инструментов
+`kiro-cli acp` реализует протокол Zed Agent Client Protocol. Точность форм обязательна — некорректный `initialize` приводит к немедленному выходу агента.
 
-#### Обработка длинных описаний Tools
+1. **`initialize`** — один раз на процесс.
+   Параметры:
+   ```json
+   {
+     "protocolVersion": 1,
+     "clientCapabilities": {
+       "fs": {"readTextFile": false, "writeTextFile": false},
+       "terminal": false
+     }
+   }
+   ```
+   Возвращает `agentCapabilities`, `authMethods`, `agentInfo`. **Идентификатор сессии не возвращается.**
 
-**Проблема:** Kiro API возвращает ошибку 400 при слишком длинных описаниях в `toolSpecification.description`.
+2. **`session/new`** — один раз на запрос шлюза.
+   Параметры: `{"cwd": "<абсолютный путь>", "mcpServers": []}` → результат `{sessionId, modes}`.
 
-**Решение:** Tool Documentation Reference Pattern
-- Если `description ≤ TOOL_DESCRIPTION_MAX_LENGTH` → оставляем как есть
-- Если `description > TOOL_DESCRIPTION_MAX_LENGTH`:
-  * В `toolSpecification.description` → ссылка: `"[Full documentation in system prompt under '## Tool: {name}']"`
-  * В system prompt добавляется секция `"## Tool: {name}"` с полным описанием
+3. **`session/prompt`** — на каждый ход (turn).
+   Параметры: `{"sessionId", "prompt": [{"type": "text", "text": "..."}]}` → результат `{stopReason}`.
 
-**Функция:** `process_tools_with_long_descriptions(tools)` → `(processed_tools, tool_documentation)`
+4. **`session/update`** — уведомления (без `id`), приходящие во время выполнения промпта; различаются по полю `update.sessionUpdate`:
+   `agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`.
 
-#### Основные функции
+5. **`session/request_permission`** — запрос (с `id`), который агент отправляет шлюзу перед запуском встроенного инструмента. Шлюз отвечает:
+   ```json
+   {"outcome": {"outcome": "selected", "optionId": "<id опции>"}}
+   ```
 
-| Функция | Описание |
-|---------|----------|
-| `extract_text_content(content)` | Извлечение текста из различных форматов |
-| `merge_adjacent_messages(messages)` | Объединение соседних сообщений с одной ролью |
-| `build_kiro_history(messages, model_id)` | Построение массива history для Kiro |
-| `build_kiro_payload(request_data, conversation_id, profile_arn)` | Полный payload для запроса |
+**Важно:** `kiro-cli` запускает **собственные** встроенные инструменты (правка файлов, выполнение команд, поиск и т. д.) и делает это сам, внутри рабочего каталога сессии. Шлюз не объявляет клиентских возможностей `fs`/`terminal` и поэтому никогда не выполняет инструменты за агента — он лишь **отвечает на запросы разрешений**:
 
-#### Маппинг моделей
+| Запрос агента | Поведение шлюза |
+|---------------|-----------------|
+| `session/request_permission` при `ACP_TRUST_TOOLS=true` | Автоматически одобряет одно выполнение (`allow_once`) |
+| `session/request_permission` при `ACP_TRUST_TOOLS=false` | Отклоняет (`reject_once`) |
 
-Внешние имена моделей преобразуются во внутренние ID Kiro:
+### 3.4. Внутренний контракт событий
 
-| Внешнее имя | Внутренний ID Kiro |
-|-------------|-------------------|
-| `claude-opus-4-5` | `claude-opus-4.5` |
-| `claude-opus-4-5-20251101` | `claude-opus-4.5` |
-| `claude-haiku-4-5` | `claude-haiku-4.5` |
-| `claude-haiku-4.5` | `claude-haiku-4.5` (прямой проброс) |
-| `claude-sonnet-4-5` | `CLAUDE_SONNET_4_5_20250929_V1_0` |
-| `claude-sonnet-4-5-20250929` | `CLAUDE_SONNET_4_5_20250929_V1_0` |
-| `claude-sonnet-4` | `CLAUDE_SONNET_4_20250514_V1_0` |
-| `claude-sonnet-4-20250514` | `CLAUDE_SONNET_4_20250514_V1_0` |
-| `claude-3-7-sonnet-20250219` | `CLAUDE_3_7_SONNET_20250219_V1_0` |
-| `auto` | `claude-sonnet-4.5` (алиас) |
+`ACPClient` нормализует уведомления `session/update` и финальный результат промпта в **простые словари (dict)**. `ShimService` пробрасывает их без изменений, а транслирующие роуты преобразуют их в SSE формата OpenAI/Anthropic/ACP.
 
-### 3.7. Слой Парсинга (`kiro/parsers.py`)
+| Событие (dict) | Поля | Источник |
+|----------------|------|----------|
+| `{"type": "text"}` | `content: str` | `agent_message_chunk` |
+| `{"type": "thinking"}` | `content: str` | `agent_thought_chunk` |
+| `{"type": "tool_call"}` | `id, name, arguments: dict` | `tool_call` |
+| `{"type": "done"}` | `finish_reason: str, usage: dict` | `stopReason` результата промпта |
+| `{"type": "error"}` | `message: str` | ошибка JSON-RPC / выход подпроцесса |
 
-#### AwsEventStreamParser
+Особенности:
 
-Продвинутый парсер AWS SSE формата с поддержкой:
+- События — это **словари**; доступ через `event.get("type")`, а не через атрибуты.
+- `stopReason` нормализуется: `end_turn → stop`, `max_tokens → length`, `tool_use → tool_calls` (Anthropic-роут при необходимости преобразует `stop → end_turn` обратно).
+- `thinking` **не выводится** в потоки контента OpenAI/Anthropic — оно предназначено только для нативных ACP-потребителей через `POST /acp/chat/stream`.
 
-- **Bracket counting** — корректный парсинг вложенных JSON объектов
-- **Дедупликация контента** — фильтрация повторяющихся событий
-- **Tool calls** — парсинг структурированных и bracket-style tool calls
-- **Escape-последовательности** — декодирование `\n` и других
+### 3.5. Оркестрация (`kiro/shim_service.py`)
 
-#### Типы событий
+`ShimService` — это разделяемый без состояния слой оркестрации для всех семейств роутов. Отвечает за:
 
-| Событие | Описание |
-|---------|----------|
-| `content` | Текстовый контент ответа |
-| `tool_start` | Начало tool call (name, toolUseId) |
-| `tool_input` | Продолжение input для tool call |
-| `tool_stop` | Завершение tool call |
-| `usage` | Информация о потреблении кредитов |
-| `context_usage` | Процент использования контекста |
+1. **Жизненный цикл сессии**: на каждый запрос создаёт новую ACP-сессию (`ACPClient.new_session`), чтобы конкурентные запросы оставались изолированными.
+2. **Потоковую передачу в реальном времени**: метод `stream_tokens` выдаёт нормализованные dict-события по мере их поступления.
+3. **Непотоковое завершение**: метод `complete` агрегирует тот же конвейер в один итоговый словарь ответа `{content, tool_calls, finish_reason, usage}`.
 
-#### Вспомогательные функции
+Рабочий каталог сессии (`cwd`) определяется так: при наличии `filesystem_roots` берётся путь первого корня, иначе используется `ACP_WORKSPACE_DIR` / рабочий каталог процесса.
 
-| Функция | Описание |
-|---------|----------|
-| `find_matching_brace(text, start_pos)` | Поиск закрывающей скобки с учётом вложенности |
-| `parse_bracket_tool_calls(response_text)` | Парсинг `[Called func with args: {...}]` |
-| `deduplicate_tool_calls(tool_calls)` | Удаление дубликатов tool calls |
+### 3.6. Транслирующие роуты
 
-### 3.8. Streaming (`kiro/streaming_openai.py`)
+- **`routes_openai_shim.py`** — `GET /v1/models`, `POST /v1/chat/completions`. Преобразует сообщения OpenAI в ACP-сообщения, транслирует dict-события в чанки `chat.completion.chunk` (для стрима) или в объект `chat.completion` (для non-stream). Параллельные tool-calls отражаются через индексированные дельта-чанки `tool_calls`.
+- **`routes_anthropic_shim.py`** — `GET /v1/models`, `POST /v1/messages`. Транслирует события в таксономию SSE Anthropic: `message_start`, `content_block_start`, `content_block_delta` (`text_delta` и `input_json_delta`), `content_block_stop`, `message_delta`, `message_stop`.
+- **`routes_acp.py`** — `POST /acp/chat`, `POST /acp/chat/stream`. Передаёт нативные ACP-события почти один-к-одному (`acp_text`, `acp_tool_call`, `acp_thinking`, `acp_done`, `acp_error`).
 
-#### stream_kiro_to_openai
+### 3.7. Контроль соответствия (`kiro/compliance.py`)
 
-Асинхронный генератор для преобразования потока Kiro в OpenAI формат.
+`validate_single_account_compliance(session_count)` гарантирует, что одновременно активна не более чем одна сессия Kiro: при `session_count > 1` поднимается `ComplianceError`. Объединение учётных записей в пул не поддерживается принципиально.
 
-**Функциональность:**
-- Парсинг AWS SSE stream через `AwsEventStreamParser`
-- Формирование OpenAI `chat.completion.chunk`
-- Обработка tool calls (структурированных и bracket-style)
-- Вычисление usage на основе `contextUsagePercentage`
-- Отладочное логирование через `debug_logger`
+## 4. Поток данных
 
-#### collect_stream_response
-
-Собирает полный ответ из streaming потока для non-streaming режима.
-
-### 3.9. HTTP Клиент (`kiro/http_client.py`)
-
-#### KiroHttpClient
-
-Автоматическая обработка ошибок с exponential backoff:
-
-| Код ошибки | Действие |
-|------------|----------|
-| `403` | Refresh токена через `force_refresh()` + повтор |
-| `429` | Exponential backoff: `BASE_RETRY_DELAY * (2 ** attempt)` |
-| `5xx` | Exponential backoff (до MAX_RETRIES попыток) |
-| Timeout | Exponential backoff |
-
-**Формула задержки:** `1s, 2s, 4s` (при `BASE_RETRY_DELAY=1.0`)
-
-**Методы:**
-- `request_with_retry(method, url, json_data, stream)` — запрос с retry
-- `close()` — закрытие клиента
-
-Поддерживает async context manager (`async with`).
-
-### 3.10. Роуты (`kiro/routes_openai.py`)
-
-| Endpoint | Метод | Описание |
-|----------|-------|----------|
-| `/` | GET | Health check (status, message, version) |
-| `/health` | GET | Детальный health check (status, timestamp, version) |
-| `/v1/models` | GET | Список доступных моделей (требует API key) |
-| `/v1/chat/completions` | POST | Chat completions (требует API key) |
-
-**Аутентификация:** Bearer token в заголовке `Authorization`
-
-### 3.11. Обработка Исключений (`kiro/exceptions.py`)
-
-| Функция | Описание |
-|---------|----------|
-| `sanitize_validation_errors(errors)` | Конвертация bytes в строки для JSON-сериализации |
-| `validation_exception_handler(request, exc)` | Обработчик ошибок валидации Pydantic (422) |
-
-### 3.12. Отладочное Логирование (`kiro/debug_logger.py`)
-
-**Класс:** `DebugLogger` (синглтон)
-
-**Активация:** `DEBUG_MODE=all` или `DEBUG_MODE=errors` в `.env`
-
-**Методы:**
-| Метод | Описание |
-|-------|----------|
-| `prepare_new_request()` | Очистка директории для нового запроса |
-| `log_request_body(body)` | Сохранение входящего запроса |
-| `log_kiro_request_body(body)` | Сохранение запроса к Kiro API |
-| `log_raw_chunk(chunk)` | Дописывание сырого chunk от Kiro |
-| `log_modified_chunk(chunk)` | Дописывание преобразованного chunk |
-
-**Файлы в `debug_logs/`:**
-- `request_body.json` — входящий запрос (OpenAI формат)
-- `kiro_request_body.json` — запрос к Kiro API
-- `response_stream_raw.txt` — сырой поток от Kiro
-- `response_stream_modified.txt` — преобразованный поток (OpenAI формат)
-
-### 3.13. Токенизатор (`kiro/tokenizer.py`)
-
-**Проблема:** Kiro API не возвращает напрямую количество токенов. Вместо этого API предоставляет только `context_usage_percentage` — процент использования контекста модели.
-
-**Решение:** Модуль токенизатора на базе `tiktoken` (библиотека OpenAI на Rust) для быстрого подсчёта токенов.
-
-**Особенности:**
-- Использует кодировку `cl100k_base` (GPT-4), близкую к токенизации Claude
-- Коэффициент коррекции `CLAUDE_CORRECTION_FACTOR = 1.15` для повышения точности
-- Ленивая инициализация для ускорения импорта
-- Fallback на грубую оценку если tiktoken недоступен
-
-**Формула расчёта токенов в ответе:**
-```
-total_tokens = context_usage_percentage × max_input_tokens  (от API Kiro)
-completion_tokens = tiktoken(ответ)                         (наш подсчёт)
-prompt_tokens = total_tokens - completion_tokens            (вычитание)
-```
-
-**Основные функции:**
-
-| Функция | Описание |
-|---------|----------|
-| `count_tokens(text)` | Подсчёт токенов в тексте |
-| `count_message_tokens(messages)` | Подсчёт токенов в списке сообщений |
-| `count_tools_tokens(tools)` | Подсчёт токенов в определениях инструментов |
-| `estimate_request_tokens(messages, tools)` | Полная оценка токенов запроса |
-
-**Дебаг-лог:**
-```
-[Usage] claude-opus-4-5: prompt_tokens=142211 (subtraction), completion_tokens=769 (tiktoken), total_tokens=142980 (API Kiro)
-```
-
-**Точность:** ~97-99.7% по сравнению с данными от API.
-
-### 3.14. Kiro API Endpoints
-
-Все URL динамически формируются на основе региона:
-
-*   **Token Refresh:** `POST https://prod.{region}.auth.desktop.kiro.dev/refreshToken`
-*   **List Models:** `GET https://q.{region}.amazonaws.com/ListAvailableModels`
-*   **Generate Response:** `POST https://codewhisperer.{region}.amazonaws.com/generateAssistantResponse`
-
-## 4. Детальный Поток Данных
-
-### 4.1 Общая схема (мульти-API)
+### 4.1. Общая схема
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         КЛИЕНТЫ                                 │
-│  ┌─────────────────────┐       ┌─────────────────────┐         │
-│  │  OpenAI Client      │       │  Anthropic Client   │         │
-│  └──────────┬──────────┘       └──────────┬──────────┘         │
-└─────────────┼──────────────────────────────┼───────────────────┘
-              │                              │
-              │ POST /v1/chat/completions    │ POST /v1/messages
-              ▼                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      API LAYER                                  │
-│  ┌─────────────────────┐       ┌─────────────────────┐         │
-│  │  routes_openai.py   │       │ routes_anthropic.py │         │
-│  │  Security Gate      │       │ Security Gate       │         │
-│  └──────────┬──────────┘       └──────────┬──────────┘         │
-│             │                              │                    │
-│             ▼                              ▼                    │
-│  ┌─────────────────────┐       ┌─────────────────────┐         │
-│  │converters_openai.py │       │converters_anthropic │         │
-│  │ Извлечение system   │       │ System уже отдельно │         │
-│  │ из messages         │       │ в запросе           │         │
-│  └──────────┬──────────┘       └──────────┬──────────┘         │
-└─────────────┼──────────────────────────────┼───────────────────┘
-              │                              │
-              └──────────────┬───────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      CORE LAYER                                 │
-│             ┌─────────────────────────────┐                     │
-│             │    converters_core.py       │                     │
-│             │  build_kiro_payload()       │                     │
-│             │  build_kiro_history()       │                     │
-│             │  process_tools()            │                     │
-│             └──────────────┬──────────────┘                     │
-└────────────────────────────┼────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     SHARED LAYER                                │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
-│  │ KiroAuthManager │  │ KiroHttpClient  │  │  ModelInfoCache │ │
-│  │   (auth.py)     │  │(http_client.py) │  │   (cache.py)    │ │
-│  └────────┬────────┘  └────────┬────────┘  └─────────────────┘ │
-└───────────┼────────────────────┼────────────────────────────────┘
-            │                    │
-            │                    │ POST /generateAssistantResponse
-            │                    ▼
-            │         ┌─────────────────────────────────────────┐
-            │         │              Kiro API                   │
-            │         └──────────────────┬──────────────────────┘
-            │                            │
-            │                            │ AWS SSE Stream
-            │                            ▼
-┌───────────┼────────────────────────────────────────────────────┐
-│           │            CORE LAYER                              │
-│           │  ┌─────────────────────────────┐                   │
-│           │  │    streaming_core.py        │                   │
-│           │  │  parse_kiro_stream()        │                   │
-│           │  │  → KiroEvent objects        │                   │
-│           │  └──────────────┬──────────────┘                   │
-└────────────────────────────┼───────────────────────────────────┘
-                             │
-              ┌──────────────┴───────────────┐
-              │                              │
-              ▼                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      OUTPUT LAYER                               │
-│  ┌─────────────────────┐       ┌─────────────────────┐         │
-│  │streaming_openai.py  │       │streaming_anthropic  │         │
-│  │ format_openai_sse() │       │format_anthropic_sse │         │
-│  │                     │       │                     │         │
-│  │ data: {...}         │       │ event: type         │         │
-│  │ data: [DONE]        │       │ data: {...}         │         │
-│  └──────────┬──────────┘       └──────────┬──────────┘         │
-└─────────────┼──────────────────────────────┼───────────────────┘
-              │                              │
-              ▼                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         КЛИЕНТЫ                                 │
-│  ┌─────────────────────┐       ┌─────────────────────┐         │
-│  │  OpenAI Client      │       │  Anthropic Client   │         │
-│  └─────────────────────┘       └─────────────────────┘         │
-└─────────────────────────────────┘
+Клиент (OpenAI / Anthropic / native-ACP)
+        │  HTTP
+        ▼
+routes_openai_shim.py / routes_anthropic_shim.py / routes_acp.py
+        │  (трансляция запроса в ACP-сообщения)
+        ▼
+shim_service.py
+        │  new_session() → sessionId    (изоляция на запрос)
+        ▼
+acp_client.py
+        │  JSON-RPC 2.0 поверх stdio
+        ▼
+kiro-cli acp   (официальный авторизованный бинарь)
+        │
+        ▼
+Kiro Backend
+        │
+        ▼  поток session/update (agent_message_chunk, tool_call, ...)
+acp_client.py
+        │  нормализация → dict-события (text / thinking / tool_call / done / error)
+        ▼
+shim_service.py  (проброс / агрегация)
+        │
+        ▼  трансляция в SSE целевого формата
+Клиент
 ```
 
-### 4.2 Поток OpenAI API
+### 4.2. Потоковый запрос (streaming)
 
-```
-OpenAI Client
-     │ POST /v1/chat/completions
-     ▼
-routes_openai.py ──► converters_openai.py ──► converters_core.py
-     │                                              │
-     │                                              ▼
-     │                                        Kiro Payload
-     │                                              │
-     ▼                                              ▼
-KiroAuthManager ──────────────────────────► KiroHttpClient
-                                                   │
-                                                   ▼
-                                              Kiro API
-                                                   │
-                                                   ▼
-streaming_core.py ◄─────────────────────── AWS SSE Stream
-     │
-     ▼
-streaming_openai.py
-     │
-     ▼
-OpenAI SSE Format ──────────────────────► OpenAI Client
-```
+1. Роут принимает HTTP-запрос, проверяет API-ключ и преобразует сообщения в ACP-форму.
+2. `ShimService.stream_tokens` создаёт новую сессию (`session/new`) и запускает `session/prompt`.
+3. `ACPClient` отправляет промпт и читает уведомления `session/update`, помещая нормализованные события в очередь сессии.
+4. Роут получает события и на лету транслирует их в SSE целевого формата.
+5. Завершающее событие `done` (или `error`) закрывает поток; OpenAI добавляет `finish_reason` и `[DONE]`, Anthropic — `message_delta` + `message_stop`.
 
-### 4.3 Поток Anthropic API
+### 4.3. Непотоковый запрос (non-streaming)
 
-```
-Anthropic Client
-     │ POST /v1/messages
-     ▼
-routes_anthropic.py ──► converters_anthropic.py ──► converters_core.py
-     │                                                    │
-     │                                                    ▼
-     │                                              Kiro Payload
-     │                                                    │
-     ▼                                                    ▼
-KiroAuthManager ──────────────────────────────────► KiroHttpClient
-                                                         │
-                                                         ▼
-                                                    Kiro API
-                                                         │
-                                                         ▼
-streaming_core.py ◄─────────────────────────────── AWS SSE Stream
-     │
-     ▼
-streaming_anthropic.py
-     │
-     ▼
-Anthropic SSE Format ──────────────────────────► Anthropic Client
-```
+`ShimService.complete` использует тот же конвейер `prompt_stream`, но аккумулирует текст и tool-calls в единый ответ, который роут оборачивает в `chat.completion` (OpenAI) или объект `message` (Anthropic).
 
-## 5. Доступные Модели
+## 5. Доступные модели
 
-| Модель | Описание | Credits |
-|--------|----------|---------|
-| `claude-opus-4-5` | Топовая модель | ~2.2 |
-| `claude-opus-4-5-20251101` | Топовая модель (версия) | ~2.2 |
-| `claude-sonnet-4-5` | Улучшенная модель | ~1.3 |
-| `claude-sonnet-4-5-20250929` | Улучшенная модель (версия) | ~1.3 |
-| `claude-sonnet-4` | Сбалансированная модель | ~1.3 |
-| `claude-sonnet-4-20250514` | Сбалансированная (версия) | ~1.3 |
-| `claude-haiku-4-5` | Быстрая модель | ~0.4 |
-| `claude-3-7-sonnet-20250219` | Legacy модель | ~1.0 |
+`GET /v1/models` возвращает список идентификаторов моделей. По умолчанию объявляются:
+
+| ID модели | Описание |
+|-----------|----------|
+| `claude-sonnet-4-5` | Сбалансированная модель (по умолчанию) |
+| `claude-opus-4-5` | Топовая модель |
+| `claude-haiku-3-5` | Быстрая модель |
+
+Фактический набор поддерживаемых моделей определяется учётной записью и версией `kiro-cli`. Идентификатор модели передаётся `kiro-cli`, который и выполняет выбор.
 
 ## 6. Конфигурация
 
-### Переменные окружения (.env)
+Все настройки читаются из переменных окружения (или файла `.env`, загружаемого в `main.py`). Реальные переменные окружения имеют приоритет над `.env`.
+
+| Переменная | По умолчанию | Назначение |
+|------------|--------------|------------|
+| `PROXY_API_KEY` | `test-proxy-key` | Секрет для аутентификации клиентов |
+| `KIRO_CLI_PATH` | `kiro-cli` | Путь/имя бинаря Kiro CLI |
+| `ACP_TRUST_TOOLS` | `true` | Автоодобрение (`true`) или отклонение (`false`) запросов разрешений на инструменты |
+| `ACP_WORKSPACE_DIR` | рабочий каталог процесса | Рабочий каталог сессии по умолчанию (`cwd`) |
+| `ACP_TIMEOUT` | `120` | Таймаут ожидания ответа JSON-RPC (секунды) |
+| `ACP_ENABLED` | `true` | Включение роутера нативного ACP |
+| `OPENAI_SHIM_ENABLED` | `true` | Включение OpenAI-шима |
+| `ANTHROPIC_SHIM_ENABLED` | `true` | Включение Anthropic-шима |
+| `SERVER_HOST` / `SERVER_PORT` | `0.0.0.0` / `8000` | Адрес и порт прослушивания |
+| `COMPLIANCE_MODE` | `true` | Контроль единственной учётной записи |
+
+> **Безопасность.** При `ACP_TRUST_TOOLS=true` агент `kiro-cli` может писать файлы и выполнять команды в каталоге сессии без подтверждения. Для развёртываний «только ответы» (read/answer-only) установите `ACP_TRUST_TOOLS=false` и ограничьте `ACP_WORKSPACE_DIR` каталогом проекта. Вся аутентификация Kiro остаётся внутри `kiro-cli` — шлюз не работает с учётными данными.
+
+### Пример `.env`
 
 ```env
-# Обязательные
-REFRESH_TOKEN="your_kiro_refresh_token"
-PROXY_API_KEY="your_proxy_secret"
-
-# Опциональные
-PROFILE_ARN="arn:aws:codewhisperer:..."
-KIRO_REGION="us-east-1"
-KIRO_CREDS_FILE="~/.aws/sso/cache/kiro-auth-token.json"
-
-# Отладка
-DEBUG_MODE="off"  # off/errors/all
-DEBUG_DIR="debug_logs"
-
-# Лимиты
-TOOL_DESCRIPTION_MAX_LENGTH="10000"
-```
-
-### JSON файл credentials (опционально)
-
-```json
-{
-  "accessToken": "eyJ...",
-  "refreshToken": "eyJ...",
-  "expiresAt": "2025-01-12T23:00:00.000Z",
-  "profileArn": "arn:aws:codewhisperer:us-east-1:...",
-  "region": "us-east-1"
-}
+PROXY_API_KEY=change-me
+KIRO_CLI_PATH=kiro-cli
+ACP_TRUST_TOOLS=true
+ACP_WORKSPACE_DIR=
+ACP_TIMEOUT=120
+ACP_ENABLED=true
+OPENAI_SHIM_ENABLED=true
+ANTHROPIC_SHIM_ENABLED=true
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8000
+COMPLIANCE_MODE=true
 ```
 
 ## 7. API Endpoints
 
-### 7.1 Общие эндпоинты
+| Режим | Метод | Эндпоинт | Описание |
+|-------|-------|----------|----------|
+| Health | GET | `/health` | Проверка состояния (`status`, `mode`, `version`) |
+| OpenAI | GET | `/v1/models` | Список моделей |
+| OpenAI | POST | `/v1/chat/completions` | Завершения (стрим + non-stream) |
+| Anthropic | GET | `/v1/models` | Список моделей |
+| Anthropic | POST | `/v1/messages` | Сообщения (стрим + non-stream) |
+| ACP | POST | `/acp/chat` | Непотоковый ACP-чат |
+| ACP | POST | `/acp/chat/stream` | Потоковый ACP-чат (SSE) |
 
-| Endpoint | Метод | Описание |
-|----------|-------|----------|
-| `/` | GET | Health check |
-| `/health` | GET | Детальный health check |
+**Аутентификация:** OpenAI использует `Authorization: Bearer <PROXY_API_KEY>`; Anthropic — заголовок `x-api-key: <PROXY_API_KEY>`.
 
-### 7.2 OpenAI-совместимые эндпоинты
+### Карта потоковых событий
 
-| Endpoint | Метод | Описание |
-|----------|-------|----------|
-| `/v1/models` | GET | Список доступных моделей |
-| `/v1/chat/completions` | POST | Chat completions (streaming/non-streaming) |
+| Событие ACP | OpenAI SSE | Anthropic SSE |
+|-------------|------------|---------------|
+| `text` | чанк `delta.content` | `content_block_delta[text_delta]` |
+| `tool_call` | чанк `delta.tool_calls` | `content_block_start[tool_use]` + `input_json_delta` |
+| `thinking` | не выводится | не выводится |
+| `done` | `finish_reason` + `[DONE]` | `message_delta` + `message_stop` |
+| `error` | error-чанк + `[DONE]` | событие `error` |
 
-**Аутентификация:** `Authorization: Bearer {PROXY_API_KEY}`
+## 8. Особенности реализации
 
-### 7.3 Anthropic-совместимые эндпоинты
-
-| Endpoint | Метод | Описание |
-|----------|-------|----------|
-| `/v1/messages` | POST | Messages API (streaming/non-streaming) |
-
-**Аутентификация:** `x-api-key: {PROXY_API_KEY}` + `anthropic-version: 2023-06-01`
-
-### 7.4 Сравнение форматов
-
-| Аспект | OpenAI | Anthropic |
-|--------|--------|-----------|
-| System prompt | В `messages` с `role: "system"` | Отдельное поле `system` |
-| Content | Строка или массив | Всегда массив content blocks |
-| Stop reason | `finish_reason: "stop"` | `stop_reason: "end_turn"` |
-| Usage | `prompt_tokens`, `completion_tokens` | `input_tokens`, `output_tokens` |
-| Streaming | `data: {...}\n\n` + `data: [DONE]` | `event: type\ndata: {...}\n\n` |
-| Tool format | `{type: "function", function: {...}}` | `{name: "...", input_schema: {...}}` |
-
-## 8. Особенности Реализации
-
-### Tool Calling
-
-Поддержка OpenAI-совместимого формата tools:
-
-```json
-{
-  "tools": [{
-    "type": "function",
-    "function": {
-      "name": "get_weather",
-      "description": "Get weather for a location",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "location": {"type": "string"}
-        }
-      }
-    }
-  }]
-}
-```
-
-### Streaming
-
-Полная поддержка SSE streaming с корректным форматом OpenAI:
-
-```
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk",...}
-
-data: [DONE]
-```
-
-### Отладка
-
-При `DEBUG_MODE=all` или `DEBUG_MODE=errors` все запросы и ответы логируются в `debug_logs/`:
-- `request_body.json` — входящий запрос
-- `kiro_request_body.json` — запрос к Kiro API
-- `response_stream_raw.txt` — сырой поток от Kiro
-- `response_stream_modified.txt` — преобразованный поток
+- **Изоляция сессий на запрос.** Каждый HTTP-запрос открывает свою ACP-сессию (`session/new`), благодаря чему конкурентные запросы не пересекаются. Это и обеспечивает безопасную параллельность при одном подпроцессе `kiro-cli`.
+- **Tool-calls внутри одного хода.** Поскольку каждый запрос открывает новую сессию, `kiro-cli` сам выполняет инструменты и продолжает тот же ход, стримя итоговый текст. Активность инструментов транслируется вызывающей стороне для наглядности (`tool_calls` у OpenAI, `tool_use` у Anthropic), но клиент не обязан выполнять их сам.
+- **Нормализация причин завершения.** `stopReason` приводится к единому виду внутри шлюза; Anthropic-роут затем отображает его обратно в свой словарь (`end_turn`, `max_tokens`).
+- **`thinking` скрыт от прикладных потоков.** Размышления модели не попадают в контент OpenAI/Anthropic и доступны лишь нативным ACP-клиентам.
+- **Обработка ошибок.** Ошибки JSON-RPC и аварийный выход подпроцесса транслируются в событие `error`; в роутах внутренние сбои логируются и возвращаются клиенту в виде `HTTPException` (например, `502`).
 
 ## 9. Расширяемость
 
-### Добавление нового API формата
+- **Добавление поля/возможности в шимы.** Изменения вносятся в **оба** файла — `routes_openai_shim.py` и `routes_anthropic_shim.py`, причём как в потоковую, так и в непотоковую ветку, с сохранением dict-контракта событий. Покрываются тестами все четыре комбинации (OpenAI/Anthropic × стрим/non-stream).
+- **Изменение обработки протокола ACP.** Правится `kiro/acp_client.py`. Формы проверяются на живом `kiro-cli acp` по stdio; «сырые» ACP-структуры не должны просачиваться в роуты — они преобразуются в нормализованные dict-события.
+- **Добавление эндпоинта.** Определяются модели запроса/ответа, добавляется роут в соответствующий `routes_*.py`, поток проходит через `ShimService`, добавляются тесты в `tests/unit/test_routes_*`.
 
-Модульная архитектура позволяет легко добавить поддержку других API форматов. Благодаря Core Layer, большая часть логики уже реализована.
-
-#### Шаги для добавления нового формата (например, Gemini)
-
-1. **Создать модели** — `models_gemini.py`
-   ```python
-   class GeminiRequest(BaseModel):
-       """Pydantic модель запроса Gemini."""
-       contents: List[GeminiContent]
-       ...
-   ```
-
-2. **Создать адаптер конвертации** — `converters_gemini.py`
-   ```python
-   from kiro.converters_core import build_kiro_payload
-   
-   def gemini_to_kiro(request: GeminiRequest, ...) -> dict:
-       """Конвертирует Gemini запрос в Kiro payload."""
-       # Извлекаем данные из Gemini формата
-       system_prompt = extract_system_instruction(request)
-       messages = convert_gemini_contents(request.contents)
-       tools = convert_gemini_tools(request.tools)
-       
-       # Используем общее ядро
-       return build_kiro_payload(
-           messages=messages,
-           system_prompt=system_prompt,
-           tools=tools,
-           ...
-       )
-   ```
-
-3. **Создать форматтер streaming** — `streaming_gemini.py`
-   ```python
-   from kiro.streaming_core import parse_kiro_stream
-   
-   async def stream_to_gemini(response, ...) -> AsyncGenerator[str, None]:
-       """Форматирует Kiro события в Gemini SSE."""
-       async for event in parse_kiro_stream(response):
-           yield format_gemini_chunk(event)
-   ```
-
-4. **Создать роуты** — `routes_gemini.py`
-   ```python
-   router = APIRouter()
-   
-   @router.post("/v1beta/models/{model}:generateContent")
-   async def generate_content(request: GeminiRequest):
-       ...
-   ```
-
-5. **Подключить в main.py**
-   ```python
-   from kiro.routes_gemini import router as gemini_router
-   app.include_router(gemini_router)
-   ```
-
-### Что переиспользуется автоматически
-
-При добавлении нового формата следующие компоненты работают "из коробки":
-
-| Компонент | Функциональность |
-|-----------|------------------|
-| `auth.py` | Управление токенами Kiro |
-| `http_client.py` | HTTP с retry логикой |
-| `cache.py` | Кэш моделей |
-| `parsers.py` | Парсинг AWS SSE |
-| `tokenizer.py` | Подсчёт токенов |
-| `converters_core.py` | Построение Kiro payload |
-| `streaming_core.py` | Парсинг Kiro stream |
+Тесты полностью изолированы от сети и **никогда** не запускают реальный бинарь: фикстуры в `tests/conftest.py` мокируют подпроцесс и методы `ACPClient`.
 
 ## 10. Зависимости
 
-Основные зависимости проекта (из `requirements.txt`):
+Основные зависимости проекта:
 
 | Пакет | Назначение |
 |-------|------------|
 | `fastapi` | Асинхронный веб-фреймворк |
-| `uvicorn` | ASGI сервер |
-| `httpx` | Асинхронный HTTP клиент |
+| `uvicorn` | ASGI-сервер |
 | `pydantic` | Валидация данных и модели |
-| `python-dotenv` | Загрузка переменных окружения |
-| `loguru` | Продвинутое логирование |
-| `tiktoken` | Быстрый подсчёт токенов |
+| `pydantic-settings` | Настройки из окружения |
+| `python-dotenv` | Загрузка переменных окружения из `.env` |
+| `loguru` | Логирование |
+| `tiktoken` | Подсчёт токенов |
+
+Зависимости для тестирования:
+
+| Пакет | Назначение |
+|-------|------------|
+| `pytest` | Фреймворк тестирования |
+| `pytest-asyncio` | Поддержка асинхронных тестов |
+| `pytest-cov` | Покрытие кода |

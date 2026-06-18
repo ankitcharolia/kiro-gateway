@@ -12,7 +12,7 @@
 4. [클라이언트 설정](#클라이언트-설정)
 5. [API 엔드포인트](#api-엔드포인트)
 6. [도구 호출](#도구-호출)
-7. [파일시스템 및 터미널 샌드박싱](#파일시스템-및-터미널-샌드박싱)
+7. [도구 실행 및 권한](#도구-실행-및-권한)
 8. [스트리밍 이벤트](#스트리밍-이벤트)
 9. [테스트 실행](#테스트-실행)
 10. [릴리스 프로세스](#릴리스-프로세스)
@@ -49,7 +49,7 @@ routes_openai_shim    routes_anthropic_shim
 |---|---|---|
 | ACP 브리지 | `kiro/acp_client.py` | `kiro` CLI 실행; stdio를 통한 JSON-RPC 2.0 |
 | ACP 모델 | `kiro/acp_models.py` | 모든 ACP 유형에 대한 Pydantic 모델 |
-| 기능 샌드박스 | `kiro/capability_executor.py` | readFile/writeFile/listDirectory/runCommand 샌드박싱 |
+| 권한 처리 | `kiro/acp_client.py` | `session/request_permission` 에 응답 (`ACP_TRUST_TOOLS` 에 따라 자동 승인/거부) |
 | 오케스트레이션 | `kiro/shim_service.py` | 스트리밍, 도구 호출 왕복, 세션 수명주기 |
 | ACP 라우트 | `kiro/routes_acp.py` | `/acp/chat`, `/acp/chat/stream` |
 | OpenAI shim | `kiro/routes_openai_shim.py` | `/v1/chat/completions`, `/v1/models` |
@@ -114,7 +114,11 @@ docker compose up -d
 PROXY_API_KEY=change-me
 
 # CLI 경로
-KIRO_CLI_COMMAND=kiro
+KIRO_CLI_PATH=kiro-cli
+
+ACP_TRUST_TOOLS=true        # kiro-cli 가 자체 내장 도구를 실행하며 권한을 요청; true=승인, false=거부
+ACP_WORKSPACE_DIR=          # 세션 작업 디렉터리 (기본값: 프로세스 cwd)
+ACP_TIMEOUT=120             # JSON-RPC 응답 대기 초
 
 # 기능 플래그
 ACP_ENABLED=true
@@ -128,6 +132,24 @@ SERVER_PORT=8000
 # 컴플라이언스
 COMPLIANCE_MODE=true
 ```
+
+---
+
+## 도구 실행 및 권한
+
+`kiro-cli`는 세션 작업 디렉터리에서 **자체** 내장 도구(파일 편집, 명령 실행)를 직접 실행합니다. 게이트웨이는 클라이언트 측 `fs`/`terminal` 기능을 전혀 광고하지 않으며, 에이전트가 보내는 `session/request_permission` 요청에만 응답합니다 — `ACP_TRUST_TOOLS=true`이면 한 번의 호출을 자동 승인(`allow_once`)하고, 그렇지 않으면 거부(`reject_once`)합니다.
+
+| 에이전트 요청 | 게이트웨이 동작 |
+|---|---|
+| `session/request_permission` | `ACP_TRUST_TOOLS=true`일 때 단일 호출을 자동 승인(`allow_once`)하고, `false`일 때 거부(`reject_once`)합니다. |
+
+```env
+ACP_TRUST_TOOLS=true     # 내장 도구 실행 자동 승인 (파일 편집, 명령)
+ACP_TRUST_TOOLS=false    # 응답 전용: 모든 권한 요청 거부
+ACP_WORKSPACE_DIR=/path  # kiro-cli 작업 디렉터리 (기본값: 프로세스 cwd)
+```
+
+> **보안:** `ACP_TRUST_TOOLS=true`이면 에이전트가 확인 없이 파일을 쓰고 명령을 실행할 수 있습니다. 응답 전용 배포에는 `false`를 사용하세요.
 
 ---
 

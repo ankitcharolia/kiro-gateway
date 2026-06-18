@@ -12,7 +12,7 @@ Jembatan **yang sepenuhnya mematuhi ACP** yang memungkinkan alat AI kompatibel O
 4. [Pengaturan Klien](#pengaturan-klien)
 5. [Endpoint API](#endpoint-api)
 6. [Pemanggilan Alat](#pemanggilan-alat)
-7. [Sandboxing Filesystem & Terminal](#sandboxing-filesystem--terminal)
+7. [Eksekusi Alat & Izin](#eksekusi-alat--izin)
 8. [Event Streaming](#event-streaming)
 9. [Menjalankan Tes](#menjalankan-tes)
 10. [Proses Rilis](#proses-rilis)
@@ -49,7 +49,7 @@ routes_openai_shim    routes_anthropic_shim
 |---|---|---|
 | Jembatan ACP | `kiro/acp_client.py` | Meluncurkan CLI `kiro`; JSON-RPC 2.0 melalui stdio |
 | Model ACP | `kiro/acp_models.py` | Model Pydantic untuk semua tipe ACP |
-| Sandbox kemampuan | `kiro/capability_executor.py` | Sandboxing readFile/writeFile/listDirectory/runCommand |
+| Penanganan izin | `kiro/acp_client.py` | Menjawab `session/request_permission` (setujui otomatis atau tolak via `ACP_TRUST_TOOLS`) |
 | Orkestrasi | `kiro/shim_service.py` | Streaming, putaran alat, siklus hidup sesi |
 | Rute ACP | `kiro/routes_acp.py` | `/acp/chat`, `/acp/chat/stream` |
 | Shim OpenAI | `kiro/routes_openai_shim.py` | `/v1/chat/completions`, `/v1/models` |
@@ -113,7 +113,10 @@ docker compose up -d
 # Wajib
 PROXY_API_KEY=change-me
 
-KIRO_CLI_COMMAND=kiro
+KIRO_CLI_PATH=kiro-cli
+ACP_TRUST_TOOLS=true        # kiro-cli menjalankan alatnya sendiri dan meminta izin; true = setujui, false = tolak
+ACP_WORKSPACE_DIR=          # Direktori kerja sesi (default: cwd proses)
+ACP_TIMEOUT=120             # Detik menunggu respons JSON-RPC
 ACP_ENABLED=true
 OPENAI_SHIM_ENABLED=true
 ANTHROPIC_SHIM_ENABLED=true
@@ -121,6 +124,33 @@ SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
 COMPLIANCE_MODE=true
 ```
+
+---
+
+## Eksekusi Alat & Izin
+
+`kiro-cli` menyediakan alat bawaannya **sendiri** (baca/edit file, eksekusi
+perintah, pencarian) dan menjalankannya sendiri di dalam direktori kerja sesi.
+Gateway **tidak** mengiklankan kemampuan filesystem atau terminal sisi klien,
+sehingga tidak pernah menjalankan alat atas nama agen — ia hanya menjawab
+permintaan izin yang dikirim balik oleh agen.
+
+| Permintaan agen | Perilaku gateway |
+|---|---|
+| `session/request_permission` | Menyetujui otomatis satu pemanggilan (`allow_once`) saat `ACP_TRUST_TOOLS=true`; menolak (`reject_once`) saat `false`. |
+
+```env
+ACP_TRUST_TOOLS=true     # setujui otomatis eksekusi alat bawaan (edit file, perintah)
+ACP_TRUST_TOOLS=false    # hanya-jawab: setiap permintaan izin alat ditolak
+ACP_WORKSPACE_DIR=/path  # direktori kerja tempat kiro-cli beroperasi (default: cwd proses)
+```
+
+Sebuah permintaan juga dapat menyertakan `filesystem_roots`; path root pertama
+menjadi `cwd` untuk `session/new`.
+
+> **Keamanan:** dengan `ACP_TRUST_TOOLS=true` agen dapat menulis file dan
+> menjalankan perintah di direktori kerja tanpa konfirmasi manusia. Gunakan
+> `false` untuk deployment hanya-baca/hanya-jawab.
 
 ---
 

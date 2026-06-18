@@ -12,7 +12,7 @@
 4. [クライアント設定](#クライアント設定)
 5. [APIエンドポイント](#apiエンドポイント)
 6. [ツール呼び出し](#ツール呼び出し)
-7. [ファイルシステム・ターミナルサンドボックス](#ファイルシステムターミナルサンドボックス)
+7. [ツールの実行と権限](#ツールの実行と権限)
 8. [ストリーミングイベント](#ストリーミングイベント)
 9. [テストの実行](#テストの実行)
 10. [リリースプロセス](#リリースプロセス)
@@ -49,7 +49,7 @@ routes_openai_shim    routes_anthropic_shim
 |---|---|---|
 | ACPブリッジ | `kiro/acp_client.py` | `kiro` CLIを起動; stdioを介したJSON-RPC 2.0 |
 | ACPモデル | `kiro/acp_models.py` | すべてのACP型のPydanticモデル |
-| 機能サンドボックス | `kiro/capability_executor.py` | readFile / writeFile / listDirectory / runCommandのサンドボックス |
+| 権限処理 | `kiro/acp_client.py` | `session/request_permission` に応答（`ACP_TRUST_TOOLS` に従って自動承認/拒否） |
 | オーケストレーション | `kiro/shim_service.py` | ストリーミング、ツール呼び出し、セッションライフサイクル |
 | ACPルート | `kiro/routes_acp.py` | `/acp/chat`、`/acp/chat/stream` |
 | OpenAI shim | `kiro/routes_openai_shim.py` | `/v1/chat/completions`、`/v1/models` |
@@ -114,7 +114,11 @@ docker compose up -d
 PROXY_API_KEY=change-me
 
 # CLIパス
-KIRO_CLI_COMMAND=kiro
+KIRO_CLI_PATH=kiro-cli
+
+ACP_TRUST_TOOLS=true        # kiro-cli は自前の組み込みツールを実行し許可を求める。true=承認, false=拒否
+ACP_WORKSPACE_DIR=          # セッションの作業ディレクトリ（既定: プロセスの cwd）
+ACP_TIMEOUT=120             # JSON-RPC 応答を待つ秒数
 
 # 機能フラグ
 ACP_ENABLED=true
@@ -170,6 +174,24 @@ http://localhost:8000/acp/chat/stream   # SSEストリーミング
 | OpenAI | POST | `/v1/chat/completions` | ストリーミング・非ストリーミング補完 |
 | Anthropic | GET | `/v1/models` | 利用可能なモデルの一覧 |
 | Anthropic | POST | `/v1/messages` | ストリーミング・非ストリーミングメッセージ |
+
+---
+
+## ツールの実行と権限
+
+`kiro-cli` は **独自の** 組み込みツール（ファイル編集、コマンド実行）をセッションの作業ディレクトリ内で実行します。ゲートウェイはクライアント側の fs／ターミナル機能を一切提供せず、エージェントが送ってくる `session/request_permission` リクエストに応答するだけです。`ACP_TRUST_TOOLS=true` のときは単一の呼び出しを自動承認（`allow_once`）し、それ以外のときは拒否（`reject_once`）します。
+
+| エージェントのリクエスト | ゲートウェイの動作 |
+|---|---|
+| `session/request_permission` | `ACP_TRUST_TOOLS=true` のとき単一の呼び出しを自動承認（`allow_once`）、`false` のとき拒否（`reject_once`） |
+
+```env
+ACP_TRUST_TOOLS=true     # 組み込みツールの実行を自動承認（ファイル編集・コマンド）
+ACP_TRUST_TOOLS=false    # 回答のみ: すべての権限リクエストを拒否
+ACP_WORKSPACE_DIR=/path  # kiro-cli が動作する作業ディレクトリ（既定: プロセスの cwd）
+```
+
+> **セキュリティ:** `ACP_TRUST_TOOLS=true` ではエージェントが確認なしにファイルの書き込みやコマンドの実行を行えます。回答のみのデプロイには `false` を使用してください。
 
 ---
 

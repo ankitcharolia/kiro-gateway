@@ -12,7 +12,7 @@
 4. [客户端设置](#客户端设置)
 5. [API端点](#api端点)
 6. [工具调用](#工具调用)
-7. [文件系统与终端沙箱](#文件系统与终端沙箱)
+7. [工具执行与权限](#工具执行与权限)
 8. [流式事件](#流式事件)
 9. [运行测试](#运行测试)
 10. [发布流程](#发布流程)
@@ -49,7 +49,7 @@ routes_openai_shim    routes_anthropic_shim
 |---|---|---|
 | ACP桥接 | `kiro/acp_client.py` | 启动`kiro` CLI；stdio上的JSON-RPC 2.0 |
 | ACP模型 | `kiro/acp_models.py` | 所有ACP类型的Pydantic模型 |
-| 能力沙箱 | `kiro/capability_executor.py` | readFile/writeFile/listDirectory/runCommand沙箱 |
+| 权限处理 | `kiro/acp_client.py` | 响应 `session/request_permission`（依据 `ACP_TRUST_TOOLS` 自动批准或拒绝） |
 | 编排 | `kiro/shim_service.py` | 流式传输、工具调用往返、会话生命周期 |
 | ACP路由 | `kiro/routes_acp.py` | `/acp/chat`、`/acp/chat/stream` |
 | OpenAI shim | `kiro/routes_openai_shim.py` | `/v1/chat/completions`、`/v1/models` |
@@ -114,7 +114,11 @@ docker compose up -d
 PROXY_API_KEY=change-me
 
 # CLI路径
-KIRO_CLI_COMMAND=kiro
+KIRO_CLI_PATH=kiro-cli
+
+ACP_TRUST_TOOLS=true        # kiro-cli 运行其自带工具并请求许可；true=批准，false=拒绝
+ACP_WORKSPACE_DIR=          # 会话工作目录（默认：进程 cwd）
+ACP_TIMEOUT=120             # 等待 JSON-RPC 响应的秒数
 
 # 功能标志
 ACP_ENABLED=true
@@ -157,6 +161,24 @@ _(Claude Code、Kilo Code、Craft-agent、OpenClaw等)_
 http://localhost:8000/acp/chat          # 非流式
 http://localhost:8000/acp/chat/stream   # SSE流式
 ```
+
+---
+
+## 工具执行与权限
+
+kiro-cli 运行其自带的内置工具（文件编辑、命令执行）于会话工作目录中；网关不公布任何客户端 fs/terminal 能力，仅响应代理的 `session/request_permission` 请求——当 `ACP_TRUST_TOOLS=true` 时自动批准单次调用（`allow_once`），否则拒绝（`reject_once`）。
+
+| 代理请求 | 网关行为 |
+|---|---|
+| `session/request_permission` | 当 `ACP_TRUST_TOOLS=true` 时自动批准单次调用（`allow_once`）；当为 `false` 时拒绝（`reject_once`）。 |
+
+```env
+ACP_TRUST_TOOLS=true     # 自动批准内置工具运行（文件编辑、命令）
+ACP_TRUST_TOOLS=false    # 仅回答：拒绝所有权限请求
+ACP_WORKSPACE_DIR=/path  # kiro-cli 的工作目录（默认：进程 cwd）
+```
+
+> **安全提示：** `ACP_TRUST_TOOLS=true` 允许代理在无确认下写文件和执行命令；仅回答场景请用 `false`。
 
 ---
 

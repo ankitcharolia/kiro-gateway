@@ -12,7 +12,7 @@ A **fully ACP-compliant** bridge that lets any OpenAI-compatible or Anthropic-co
 4. [Client Setup](#client-setup)
 5. [API Endpoints](#api-endpoints)
 6. [Tool Calls](#tool-calls)
-7. [Filesystem & Terminal Sandboxing](#filesystem--terminal-sandboxing)
+7. [Tool Execution & Permissions](#tool-execution--permissions)
 8. [Streaming Events](#streaming-events)
 9. [Running Tests](#running-tests)
 10. [Release Process](#release-process)
@@ -49,7 +49,7 @@ routes_openai_shim   routes_anthropic_shim
 |---|---|---|
 | ACP bridge | `kiro/acp_client.py` | Spawns `kiro-cli`; JSON-RPC 2.0 over stdio |
 | ACP models | `kiro/acp_models.py` | Pydantic models for all ACP types |
-| Capability sandbox | `kiro/capability_executor.py` | readFile / writeFile / listDirectory / runCommand sandboxing |
+| Permission handling | `kiro/acp_client.py` | Answers `session/request_permission` (auto-approve / reject via `ACP_TRUST_TOOLS`) |
 | Orchestration | `kiro/shim_service.py` | Streaming, tool-call round-trips, session lifecycle |
 | ACP routes | `kiro/routes_acp.py` | `/acp/chat`, `/acp/chat/stream` |
 | OpenAI shim | `kiro/routes_openai_shim.py` | `/v1/chat/completions`, `/v1/models` |
@@ -86,16 +86,24 @@ python main.py
 
 ### Option B — Docker (published image)
 
+The image bundles the Kiro CLI (installed at build time); you only mount your
+per-user credentials/state, read-write, and run as your own UID/GID.
+
 ```bash
 docker pull ghcr.io/ankitcharolia/kiro-gateway:latest
 docker run -d \
   --name kiro-gateway \
   -p 8000:8000 \
+  --user "$(id -u):$(id -g)" \
   -e PROXY_API_KEY=change-me \
-  -e KIRO_CLI_PATH=/usr/local/bin/kiro-cli \
-  -v "${HOME}/.kiro:/root/.kiro:ro" \
+  -v "${HOME}/.aws:/home/gateway/.aws" \
+  -v "${HOME}/.kiro:/home/gateway/.kiro" \
+  -v "${HOME}/.local/share/kiro-cli:/home/gateway/.local/share/kiro-cli" \
   ghcr.io/ankitcharolia/kiro-gateway:latest
 ```
+
+> If you pulled an older release that predates the bundled CLI, build locally
+> (Option D) until a newer release is published.
 
 ### Option C — Docker Compose
 
@@ -103,15 +111,26 @@ docker run -d \
 git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
 cp .env.example .env   # edit PROXY_API_KEY
+printf 'UID=%s\nGID=%s\n' "$(id -u)" "$(id -g)" >> .env   # run as your user
 docker compose up -d
 ```
 
+`docker-compose.yml` runs as your UID/GID and mounts `~/.aws`, `~/.kiro` and
+`~/.local/share/kiro-cli`. Uncomment `build: .` to run local source.
+
 ### Option D — Build locally
+
+The build installs the Kiro CLI into the image (self-contained).
 
 ```bash
 docker build -t kiro-gateway:local .
-docker run -d -p 8000:8000 -e PROXY_API_KEY=change-me \
-  -v "${HOME}/.kiro:/root/.kiro:ro" kiro-gateway:local
+docker run -d -p 8000:8000 \
+  --user "$(id -u):$(id -g)" \
+  -e PROXY_API_KEY=change-me \
+  -v "${HOME}/.aws:/home/gateway/.aws" \
+  -v "${HOME}/.kiro:/home/gateway/.kiro" \
+  -v "${HOME}/.local/share/kiro-cli:/home/gateway/.local/share/kiro-cli" \
+  kiro-gateway:local
 ```
 
 ---
@@ -126,6 +145,12 @@ PROXY_API_KEY=change-me
 
 # CLI path (override if kiro-cli is not on $PATH)
 KIRO_CLI_PATH=kiro-cli
+
+# Tool execution — kiro-cli runs its own built-in tools and asks the gateway
+# for permission first. true = auto-approve each request, false = reject.
+ACP_TRUST_TOOLS=true
+ACP_WORKSPACE_DIR=            # Default session cwd (defaults to process cwd)
+ACP_TIMEOUT=120              # Seconds to await a JSON-RPC response
 
 # Feature flags
 ACP_ENABLED=true
@@ -186,38 +211,43 @@ http://localhost:8000/acp/chat/stream   # SSE streaming
 
 ## Tool Calls
 
-Both shims support the full tool-call cycle:
+Both shims surface the tool activity `kiro-cli` performs:
 
-1. `kiro-cli` emits a `tool_call` ACP event during streaming.
-2. The shim translates it to the caller's format (`function_call` / `tool_use`) and streams it.
-3. The caller executes the tool and sends back results.
-4. The gateway injects results into a follow-up `session/prompt` so `kiro-cli` continues.
+1. `kiro-cli` decides to run a built-in tool and requests permission via `session/request_permission`.
+2. The gateway approves or rejects based on `ACP_TRUST_TOOLS`.
+3. The invocation is streamed to the caller as a `tool_call` event, translated to the caller's format (`tool_calls` / `tool_use`).
+4. `kiro-cli` executes the tool itself and continues the same turn, streaming the resulting assistant text.
 
-Parallel tool calls are supported in the OpenAI shim via index-tracked `tool_calls` delta chunks.
+Because each request opens a fresh ACP session, tool execution and continuation
+happen entirely inside `kiro-cli` within a single turn. Parallel tool calls are
+surfaced in the OpenAI shim via index-tracked `tool_calls` delta chunks.
 
 ---
 
-## Filesystem & Terminal Sandboxing
+## Tool Execution & Permissions
 
-| Capability | Behaviour |
+`kiro-cli` ships its **own** built-in tools (file reads/edits, command
+execution, search) and runs them itself inside the session working directory.
+The gateway advertises **no** client-side filesystem or terminal capabilities,
+so it never executes tools on the agent's behalf — it only answers the
+permission requests the agent sends back.
+
+| Agent request | Gateway behaviour |
 |---|---|
-| `capability/readFile` | Allowed only within configured `filesystem_roots` with `read: true`. Max 10 MB. |
-| `capability/writeFile` | Allowed only within roots with `write: true`. Creates parent dirs. |
-| `capability/listDirectory` | Lists entries within allowed roots. |
-| `capability/runCommand` | Executes only commands in `terminal.allowed_commands`. Enforces timeout. |
+| `session/request_permission` | Auto-approves a single invocation (`allow_once`) when `ACP_TRUST_TOOLS=true`; rejects (`reject_once`) when `false`. |
 
-```json
-{
-  "filesystem_roots": [
-    { "uri": "file:///home/user/project", "name": "project", "read": true, "write": false }
-  ],
-  "terminal": {
-    "allowed_commands": ["git", "npm"],
-    "working_directory": "/home/user/project",
-    "timeout_seconds": 30
-  }
-}
+```env
+ACP_TRUST_TOOLS=true     # auto-approve built-in tool runs (file edits, commands)
+ACP_TRUST_TOOLS=false    # answer-only: every tool permission request is denied
+ACP_WORKSPACE_DIR=/path  # working directory kiro-cli operates in (default: process cwd)
 ```
+
+A request may also pass `filesystem_roots`; the first root's path becomes the
+`cwd` for `session/new`.
+
+> **Security:** with `ACP_TRUST_TOOLS=true` the agent can write files and run
+> commands in the working directory without human confirmation. Use `false` for
+> a read/answer-only deployment.
 
 ---
 
