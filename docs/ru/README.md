@@ -69,7 +69,7 @@ routes_openai_shim    routes_anthropic_shim
 | Требование | Примечания |
 |---|---|
 | **Kiro CLI** | Установить с [kiro.dev](https://kiro.dev), затем запустить `kiro auth login` |
-| **Python 3.11+** | Требуется только для варианта bare-metal |
+| **Python 3.14+** | Требуется только для варианта bare-metal |
 | **Docker** | Требуется только для варианта с контейнером |
 
 ### Вариант A — Bare metal

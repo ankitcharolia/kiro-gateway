@@ -69,7 +69,7 @@ routes_openai_shim    routes_anthropic_shim
 | 요구사항 | 참고 |
 |---|---|
 | **Kiro CLI** | [kiro.dev](https://kiro.dev)에서 설치 후 `kiro auth login` 실행 |
-| **Python 3.11+** | 베어메탈 경로에만 필요 |
+| **Python 3.14+** | 베어메탈 경로에만 필요 |
 | **Docker** | 컨테이너 경로에만 필요 |
 
 ### 옵션 A — 베어메탈

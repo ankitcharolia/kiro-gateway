@@ -69,7 +69,7 @@ routes_openai_shim    routes_anthropic_shim
 | Requisito | Notas |
 |---|---|
 | **Kiro CLI** | Instalar desde [kiro.dev](https://kiro.dev), luego ejecutar `kiro auth login` |
-| **Python 3.11+** | Requerido solo para la ruta de metal desnudo |
+| **Python 3.14+** | Requerido solo para la ruta de metal desnudo |
 | **Docker** | Requerido solo para la ruta de contenedor |
 
 ### Opción A — Metal desnudo

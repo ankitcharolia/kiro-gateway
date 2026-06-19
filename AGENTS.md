@@ -53,7 +53,7 @@ APIs and both modes, and evidence you read the surrounding code.
 
 ## Project Overview
 
-- **Language**: Python 3.11+
+- **Language**: Python 3.14+
 - **Framework**: FastAPI + uvicorn
 - **License**: AGPL-3.0
 - **Entry point**: `main.py`

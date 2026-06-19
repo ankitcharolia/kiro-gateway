@@ -69,7 +69,7 @@ routes_openai_shim    routes_anthropic_shim
 | Persyaratan | Catatan |
 |---|---|
 | **Kiro CLI** | Instal dari [kiro.dev](https://kiro.dev), lalu jalankan `kiro auth login` |
-| **Python 3.11+** | Hanya diperlukan untuk jalur bare-metal |
+| **Python 3.14+** | Hanya diperlukan untuk jalur bare-metal |
 | **Docker** | Hanya diperlukan untuk jalur kontainer |
 
 ### Opsi A — Bare metal

@@ -19,7 +19,7 @@ by talking to a single long-lived `kiro-cli acp` subprocess over JSON-RPC 2.0
 on stdio. It never calls private Kiro HTTP APIs and never touches credentials —
 all authentication lives inside `kiro-cli` (`kiro-cli login`).
 
-- **Language**: Python 3.11+
+- **Language**: Python 3.14+
 - **Framework**: FastAPI + uvicorn
 - **Entry point**: `main.py`
 - **Package**: `kiro/`

@@ -69,7 +69,7 @@ routes_openai_shim    routes_anthropic_shim
 | 要求 | 说明 |
 |---|---|
 | **Kiro CLI** | 从[kiro.dev](https://kiro.dev)安装，然后运行`kiro auth login` |
-| **Python 3.11+** | 仅裸机路径需要 |
+| **Python 3.14+** | 仅裸机路径需要 |
 | **Docker** | 仅容器路径需要 |
 
 ### 选项A — 裸机

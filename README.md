@@ -107,7 +107,7 @@ For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-
 | Requirement | Notes |
 |---|---|
 | **Kiro CLI** | Install from [kiro.dev](https://kiro.dev) and run `kiro-cli login` |
-| **Python 3.11+** | Required for the bare-metal path only |
+| **Python 3.14+** | Required for the bare-metal path only |
 | **Docker** | Required for the container path only |
 
 ---

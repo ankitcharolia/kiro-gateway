@@ -75,7 +75,7 @@ routes_openai_shim   routes_anthropic_shim
 | Requirement | Notes |
 |---|---|
 | **Kiro CLI** | Install from [kiro.dev](https://kiro.dev), then run `kiro-cli login` |
-| **Python 3.11+** | Required for bare-metal path only |
+| **Python 3.14+** | Required for bare-metal path only |
 | **Docker** | Required for the container path only |
 
 ### Option A — Bare metal
