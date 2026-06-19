@@ -132,13 +132,21 @@ matter — a malformed `initialize` makes the agent exit immediately.
    `{"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}}`
    → `{protocolVersion, agentCapabilities, authMethods, agentInfo}`. **No session id.**
 2. **`session/new`** — once per gateway request.
-   `{"cwd": "<abs path>", "mcpServers": []}` → `{sessionId, modes}`.
-3. **`session/prompt`** — per turn.
+   `{"cwd": "<abs path>", "mcpServers": []}` →
+   `{sessionId, modes, models: {currentModelId, availableModels}}`. The
+   `models` block is cached so `GET /v1/models` can advertise the live
+   catalogue; model ids are dotted (e.g. `claude-sonnet-4.6`).
+3. **`session/set_model`** — optional, right after `session/new`, only when the
+   request's model differs from `currentModelId`.
+   `{"sessionId", "modelId": "<id>"}` → `{}`. kiro-cli does not validate the id
+   (an unknown model silently keeps the default), so failures are logged and
+   swallowed rather than failing the turn.
+4. **`session/prompt`** — per turn.
    `{"sessionId", "prompt": [{"type": "text", "text": "..."}]}` → `{stopReason}`.
-4. **`session/update`** — notifications streamed during a prompt, discriminated by
+5. **`session/update`** — notifications streamed during a prompt, discriminated by
    `update.sessionUpdate`: `agent_message_chunk`, `agent_thought_chunk`,
    `tool_call`, `tool_call_update`.
-5. **`session/request_permission`** — a request the agent sends back before
+6. **`session/request_permission`** — a request the agent sends back before
    running a built-in tool; answer `{"outcome": {"outcome": "selected", "optionId": "<id>"}}`.
 
 `kiro-cli` runs its **own** built-in tools. The gateway advertises no
@@ -174,8 +182,11 @@ translators emit OpenAI/Anthropic/ACP SSE.
 | Health | GET | `/health` |
 | OpenAI | GET | `/v1/models` |
 | OpenAI | POST | `/v1/chat/completions` (stream + non-stream) |
+| OpenAI | POST | `/v1/responses` (Responses API, stream + non-stream) |
+| OpenAI | POST | `/v1/embeddings` (501 — ACP has no embeddings model) |
 | Anthropic | GET | `/v1/models` |
 | Anthropic | POST | `/v1/messages` (stream + non-stream) |
+| Anthropic | POST | `/v1/messages/count_tokens` (local tokenizer estimate) |
 | ACP | POST | `/acp/chat`, `/acp/chat/stream` |
 
 Auth: OpenAI uses `Authorization: Bearer <PROXY_API_KEY>`; Anthropic uses
@@ -190,9 +201,11 @@ take precedence over `.env`).
 |---|---|---|
 | `PROXY_API_KEY` | `test-proxy-key` | Client auth secret |
 | `KIRO_CLI_PATH` | `kiro-cli` | Path/name of the Kiro CLI binary |
+| `KIRO_MODELS` | `auto,claude-opus-4.8,claude-sonnet-4.6` | Fallback `/v1/models` list before the live catalogue is discovered |
 | `ACP_TRUST_TOOLS` | `true` | Auto-approve (`true`) or reject (`false`) tool permission requests |
 | `ACP_WORKSPACE_DIR` | process cwd | Default session `cwd` |
 | `ACP_TIMEOUT` | `120` | Seconds to await a JSON-RPC response |
+| `ACP_STDIO_MAX_BYTES` | `16777216` (16 MiB) | Max bytes per ACP stdout line; raise for very large tool outputs in long turns |
 | `ACP_ENABLED` / `OPENAI_SHIM_ENABLED` / `ANTHROPIC_SHIM_ENABLED` | `true` | Router toggles |
 | `SERVER_HOST` / `SERVER_PORT` | `0.0.0.0` / `8000` | Bind address |
 | `COMPLIANCE_MODE` | `true` | Single-account enforcement |

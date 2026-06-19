@@ -172,7 +172,7 @@ python main.py                # serves on http://localhost:8000
 curl localhost:8000/health
 curl -H "Authorization: Bearer $PROXY_API_KEY" localhost:8000/v1/models
 curl -H "Authorization: Bearer $PROXY_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}' \
+  -d '{"model":"claude-sonnet-4.6","messages":[{"role":"user","content":"hi"}]}' \
   localhost:8000/v1/chat/completions
 
 # Tests (fully network-isolated; no real kiro-cli needed)
