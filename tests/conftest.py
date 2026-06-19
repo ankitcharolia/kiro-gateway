@@ -252,7 +252,7 @@ def test_client():
     async def _noop_initialize(self, capabilities=None) -> None:
         pass
 
-    async def _mock_new_session(self, capabilities=None, cwd=None) -> str:
+    async def _mock_new_session(self, capabilities=None, cwd=None, model=None) -> str:
         return "test-session-id"
 
     async def _mock_prompt(self, params) -> dict:
@@ -300,6 +300,7 @@ def sync_client():
         pass
 
     mock_shim = MagicMock()
+    mock_shim.available_models = MagicMock(return_value=[])
     mock_shim.complete = AsyncMock(return_value={
         "content": "Hello, world!",
         "tool_calls": [],

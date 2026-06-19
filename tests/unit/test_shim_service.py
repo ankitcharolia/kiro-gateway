@@ -30,8 +30,12 @@ class StubACP:
             "tool_calls": [],
             "usage": {},
         }
+        # Records the model passed to new_session so tests can assert forwarding.
+        self.last_model: str | None = None
+        self.available_models: list[dict] = []
 
-    async def new_session(self, capabilities=None) -> str:
+    async def new_session(self, capabilities=None, cwd=None, model=None) -> str:
+        self.last_model = model
         return "stub-session-id"
 
     async def prompt(self, params) -> dict:
@@ -136,3 +140,43 @@ async def test_shim_service_non_streaming_complete():
     result = await svc.complete([{"role": "user", "content": "Capital of France?"}])
     assert isinstance(result, dict)
     assert result.get("content") == "Paris"
+
+
+# ---------------------------------------------------------------------------
+# Model forwarding + catalogue exposure
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_complete_forwards_model_to_new_session():
+    """complete() passes the requested model down to ACPClient.new_session."""
+    acp = StubACP(
+        stream_events=[],
+        prompt_result={"content": "ok", "finish_reason": "stop", "tool_calls": [], "usage": {}},
+    )
+    svc = ShimService(acp)
+    await svc.complete([{"role": "user", "content": "hi"}], model="claude-sonnet-4.6")
+    assert acp.last_model == "claude-sonnet-4.6"
+
+
+@pytest.mark.asyncio
+async def test_stream_tokens_forwards_model_to_new_session():
+    """stream_tokens() passes the requested model down to ACPClient.new_session."""
+    acp = StubACP([
+        {"type": "text", "content": "hi"},
+        {"type": "done", "finish_reason": "stop"},
+    ])
+    svc = ShimService(acp)
+    await collect_stream(
+        svc.stream_tokens([{"role": "user", "content": "hi"}], model="claude-opus-4.8")
+    )
+    assert acp.last_model == "claude-opus-4.8"
+
+
+@pytest.mark.asyncio
+async def test_available_models_proxies_to_acp_client():
+    """available_models() returns the ACP client's cached catalogue."""
+    acp = StubACP([])
+    acp.available_models = [{"id": "claude-sonnet-4.6", "name": "claude-sonnet-4.6", "description": ""}]
+    svc = ShimService(acp)
+    models = svc.available_models()
+    assert [m["id"] for m in models] == ["claude-sonnet-4.6"]

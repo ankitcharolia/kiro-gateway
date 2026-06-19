@@ -34,6 +34,30 @@ def test_openai_models_object_field(sync_client, openai_headers):
     assert data.get("object") == "list"
 
 
+def test_openai_models_fallback_uses_current_dotted_ids(sync_client, openai_headers):
+    """With no live catalogue, /v1/models serves the configured fallback ids.
+
+    The fallback uses kiro-cli's real dotted model ids (e.g. claude-sonnet-4.6),
+    never the old stale dash-style ids.
+    """
+    response = sync_client.get("/v1/models", headers=openai_headers)
+    ids = [m["id"] for m in response.json()["data"]]
+    assert "claude-sonnet-4.6" in ids
+    # The stale dash-style id must no longer be advertised.
+    assert "claude-sonnet-4-5" not in ids
+
+
+def test_openai_models_serves_live_catalogue_when_present(sync_client, openai_headers):
+    """When the ACP client has discovered models, /v1/models reflects them."""
+    sync_client.app.state.shim_service.available_models = lambda: [
+        {"id": "auto", "name": "auto", "description": ""},
+        {"id": "claude-opus-4.8", "name": "claude-opus-4.8", "description": ""},
+    ]
+    response = sync_client.get("/v1/models", headers=openai_headers)
+    ids = [m["id"] for m in response.json()["data"]]
+    assert ids == ["auto", "claude-opus-4.8"]
+
+
 # ---------------------------------------------------------------------------
 # /v1/chat/completions — non-streaming
 # ---------------------------------------------------------------------------
@@ -102,3 +126,67 @@ def test_openai_shim_route_uses_shim_service(sync_client, openai_headers):
     # We verify by checking the response comes through without errors
     response = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
     assert response.status_code in (200, 422)  # 422 only if model validation fails
+
+
+# ---------------------------------------------------------------------------
+# /v1/responses (OpenAI Responses API)
+# ---------------------------------------------------------------------------
+
+def test_openai_responses_basic_string_input(sync_client, openai_headers):
+    """POST /v1/responses with string input returns a Responses object."""
+    payload = {"model": "claude-sonnet-4.6", "input": "Say hello"}
+    response = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "response"
+    assert data["status"] == "completed"
+    assert data["id"].startswith("resp_")
+    # mock ShimService returns "Hello, world!"
+    assert data["output_text"] == "Hello, world!"
+    assert data["output"][0]["type"] == "message"
+    assert data["output"][0]["content"][0]["type"] == "output_text"
+
+
+def test_openai_responses_message_list_input(sync_client, openai_headers):
+    """POST /v1/responses accepts structured message-list input."""
+    payload = {
+        "model": "claude-sonnet-4.6",
+        "instructions": "You are helpful.",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "Hi there"}]},
+        ],
+    }
+    response = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+    assert response.status_code == 200
+    assert response.json()["object"] == "response"
+
+
+def test_openai_responses_has_usage(sync_client, openai_headers):
+    """POST /v1/responses includes a usage block with the expected keys."""
+    payload = {"model": "claude-sonnet-4.6", "input": "Hi"}
+    response = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+    usage = response.json()["usage"]
+    assert set(usage.keys()) == {"input_tokens", "output_tokens", "total_tokens"}
+
+
+def test_openai_responses_streaming(sync_client, openai_headers):
+    """POST /v1/responses with stream=true emits the core SSE event sequence."""
+    payload = {"model": "claude-sonnet-4.6", "input": "Hi", "stream": True}
+    response = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+    assert response.status_code == 200
+    body = response.text
+    assert "event: response.created" in body
+    assert "event: response.output_text.delta" in body
+    assert "event: response.completed" in body
+
+
+# ---------------------------------------------------------------------------
+# /v1/embeddings — honest 501 (ACP has no embeddings)
+# ---------------------------------------------------------------------------
+
+def test_openai_embeddings_returns_501(sync_client, openai_headers):
+    """POST /v1/embeddings returns 501 Not Implemented with a clear message."""
+    payload = {"model": "text-embedding-3-small", "input": "embed me"}
+    response = sync_client.post("/v1/embeddings", json=payload, headers=openai_headers)
+    assert response.status_code == 501
+    assert "embeddings" in response.json()["detail"].lower()
