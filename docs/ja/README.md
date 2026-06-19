@@ -144,7 +144,7 @@ _(Cursor、Cline、Continue、OpenCode、Hermes-agent、OpenClaw、…)_
 |---|---|
 | ベースURL | `http://localhost:8000/v1` |
 | APIキー | `PROXY_API_KEY`の値 |
-| モデル | `claude-sonnet-4-5` |
+| モデル | `claude-sonnet-4.6` |
 
 ### Anthropic互換クライアント
 _(Claude Code、Kilo Code、Craft-agent、OpenClaw、…)_
@@ -153,7 +153,7 @@ _(Claude Code、Kilo Code、Craft-agent、OpenClaw、…)_
 |---|---|
 | ベースURL | `http://localhost:8000` |
 | APIキーヘッダー | `x-api-key: <PROXY_API_KEY>` |
-| モデル | `claude-sonnet-4-5` |
+| モデル | `claude-sonnet-4.6` |
 
 ### ネイティブACPクライアント
 
@@ -214,6 +214,15 @@ pip install -e ".[dev]"
 pytest tests/ -v
 pytest --cov=kiro --cov-report=term-missing
 ```
+
+---
+
+## サポート
+
+このプロジェクトが役に立った場合は、継続的な開発の支援をご検討ください：
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
 
 ---
 

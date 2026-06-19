@@ -167,6 +167,15 @@ root torna-se o `cwd` para `session/new`.
 
 ---
 
+## Apoie
+
+Se este projeto economiza seu tempo, considere apoiar seu desenvolvimento contínuo:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
+
+---
+
 ## Licença
 
 AGPL-3.0 — ver [LICENSE](../../LICENSE).

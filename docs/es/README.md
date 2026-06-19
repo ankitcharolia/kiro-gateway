@@ -144,7 +144,7 @@ _(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, …)_
 |---|---|
 | URL Base | `http://localhost:8000/v1` |
 | Clave API | valor de `PROXY_API_KEY` |
-| Modelo | `claude-sonnet-4-5` |
+| Modelo | `claude-sonnet-4.6` |
 
 ### Clientes compatibles con Anthropic
 _(Claude Code, Kilo Code, Craft-agent, OpenClaw, …)_
@@ -153,7 +153,7 @@ _(Claude Code, Kilo Code, Craft-agent, OpenClaw, …)_
 |---|---|
 | URL Base | `http://localhost:8000` |
 | Encabezado API Key | `x-api-key: <PROXY_API_KEY>` |
-| Modelo | `claude-sonnet-4-5` |
+| Modelo | `claude-sonnet-4.6` |
 
 ### Clientes ACP nativos
 
@@ -244,6 +244,15 @@ git push origin v2.1.0
 # CI construye linux/amd64 + linux/arm64 y publica la imagen Docker
 # y también crea un GitHub Release con archivos de código fuente.
 ```
+
+---
+
+## Apoyo
+
+Si este proyecto te ahorra tiempo, considera apoyar su desarrollo continuo:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
 
 ---
 

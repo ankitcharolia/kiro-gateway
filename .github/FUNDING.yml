@@ -1,8 +1,12 @@
 # These are supported funding model platforms
 
-# GitHub Sponsors (not available on my region)
-# github: jwadow
+# GitHub Sponsors (not available in my region)
+# github: ankitcharolia
+
+# Buy Me a Coffee username
+buy_me_a_coffee: achar
 
 # Custom donation links
 custom:
+  - https://buymeacoffee.com/achar
   - https://paypal.me/ankitcharolia

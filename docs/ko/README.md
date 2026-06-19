@@ -165,6 +165,15 @@ ACP_WORKSPACE_DIR=/path  # kiro-cli 작업 디렉터리 (기본값: 프로세스
 
 ---
 
+## 후원
+
+이 프로젝트가 도움이 되었다면, 지속적인 개발을 후원해 주세요:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
+
+---
+
 ## 라이선스
 
 AGPL-3.0 — [LICENSE](../../LICENSE) 참조.

@@ -159,6 +159,15 @@ ACP_WORKSPACE_DIR=/path  # рабочий каталог, в котором ра
 
 ---
 
+## Поддержка
+
+Если проект экономит ваше время, поддержите его дальнейшую разработку:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
+
+---
+
 ## Лицензия
 
 AGPL-3.0 — см. [LICENSE](../../LICENSE).

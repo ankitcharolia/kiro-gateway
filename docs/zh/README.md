@@ -144,7 +144,7 @@ _(Cursor、Cline、Continue、OpenCode、Hermes-agent、OpenClaw等)_
 |---|---|
 | 基础URL | `http://localhost:8000/v1` |
 | API密钥 | `PROXY_API_KEY`的值 |
-| 模型 | `claude-sonnet-4-5` |
+| 模型 | `claude-sonnet-4.6` |
 
 ### Anthropic兼容客户端
 _(Claude Code、Kilo Code、Craft-agent、OpenClaw等)_
@@ -153,7 +153,7 @@ _(Claude Code、Kilo Code、Craft-agent、OpenClaw等)_
 |---|---|
 | 基础URL | `http://localhost:8000` |
 | API密钥头 | `x-api-key: <PROXY_API_KEY>` |
-| 模型 | `claude-sonnet-4-5` |
+| 模型 | `claude-sonnet-4.6` |
 
 ### 原生ACP客户端
 
@@ -191,6 +191,15 @@ ACP_WORKSPACE_DIR=/path  # kiro-cli 的工作目录（默认：进程 cwd）
 | `thinking` | `delta.content`块 | `content_block_delta[text_delta]` |
 | `done` | `[DONE]` + `finish_reason` | `message_delta` + `message_stop` |
 | `error` | 错误块 + `[DONE]` | `error`事件 |
+
+---
+
+## 支持
+
+如果这个项目为你节省了时间，欢迎支持它的持续开发：
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
 
 ---
 
