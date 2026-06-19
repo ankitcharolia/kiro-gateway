@@ -66,7 +66,7 @@ class ShimService:
             {"content": str, "tool_calls": list[dict],
              "finish_reason": str, "usage": dict}
         """
-        session_id = await self._new_session(filesystem_roots, terminal)
+        session_id = await self._new_session(filesystem_roots, terminal, model)
         params = PromptParams(
             session_id=session_id,
             messages=messages,
@@ -99,7 +99,7 @@ class ShimService:
         Each yielded item is a plain dict with a ``type`` of ``text``,
         ``thinking``, ``tool_call``, ``done`` or ``error``.
         """
-        session_id = await self._new_session(filesystem_roots, terminal)
+        session_id = await self._new_session(filesystem_roots, terminal, model)
         params = PromptParams(
             session_id=session_id,
             messages=messages,
@@ -148,12 +148,23 @@ class ShimService:
         self,
         fs_roots: Optional[list[FilesystemRoot]] = None,
         terminal: Optional[TerminalCapability] = None,
+        model: Optional[str] = None,
     ) -> str:
         caps = GatewayCapabilities(
             filesystem=fs_roots or self._default_fs_roots or [],
             terminal=terminal or self._default_terminal,
         )
-        return await self._acp.new_session(caps)
+        return await self._acp.new_session(caps, model=model)
+
+    def available_models(self) -> list[dict]:
+        """Return the live model catalogue discovered from kiro-cli sessions.
+
+        Returns:
+            A list of ``{"id", "name", "description"}`` dicts, or an empty list
+            if no session has been created yet (callers fall back to the
+            configured default model list in that case).
+        """
+        return self._acp.available_models
 
     @staticmethod
     def _normalize_result(result: Any) -> dict[str, Any]:

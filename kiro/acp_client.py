@@ -52,6 +52,7 @@ from kiro.acp_models import (
     PromptParams,
     GatewayCapabilities,
 )
+from kiro.config import ACP_STDIO_MAX_BYTES
 
 
 # Map ACP stopReason values to the gateway's normalised finish_reason.
@@ -86,9 +87,16 @@ class ACPClient:
     The ``command`` parameter maps directly to the ``KIRO_CLI_PATH`` env var.
     """
 
-    def __init__(self, command: str = "kiro-cli", trust_tools: bool = True):
+    def __init__(
+        self,
+        command: str = "kiro-cli",
+        trust_tools: bool = True,
+        stdio_limit: int = ACP_STDIO_MAX_BYTES,
+    ):
         self._command = command
         self._trust_tools = trust_tools
+        # Max bytes per JSON-RPC line read from kiro-cli stdout (see config).
+        self._stdio_limit = stdio_limit
         self._proc: Optional[asyncio.subprocess.Process] = None
         # Pending request id -> Future (for initialize / session/new).
         self._pending: dict[str, asyncio.Future] = {}
@@ -103,6 +111,10 @@ class ACPClient:
         self._initialized = False
         # Kept for backward-compatibility with older tests/callers.
         self._session_id: Optional[str] = None
+        # Live model catalogue captured from session/new (normalised dicts:
+        # {"id", "name", "description"}), and kiro-cli's current default model.
+        self._available_models: list[dict] = []
+        self._current_model_id: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -117,6 +129,7 @@ class ACPClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=self._stdio_limit,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._stderr_loop())
@@ -187,6 +200,7 @@ class ACPClient:
         self,
         capabilities: Optional[GatewayCapabilities] = None,
         cwd: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> str:
         """
         Create a fresh ACP session and return its id.
@@ -197,6 +211,9 @@ class ACPClient:
                 is not given explicitly.
             cwd: Absolute working directory for the session. Defaults to the
                 first filesystem root, else the gateway process cwd.
+            model: Optional model id to select for this session (forwarded to
+                kiro-cli via ``session/set_model``). When omitted, the session
+                uses kiro-cli's current default model.
 
         Returns:
             The agent-assigned ``sessionId``.
@@ -208,8 +225,85 @@ class ACPClient:
             raise ACPError(-32603, f"session/new returned no sessionId: {result!r}")
         session_id = str(result["sessionId"])
         self._session_id = session_id
+        self._capture_available_models(result)
         logger.debug(f"ACP session created: {session_id} (cwd={workdir})")
+        # Only issue the extra session/set_model round-trip when the requested
+        # model differs from the session's current default. This avoids a
+        # redundant RTT on every request for agents that use the default model.
+        if model and model != self._current_model_id:
+            await self.set_model(session_id, model)
         return session_id
+
+    def _capture_available_models(self, session_result: dict) -> None:
+        """
+        Cache the model catalogue reported by ``session/new``.
+
+        kiro-cli returns a ``models`` object on every ``session/new``::
+
+            {"models": {"currentModelId": "...",
+                        "availableModels": [{"modelId", "name", "description"}, ...]}}
+
+        The list is normalised to ``{"id", "name", "description"}`` dicts and
+        cached so ``GET /v1/models`` can advertise the live catalogue instead of
+        a static fallback.
+
+        Args:
+            session_result: The raw ``session/new`` result dict.
+        """
+        models_info = session_result.get("models")
+        if not isinstance(models_info, dict):
+            return
+        current = models_info.get("currentModelId")
+        if isinstance(current, str) and current:
+            self._current_model_id = current
+        available = models_info.get("availableModels")
+        if not isinstance(available, list):
+            return
+        normalised: list[dict] = []
+        for entry in available:
+            if not isinstance(entry, dict):
+                continue
+            model_id = entry.get("modelId")
+            if not model_id:
+                continue
+            normalised.append({
+                "id": str(model_id),
+                "name": str(entry.get("name") or model_id),
+                "description": str(entry.get("description") or ""),
+            })
+        if normalised:
+            self._available_models = normalised
+
+    async def set_model(self, session_id: str, model_id: str) -> None:
+        """
+        Select the model for an existing session via ``session/set_model``.
+
+        kiro-cli accepts this request silently (it does not validate the id),
+        so an unknown model simply leaves the session on its default model.
+        Failures are logged and swallowed so a model-selection problem never
+        breaks the completion itself.
+
+        Args:
+            session_id: The ACP session to configure.
+            model_id: The model id requested by the caller (e.g.
+                ``claude-sonnet-4.6``).
+        """
+        try:
+            await self._call(
+                "session/set_model",
+                {"sessionId": session_id, "modelId": model_id},
+            )
+            logger.info(f"ACP session {session_id} model set to '{model_id}'")
+        except ACPError as exc:
+            logger.warning(
+                f"session/set_model failed for '{model_id}': {exc}; "
+                "session will use its default model"
+            )
+
+    @property
+    def available_models(self) -> list[dict]:
+        """Return the cached live model catalogue (``{"id","name","description"}``)."""
+        return list(self._available_models)
 
     @staticmethod
     def _derive_cwd(capabilities: Optional[GatewayCapabilities]) -> str:
@@ -353,7 +447,7 @@ class ACPClient:
     async def _call(self, method: str, params: dict, timeout: float = 120.0) -> Any:
         """Send a request and await its response (used for init / session/new)."""
         req_id = str(uuid.uuid4())
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[req_id] = future
         await self._send(JsonRpcRequest(id=req_id, method=method, params=params))
         try:

@@ -36,7 +36,9 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalCapability
+from kiro.config import DEFAULT_KIRO_MODELS
 from kiro.shim_service import ShimService
+from kiro.tokenizer import estimate_request_tokens
 
 router = APIRouter(tags=["Anthropic Shim"])
 
@@ -146,14 +148,29 @@ def _get_shim(request: Request) -> ShimService:
 # ---------------------------------------------------------------------------
 
 @router.get("/v1/models")
-async def list_models():
-    return {
-        "data": [
-            {"type": "model", "id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5"},
-            {"type": "model", "id": "claude-opus-4-5", "display_name": "Claude Opus 4.5"},
-            {"type": "model", "id": "claude-haiku-3-5", "display_name": "Claude Haiku 3.5"},
+async def list_models(shim: ShimService = Depends(_get_shim)):
+    """List available models (Anthropic listing shape).
+
+    Serves the live catalogue discovered from kiro-cli (``session/new``) when a
+    session has been created; otherwise falls back to the configured
+    ``DEFAULT_KIRO_MODELS``.
+    """
+    live = shim.available_models()
+    if live:
+        data = [
+            {
+                "type": "model",
+                "id": m["id"],
+                "display_name": m.get("name") or m["id"],
+            }
+            for m in live
         ]
-    }
+    else:
+        data = [
+            {"type": "model", "id": model_id, "display_name": model_id}
+            for model_id in DEFAULT_KIRO_MODELS
+        ]
+    return {"data": data}
 
 
 # ---------------------------------------------------------------------------
@@ -389,3 +406,44 @@ async def _stream_response(
             "type": "error",
             "error": {"type": "gateway_error", "message": str(exc)},
         })
+
+
+# ===========================================================================
+# Anthropic Token Counting — POST /v1/messages/count_tokens
+#
+# kiro-cli (ACP) exposes no exact token-count method, so this returns a local
+# estimate using the same tokenizer the gateway uses for context-window
+# management (tiktoken cl100k_base + a Claude correction factor). It mirrors
+# the request shape of /v1/messages and returns {"input_tokens": N}. The value
+# is an approximation suitable for budgeting, not an exact server-side count.
+# ===========================================================================
+
+class AnthropicCountTokensRequest(BaseModel):
+    model: str = "claude-sonnet-4-5"
+    messages: list[AnthropicMessage]
+    system: Optional[str] = None
+    tools: Optional[list[AnthropicTool]] = None
+
+
+@router.post("/v1/messages/count_tokens")
+async def count_message_tokens(body: AnthropicCountTokensRequest):
+    """Estimate the input token count for an Anthropic Messages request.
+
+    Returns:
+        ``{"input_tokens": int}`` — a local tokenizer estimate (not an exact
+        server-side count, which kiro-cli/ACP does not expose).
+    """
+    messages = [
+        {"role": m.role, "content": m.content}
+        for m in body.messages
+    ]
+    tools = [
+        {"name": t.name, "description": t.description or "", "input_schema": t.input_schema}
+        for t in (body.tools or [])
+    ]
+    input_tokens = estimate_request_tokens(
+        messages=messages,
+        tools=tools or None,
+        system=body.system,
+    )
+    return {"input_tokens": input_tokens}

@@ -40,6 +40,16 @@ DEFAULT_MAX_INPUT_TOKENS: int = int(os.environ.get("DEFAULT_MAX_INPUT_TOKENS", "
 _hidden_raw: str = os.environ.get("HIDDEN_MODELS", "")
 HIDDEN_MODELS: List[str] = [m.strip() for m in _hidden_raw.split(",") if m.strip()]
 
+# Fallback model list advertised by ``GET /v1/models`` before a live list has
+# been discovered from ``session/new``. kiro-cli reports the authoritative list
+# (with dotted version IDs such as ``claude-sonnet-4.6``) on every session; that
+# live list supersedes this fallback at runtime. Override with the KIRO_MODELS
+# env var (comma-separated) if you need to pin a different default set.
+_models_raw: str = os.environ.get(
+    "KIRO_MODELS", "auto,claude-opus-4.8,claude-sonnet-4.6"
+)
+DEFAULT_KIRO_MODELS: List[str] = [m.strip() for m in _models_raw.split(",") if m.strip()]
+
 # ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
@@ -65,6 +75,16 @@ KIRO_CLI_PATH: str = (
     or "kiro-cli"
 )
 ACP_TIMEOUT: int = int(os.environ.get("ACP_TIMEOUT", "120"))
+
+# Maximum size (in bytes) of a single JSON-RPC line read from kiro-cli's
+# stdout. ACP messages carry tool outputs and assistant text, which can be
+# large during long agent turns (big file reads, diffs, long completions).
+# asyncio's default StreamReader limit is only 64 KiB; an oversized line would
+# make ``readline()`` raise and the message would be dropped, truncating or
+# hanging the turn. Raise it generously. Override via ACP_STDIO_MAX_BYTES.
+ACP_STDIO_MAX_BYTES: int = int(
+    os.environ.get("ACP_STDIO_MAX_BYTES", str(16 * 1024 * 1024))
+)
 
 # When the kiro-cli agent requests permission to run a built-in tool
 # (file edits, command execution, etc.) the gateway auto-approves a single
@@ -95,6 +115,7 @@ class _Settings:
     DEFAULT_MAX_TOKENS: int = field(default_factory=lambda: DEFAULT_MAX_TOKENS)
     DEFAULT_MAX_INPUT_TOKENS: int = field(default_factory=lambda: DEFAULT_MAX_INPUT_TOKENS)
     HIDDEN_MODELS: List[str] = field(default_factory=lambda: HIDDEN_MODELS)
+    DEFAULT_KIRO_MODELS: List[str] = field(default_factory=lambda: DEFAULT_KIRO_MODELS)
 
     # Server
     HOST: str = field(default_factory=lambda: HOST)
@@ -109,6 +130,7 @@ class _Settings:
     # Alias: some callers/tests refer to the CLI binary as KIRO_CLI_COMMAND.
     KIRO_CLI_COMMAND: str = field(default_factory=lambda: KIRO_CLI_PATH)
     ACP_TIMEOUT: int = field(default_factory=lambda: ACP_TIMEOUT)
+    ACP_STDIO_MAX_BYTES: int = field(default_factory=lambda: ACP_STDIO_MAX_BYTES)
     ACP_TRUST_TOOLS: bool = field(default_factory=lambda: ACP_TRUST_TOOLS)
     ACP_WORKSPACE_DIR: str = field(default_factory=lambda: ACP_WORKSPACE_DIR)
 
