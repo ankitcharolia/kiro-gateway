@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "kiro-gateway"
 dynamic = ["version"]
 description = "OpenAI & Anthropic-compatible API gateway for Kiro (single-account, compliance-mode)"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
@@ -59,13 +59,13 @@ include = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 strict = false
 ignore_missing_imports = true
