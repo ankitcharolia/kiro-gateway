@@ -1,6 +1,12 @@
 # Kiro Gateway — Documentation
 
-A **fully ACP-compliant** bridge that lets any OpenAI-compatible or Anthropic-compatible AI tool use your single Kiro subscription — by routing every request through the official `kiro-cli` binary.
+A bridge that lets any OpenAI-compatible or Anthropic-compatible AI tool use your single Kiro subscription — by routing every request through the official `kiro-cli` binary.
+
+> ### 💛 Support this project
+>
+> If Kiro Gateway is useful to you, please consider supporting its continued development:
+>
+> **[☕ Buy Me a Coffee](https://buymeacoffee.com/achar)** &nbsp;·&nbsp; **[💸 Donate via PayPal](https://paypal.me/ankitcharolia)**
 
 ---
 
@@ -146,11 +152,18 @@ PROXY_API_KEY=change-me
 # CLI path (override if kiro-cli is not on $PATH)
 KIRO_CLI_PATH=kiro-cli
 
+# Models — fallback list for GET /v1/models until the live catalogue is
+# discovered from kiro-cli. The requested model is forwarded via
+# session/set_model, so clients can select any model kiro-cli supports.
+KIRO_MODELS=auto,claude-opus-4.8,claude-sonnet-4.6
+
 # Tool execution — kiro-cli runs its own built-in tools and asks the gateway
 # for permission first. true = auto-approve each request, false = reject.
 ACP_TRUST_TOOLS=true
 ACP_WORKSPACE_DIR=            # Default session cwd (defaults to process cwd)
 ACP_TIMEOUT=120              # Seconds to await a JSON-RPC response
+ACP_STDIO_MAX_BYTES=16777216 # Max bytes per ACP stdout line (16 MiB) — raise
+                             # for very large tool outputs in long agent turns
 
 # Feature flags
 ACP_ENABLED=true
@@ -176,7 +189,7 @@ _(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, …)_
 |---|---|
 | Base URL | `http://localhost:8000/v1` |
 | API Key | value of `PROXY_API_KEY` |
-| Model | `claude-sonnet-4-5` |
+| Model | `claude-sonnet-4.6` (or `auto`, `claude-opus-4.8`, …) |
 
 ### Anthropic-compatible clients
 _(Claude Code, Kilo Code, Craft-agent, OpenClaw, …)_
@@ -185,7 +198,7 @@ _(Claude Code, Kilo Code, Craft-agent, OpenClaw, …)_
 |---|---|
 | Base URL | `http://localhost:8000` |
 | API Key header | `x-api-key: <PROXY_API_KEY>` |
-| Model | `claude-sonnet-4-5` |
+| Model | `claude-sonnet-4.6` |
 
 ### Native ACP clients
 
@@ -283,6 +296,27 @@ git push origin vX.Y.Z
 #   ghcr.io/ankitcharolia/kiro-gateway:latest
 # A GitHub Release with source archives is also created automatically.
 ```
+
+---
+
+## Support
+
+If this project saves you time, consider supporting its continued development:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
+
+---
+
+## Compliance & licensing
+
+The gateway talks to Kiro only through the official `kiro-cli` binary — it never
+calls private endpoints, pools accounts, or handles credentials. This reflects
+the project's design intent and the maintainer's reading of Kiro's official
+integration paths, not legal advice. The Kiro CLI is licensed as "AWS Content"
+under the [AWS Customer Agreement](https://aws.amazon.com/agreement/) and the
+[AWS IP License](https://aws.amazon.com/legal/aws-ip-license-terms/); see
+[`COMPLIANCE.md`](../../COMPLIANCE.md) for details.
 
 ---
 

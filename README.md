@@ -6,19 +6,25 @@
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
 [![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
 
-A **fully ACP-compliant** bridge that lets any OpenAI-compatible or Anthropic-compatible AI harness use your **single** Kiro subscription — by routing every request through the official `kiro-cli` binary, never through reverse-engineered APIs.
+An **ACP-based** bridge that lets any OpenAI-compatible or Anthropic-compatible AI harness use your **single** Kiro subscription — by routing every request through the official `kiro-cli` binary, never through reverse-engineered APIs.
+
+> ### 💛 Support this project
+>
+> If Kiro Gateway is useful to you, please consider supporting its continued development:
+>
+> **[☕ Buy Me a Coffee](https://buymeacoffee.com/achar)** &nbsp;·&nbsp; **[💸 Donate via PayPal](https://paypal.me/ankitcharolia)**
 
 ---
 
 ## Compliance model
 
-Kiro permits subscriptions to be used with:
-- Kiro IDE, Kiro CLI, Kiro Web
-- ACP-compatible IDEs
-- Software-development automation (CI/CD reviews, etc.)
-
-This gateway **only** communicates with Kiro through the official `kiro-cli` binary.
-It never calls private HTTP endpoints, never pools accounts, and never circumvents rate limits.
+This gateway is designed to stay on Kiro's official, documented integration
+surfaces:
+- It communicates with Kiro **only** through the official `kiro-cli` binary.
+- It never calls private HTTP endpoints, never pools accounts, and never
+  circumvents rate limits.
+- It never reads or stores credentials — all authentication lives inside
+  `kiro-cli` (`kiro-cli login`).
 
 ### Full request path
 
@@ -77,8 +83,10 @@ For tools that only understand the OpenAI API (Cursor, Cline, Continue, OpenCode
 
 | Endpoint | Description |
 |---|---|
-| `GET /v1/models` | List available models |
+| `GET /v1/models` | List available models (live catalogue from kiro-cli, with fallback) |
 | `POST /v1/chat/completions` | Streaming and non-streaming completions |
+| `POST /v1/responses` | OpenAI Responses API (streaming and non-streaming) |
+| `POST /v1/embeddings` | Returns `501 Not Implemented` — kiro-cli/ACP provides no embeddings model |
 
 ### 3. Anthropic shim
 
@@ -86,8 +94,9 @@ For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-
 
 | Endpoint | Description |
 |---|---|
-| `GET /v1/models` | List available models |
+| `GET /v1/models` | List available models (live catalogue from kiro-cli, with fallback) |
 | `POST /v1/messages` | Streaming and non-streaming messages |
+| `POST /v1/messages/count_tokens` | Estimate input tokens for a request (local tokenizer estimate) |
 
 ---
 
@@ -237,6 +246,13 @@ PROXY_API_KEY=change-me          # Secret key clients must send as Bearer / x-ap
 # ── CLI path ──────────────────────────────────────────────────────────
 KIRO_CLI_PATH=kiro-cli           # Override if kiro-cli is not on $PATH
 
+# ── Models ────────────────────────────────────────────────────────────
+# Fallback model list advertised by GET /v1/models before the live catalogue
+# is discovered from kiro-cli. The live list (reported on every session) takes
+# precedence at runtime. The model named in a request is forwarded to kiro-cli
+# via session/set_model, so clients can select any model kiro-cli supports.
+KIRO_MODELS=auto,claude-opus-4.8,claude-sonnet-4.6
+
 # ── Tool execution ────────────────────────────────────────────────────
 # kiro-cli runs its own built-in tools (file edits, command execution) and
 # asks the gateway for permission first. true = auto-approve each request,
@@ -244,6 +260,8 @@ KIRO_CLI_PATH=kiro-cli           # Override if kiro-cli is not on $PATH
 ACP_TRUST_TOOLS=true
 ACP_WORKSPACE_DIR=               # Default session cwd (defaults to process cwd)
 ACP_TIMEOUT=120                  # Seconds to await a JSON-RPC response
+ACP_STDIO_MAX_BYTES=16777216     # Max bytes per ACP stdout line (16 MiB) — raise
+                                 # for very large tool outputs in long agent turns
 
 # ── Feature flags ─────────────────────────────────────────────────────
 ACP_ENABLED=true
@@ -270,7 +288,7 @@ _(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, …)_
 |---|---|
 | Base URL | `http://localhost:8000/v1` |
 | API Key | value of `PROXY_API_KEY` |
-| Model | `claude-sonnet-4-5` (or any Kiro-supported model) |
+| Model | `claude-sonnet-4.6` (or any Kiro-supported model: `auto`, `claude-opus-4.8`, …) |
 
 ### Anthropic-compatible clients
 
@@ -280,7 +298,7 @@ _(Claude Code, Kilo Code, Craft-agent, OpenClaw, …)_
 |---|---|
 | Base URL | `http://localhost:8000` |
 | API Key header | `x-api-key: <PROXY_API_KEY>` |
-| Model | `claude-sonnet-4-5` |
+| Model | `claude-sonnet-4.6` |
 
 ### OpenClaw — quick setup
 
@@ -291,7 +309,7 @@ OpenClaw supports both OpenAI and Anthropic API modes. Use the OpenAI shim for m
   "provider": "openai",
   "base_url": "http://localhost:8000/v1",
   "api_key": "<PROXY_API_KEY>",
-  "model": "claude-sonnet-4-5"
+  "model": "claude-sonnet-4.6"
 }
 ```
 
@@ -302,7 +320,7 @@ Or use the Anthropic shim if OpenClaw is configured with an Anthropic provider:
   "provider": "anthropic",
   "base_url": "http://localhost:8000",
   "api_key": "<PROXY_API_KEY>",
-  "model": "claude-sonnet-4-5"
+  "model": "claude-sonnet-4.6"
 }
 ```
 
@@ -431,10 +449,8 @@ git push origin vX.Y.Z
 #     ghcr.io/ankitcharolia/kiro-gateway:latest
 ```
 
-> **Licensing note** — the image installs the Kiro CLI at build time, so a
-> published image contains the proprietary Kiro CLI binary. Confirm that the
-> Kiro CLI license permits redistribution before publishing the image to a
-> public registry. For private/local use this is not a concern.
+> The published image bundles the Kiro CLI binary; see
+> [Compliance & licensing](#compliance--licensing) before publishing it publicly.
 
 ---
 
@@ -448,12 +464,44 @@ git push origin vX.Y.Z
 
 ---
 
+## Performance & long-running sessions
+
+The gateway holds **one** persistent `kiro-cli acp` subprocess and opens a fresh
+ACP session per HTTP request, so concurrent and repeated requests stay isolated.
+A few notes for long-running agents that issue many large turns:
+
+- **Large tool outputs / long turns.** ACP streams tool results and assistant
+  text as single JSON-RPC lines on stdout. `ACP_STDIO_MAX_BYTES` (default 16 MiB)
+  sets the per-line read buffer; raise it if an agent produces very large diffs,
+  file dumps, or completions. (asyncio's built-in default is only 64 KiB, which
+  oversized lines would silently overrun — the gateway raises it for you.)
+- **Model selection is cheap.** The requested model is forwarded with one
+  `session/set_model` call, and the gateway **skips** it when the request already
+  asks for the session's default model — no extra round-trip in the common case.
+- **Concurrency.** All requests multiplex over the single subprocess (required by
+  the single-account compliance model); throughput is bounded by `kiro-cli`
+  itself, not by the gateway's translation layer.
+- **Statelessness.** Each request re-sends its full conversation (standard for the
+  OpenAI/Anthropic APIs) and runs in its own session, so there is no cross-request
+  state to leak or grow on the gateway side.
+
+---
+
 ## Support
 
-If this project is useful, consider supporting it:
+If this project is useful, please consider supporting its continued development — **[☕ Buy Me a Coffee](https://buymeacoffee.com/achar)** or **[💸 PayPal](https://paypal.me/ankitcharolia)**.
 
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
-[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
+## Compliance & licensing
+
+The gateway talks to Kiro only through the official `kiro-cli` binary — it never
+calls private endpoints, pools accounts, or handles credentials. This reflects
+the project's design intent and the maintainer's reading of Kiro's official
+integration paths, not legal advice. The Kiro CLI is licensed as "AWS Content"
+under the [AWS Customer Agreement](https://aws.amazon.com/agreement/) and the
+[AWS IP License](https://aws.amazon.com/legal/aws-ip-license-terms/) (see the
+[official license](https://kiro.dev/license/)), so your use is governed by those
+terms. If you plan to publish a Docker image that bundles the Kiro CLI, review
+the redistribution terms first. See [`COMPLIANCE.md`](COMPLIANCE.md) for details.
 
 ## License
 
