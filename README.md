@@ -79,7 +79,7 @@ For editors that speak ACP natively.
 
 ### 2. OpenAI shim
 
-For tools that only understand the OpenAI API (Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, …).
+For tools that only understand the OpenAI API (Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, Oh My Pi, …).
 
 | Endpoint | Description |
 |---|---|
@@ -90,7 +90,7 @@ For tools that only understand the OpenAI API (Cursor, Cline, Continue, OpenCode
 
 ### 3. Anthropic shim
 
-For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-agent, OpenClaw, …).
+For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-agent, OpenClaw, Oh My Pi, …).
 
 | Endpoint | Description |
 |---|---|
@@ -282,7 +282,7 @@ COMPLIANCE_MODE=true             # Enforces single-account; set false only for d
 
 ### OpenAI-compatible clients
 
-_(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, …)_
+_(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, Oh My Pi, …)_
 
 | Setting | Value |
 |---|---|
@@ -292,7 +292,7 @@ _(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, …)_
 
 ### Anthropic-compatible clients
 
-_(Claude Code, Kilo Code, Craft-agent, OpenClaw, …)_
+_(Claude Code, Kilo Code, Craft-agent, OpenClaw, Oh My Pi, …)_
 
 | Setting | Value |
 |---|---|
@@ -300,29 +300,28 @@ _(Claude Code, Kilo Code, Craft-agent, OpenClaw, …)_
 | API Key header | `x-api-key: <KIRO_GATEWAY_API_KEY>` |
 | Model | `claude-sonnet-4.6` |
 
-### OpenClaw — quick setup
+### How to integrate an AI harness
 
-OpenClaw supports both OpenAI and Anthropic API modes. Use the OpenAI shim for maximum compatibility:
+Ready-to-use config examples for common harnesses live in
+[`examples/clients/`](examples/clients/). Each file is named
+`<harness>-<api>` so you can pick the one matching your tool and the API it
+speaks, copy it to the harness's config location, and set
+`KIRO_GATEWAY_API_KEY` as the key.
 
-```json
-{
-  "provider": "openai",
-  "base_url": "http://localhost:8000/v1",
-  "api_key": "<KIRO_GATEWAY_API_KEY>",
-  "model": "claude-sonnet-4.6"
-}
-```
+| Harness | API | Example config | Save to |
+|---|---|---|---|
+| OpenCode | OpenAI | [`opencode-openai.json`](examples/clients/opencode-openai.json) | `~/.config/opencode/opencode.json` |
+| Kilo Code | OpenAI | [`kilocode-openai.json`](examples/clients/kilocode-openai.json) | `~/.config/kilo/kilo.jsonc` |
+| Kilo Code | Anthropic | [`kilocode-anthropic.json`](examples/clients/kilocode-anthropic.json) | `~/.config/kilo/kilo.jsonc` |
+| Hermes-agent | OpenAI | [`hermes-agent-openai.yaml`](examples/clients/hermes-agent-openai.yaml) | `~/.hermes/config.yaml` |
+| OpenClaw | OpenAI | [`openclaw-openai.json`](examples/clients/openclaw-openai.json) | OpenClaw config (merge the `providers` block) |
+| OpenClaw | Anthropic | [`openclaw-anthropic.json`](examples/clients/openclaw-anthropic.json) | OpenClaw config (merge the `providers` block) |
+| Oh My Pi | OpenAI | [`oh-my-pi-openai.yaml`](examples/clients/oh-my-pi-openai.yaml) | `~/.omp/agent/models.yml` |
+| Oh My Pi | Anthropic | [`oh-my-pi-anthropic.yaml`](examples/clients/oh-my-pi-anthropic.yaml) | `~/.omp/agent/models.yml` |
 
-Or use the Anthropic shim if OpenClaw is configured with an Anthropic provider:
-
-```json
-{
-  "provider": "anthropic",
-  "base_url": "http://localhost:8000",
-  "api_key": "<KIRO_GATEWAY_API_KEY>",
-  "model": "claude-sonnet-4.6"
-}
-```
+Each example carries its destination path as a comment on the first line.
+Replace the placeholder `change-me` (or `${KIRO_GATEWAY_API_KEY}`) with your
+gateway key before saving.
 
 ### Native ACP clients
 

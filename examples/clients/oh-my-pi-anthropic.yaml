@@ -1,0 +1,37 @@
+# Put the following in ~/.omp/agent/models.yml
+#
+# Drives Oh My Pi (https://github.com/can1357/oh-my-pi) through the gateway's
+# Anthropic shim (api: anthropic-messages -> POST /v1/messages). The Anthropic
+# transport sends the key as the `x-api-key` header and appends `/v1/messages`
+# to baseUrl, so set baseUrl to the gateway root (no trailing /v1).
+#
+# `apiKey` is read as an environment variable name first; if no such variable
+# exists the literal string is used as the token. Replace `change-me` with your
+# KIRO_GATEWAY_API_KEY value, or set it to the env var name `KIRO_GATEWAY_API_KEY`.
+providers:
+  kiro:
+    baseUrl: http://127.0.0.1:8000
+    apiKey: change-me
+    api: anthropic-messages
+    disableStrictTools: true   # the gateway does not implement Anthropic's `strict` tool field
+    models:
+      - id: claude-sonnet-4.6
+        name: Claude Sonnet 4.6
+        reasoning: true
+        input: [text]
+        contextWindow: 1000000
+        maxTokens: 64000
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      - id: claude-opus-4.8
+        name: Claude Opus 4.8
+        reasoning: true
+        input: [text]
+        contextWindow: 1000000
+        maxTokens: 32000
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      - id: auto
+        name: Auto
+        input: [text]
+        contextWindow: 1000000
+        maxTokens: 64000
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }

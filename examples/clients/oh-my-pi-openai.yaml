@@ -1,0 +1,35 @@
+# Put the following in ~/.omp/agent/models.yml
+#
+# Drives Oh My Pi (https://github.com/can1357/oh-my-pi) through the gateway's
+# OpenAI shim (api: openai-completions -> POST /v1/chat/completions).
+#
+# `apiKey` is read as an environment variable name first; if no such variable
+# exists the literal string is used as the token. Replace `change-me` with your
+# KIRO_GATEWAY_API_KEY value, or set it to the env var name `KIRO_GATEWAY_API_KEY`.
+providers:
+  kiro:
+    baseUrl: http://127.0.0.1:8000/v1
+    apiKey: change-me
+    api: openai-completions
+    authHeader: true          # inject Authorization: Bearer <key>
+    models:
+      - id: claude-sonnet-4.6
+        name: Claude Sonnet 4.6
+        reasoning: true
+        input: [text]
+        contextWindow: 1000000
+        maxTokens: 64000
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      - id: claude-opus-4.8
+        name: Claude Opus 4.8
+        reasoning: true
+        input: [text]
+        contextWindow: 1000000
+        maxTokens: 32000
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      - id: auto
+        name: Auto
+        input: [text]
+        contextWindow: 1000000
+        maxTokens: 64000
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
