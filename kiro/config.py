@@ -19,11 +19,9 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Auth / API-key
 # ---------------------------------------------------------------------------
-PROXY_API_KEY: str = (
-    os.environ.get("PROXY_API_KEY")
-    or os.environ.get("GATEWAY_API_KEY")
-    or "test-proxy-key"
-)
+# KIRO_GATEWAY_API_KEY is the client auth secret clients must send as
+# Bearer (OpenAI) or x-api-key (Anthropic).
+KIRO_GATEWAY_API_KEY: str = os.environ.get("KIRO_GATEWAY_API_KEY", "test-proxy-key")
 
 # ---------------------------------------------------------------------------
 # Compliance
@@ -104,8 +102,7 @@ ACP_WORKSPACE_DIR: str = os.environ.get("ACP_WORKSPACE_DIR", os.getcwd())
 @dataclass
 class _Settings:
     # Auth
-    PROXY_API_KEY: str = field(default_factory=lambda: PROXY_API_KEY)
-    GATEWAY_API_KEY: str = field(default_factory=lambda: PROXY_API_KEY)
+    KIRO_GATEWAY_API_KEY: str = field(default_factory=lambda: KIRO_GATEWAY_API_KEY)
 
     # Compliance
     COMPLIANCE_MODE: bool = field(default_factory=lambda: COMPLIANCE_MODE)

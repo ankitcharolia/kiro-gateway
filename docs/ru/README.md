@@ -79,7 +79,7 @@ git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # отредактировать PROXY_API_KEY
+cp .env.example .env   # отредактировать KIRO_GATEWAY_API_KEY
 kiro auth login
 python main.py
 ```
@@ -91,7 +91,7 @@ docker pull ghcr.io/ankitcharolia/kiro-gateway:latest
 docker run -d \
   --name kiro-gateway \
   -p 8000:8000 \
-  -e PROXY_API_KEY=change-me \
+  -e KIRO_GATEWAY_API_KEY=change-me \
   -v "${HOME}/.kiro:/root/.kiro:ro" \
   ghcr.io/ankitcharolia/kiro-gateway:latest
 ```
@@ -101,7 +101,7 @@ docker run -d \
 ```bash
 git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
-cp .env.example .env   # отредактировать PROXY_API_KEY
+cp .env.example .env   # отредактировать KIRO_GATEWAY_API_KEY
 docker compose up -d
 ```
 
@@ -111,7 +111,7 @@ docker compose up -d
 
 ```env
 # Обязательно
-PROXY_API_KEY=change-me
+KIRO_GATEWAY_API_KEY=change-me
 
 KIRO_CLI_PATH=kiro-cli
 ACP_TRUST_TOOLS=true        # kiro-cli запускает собственные инструменты и запрашивает разрешение; true=одобрить, false=отклонить

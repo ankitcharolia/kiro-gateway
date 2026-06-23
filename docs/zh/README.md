@@ -79,7 +79,7 @@ git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # 编辑 PROXY_API_KEY
+cp .env.example .env   # 编辑 KIRO_GATEWAY_API_KEY
 kiro auth login
 python main.py
 ```
@@ -91,7 +91,7 @@ docker pull ghcr.io/ankitcharolia/kiro-gateway:latest
 docker run -d \
   --name kiro-gateway \
   -p 8000:8000 \
-  -e PROXY_API_KEY=change-me \
+  -e KIRO_GATEWAY_API_KEY=change-me \
   -v "${HOME}/.kiro:/root/.kiro:ro" \
   ghcr.io/ankitcharolia/kiro-gateway:latest
 ```
@@ -101,7 +101,7 @@ docker run -d \
 ```bash
 git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
-cp .env.example .env   # 编辑 PROXY_API_KEY
+cp .env.example .env   # 编辑 KIRO_GATEWAY_API_KEY
 docker compose up -d
 ```
 
@@ -111,7 +111,7 @@ docker compose up -d
 
 ```env
 # 必需
-PROXY_API_KEY=change-me
+KIRO_GATEWAY_API_KEY=change-me
 
 # CLI路径
 KIRO_CLI_PATH=kiro-cli
@@ -143,7 +143,7 @@ _(Cursor、Cline、Continue、OpenCode、Hermes-agent、OpenClaw等)_
 | 设置 | 值 |
 |---|---|
 | 基础URL | `http://localhost:8000/v1` |
-| API密钥 | `PROXY_API_KEY`的值 |
+| API密钥 | `KIRO_GATEWAY_API_KEY`的值 |
 | 模型 | `claude-sonnet-4.6` |
 
 ### Anthropic兼容客户端
@@ -152,7 +152,7 @@ _(Claude Code、Kilo Code、Craft-agent、OpenClaw等)_
 | 设置 | 值 |
 |---|---|
 | 基础URL | `http://localhost:8000` |
-| API密钥头 | `x-api-key: <PROXY_API_KEY>` |
+| API密钥头 | `x-api-key: <KIRO_GATEWAY_API_KEY>` |
 | 模型 | `claude-sonnet-4.6` |
 
 ### 原生ACP客户端

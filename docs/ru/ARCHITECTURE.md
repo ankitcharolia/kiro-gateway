@@ -19,8 +19,8 @@ Kiro Gateway — это **мост, ориентированный на собл
 | Формат | Эндпоинты | Аутентификация |
 |--------|-----------|----------------|
 | **Native ACP** | `POST /acp/chat`, `POST /acp/chat/stream` | — |
-| **OpenAI** | `GET /v1/models`, `POST /v1/chat/completions` | `Authorization: Bearer <PROXY_API_KEY>` |
-| **Anthropic** | `GET /v1/models`, `POST /v1/messages` | `x-api-key: <PROXY_API_KEY>` |
+| **OpenAI** | `GET /v1/models`, `POST /v1/chat/completions` | `Authorization: Bearer <KIRO_GATEWAY_API_KEY>` |
+| **Anthropic** | `GET /v1/models`, `POST /v1/messages` | `x-api-key: <KIRO_GATEWAY_API_KEY>` |
 
 Все форматы работают одновременно на одном сервере.
 
@@ -261,7 +261,7 @@ shim_service.py  (проброс / агрегация)
 
 | Переменная | По умолчанию | Назначение |
 |------------|--------------|------------|
-| `PROXY_API_KEY` | `test-proxy-key` | Секрет для аутентификации клиентов |
+| `KIRO_GATEWAY_API_KEY` | `test-proxy-key` | Секрет для аутентификации клиентов |
 | `KIRO_CLI_PATH` | `kiro-cli` | Путь/имя бинаря Kiro CLI |
 | `ACP_TRUST_TOOLS` | `true` | Автоодобрение (`true`) или отклонение (`false`) запросов разрешений на инструменты |
 | `ACP_WORKSPACE_DIR` | рабочий каталог процесса | Рабочий каталог сессии по умолчанию (`cwd`) |
@@ -277,7 +277,7 @@ shim_service.py  (проброс / агрегация)
 ### Пример `.env`
 
 ```env
-PROXY_API_KEY=change-me
+KIRO_GATEWAY_API_KEY=change-me
 KIRO_CLI_PATH=kiro-cli
 ACP_TRUST_TOOLS=true
 ACP_WORKSPACE_DIR=
@@ -302,7 +302,7 @@ COMPLIANCE_MODE=true
 | ACP | POST | `/acp/chat` | Непотоковый ACP-чат |
 | ACP | POST | `/acp/chat/stream` | Потоковый ACP-чат (SSE) |
 
-**Аутентификация:** OpenAI использует `Authorization: Bearer <PROXY_API_KEY>`; Anthropic — заголовок `x-api-key: <PROXY_API_KEY>`.
+**Аутентификация:** OpenAI использует `Authorization: Bearer <KIRO_GATEWAY_API_KEY>`; Anthropic — заголовок `x-api-key: <KIRO_GATEWAY_API_KEY>`.
 
 ### Карта потоковых событий
 

@@ -85,7 +85,7 @@ git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # edit PROXY_API_KEY
+cp .env.example .env   # edit KIRO_GATEWAY_API_KEY
 kiro-cli login
 python main.py
 ```
@@ -101,7 +101,7 @@ docker run -d \
   --name kiro-gateway \
   -p 8000:8000 \
   --user "$(id -u):$(id -g)" \
-  -e PROXY_API_KEY=change-me \
+  -e KIRO_GATEWAY_API_KEY=change-me \
   -v "${HOME}/.aws:/home/gateway/.aws" \
   -v "${HOME}/.kiro:/home/gateway/.kiro" \
   -v "${HOME}/.local/share/kiro-cli:/home/gateway/.local/share/kiro-cli" \
@@ -116,7 +116,7 @@ docker run -d \
 ```bash
 git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
-cp .env.example .env   # edit PROXY_API_KEY
+cp .env.example .env   # edit KIRO_GATEWAY_API_KEY
 printf 'UID=%s\nGID=%s\n' "$(id -u)" "$(id -g)" >> .env   # run as your user
 docker compose up -d
 ```
@@ -132,7 +132,7 @@ The build installs the Kiro CLI into the image (self-contained).
 docker build -t kiro-gateway:local .
 docker run -d -p 8000:8000 \
   --user "$(id -u):$(id -g)" \
-  -e PROXY_API_KEY=change-me \
+  -e KIRO_GATEWAY_API_KEY=change-me \
   -v "${HOME}/.aws:/home/gateway/.aws" \
   -v "${HOME}/.kiro:/home/gateway/.kiro" \
   -v "${HOME}/.local/share/kiro-cli:/home/gateway/.local/share/kiro-cli" \
@@ -147,7 +147,7 @@ All settings are read from environment variables or a `.env` file.
 
 ```env
 # Required
-PROXY_API_KEY=change-me
+KIRO_GATEWAY_API_KEY=change-me
 
 # CLI path (override if kiro-cli is not on $PATH)
 KIRO_CLI_PATH=kiro-cli
@@ -188,7 +188,7 @@ _(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, …)_
 | Setting | Value |
 |---|---|
 | Base URL | `http://localhost:8000/v1` |
-| API Key | value of `PROXY_API_KEY` |
+| API Key | value of `KIRO_GATEWAY_API_KEY` |
 | Model | `claude-sonnet-4.6` (or `auto`, `claude-opus-4.8`, …) |
 
 ### Anthropic-compatible clients
@@ -197,7 +197,7 @@ _(Claude Code, Kilo Code, Craft-agent, OpenClaw, …)_
 | Setting | Value |
 |---|---|
 | Base URL | `http://localhost:8000` |
-| API Key header | `x-api-key: <PROXY_API_KEY>` |
+| API Key header | `x-api-key: <KIRO_GATEWAY_API_KEY>` |
 | Model | `claude-sonnet-4.6` |
 
 ### Native ACP clients

@@ -229,7 +229,7 @@ def mock_auth_manager():
 
 from fastapi.testclient import TestClient
 from main import app  # app lives at repo root main.py, not inside kiro package
-from kiro.config import PROXY_API_KEY
+from kiro.config import KIRO_GATEWAY_API_KEY
 
 
 @pytest.fixture(scope="session")
@@ -327,13 +327,13 @@ def sync_client():
 @pytest.fixture
 def openai_headers() -> dict:
     """Authorization headers for OpenAI-compatible endpoints."""
-    return {"Authorization": f"Bearer {PROXY_API_KEY}"}
+    return {"Authorization": f"Bearer {KIRO_GATEWAY_API_KEY}"}
 
 
 @pytest.fixture
 def anthropic_headers() -> dict:
     """x-api-key headers for Anthropic-compatible endpoints."""
-    return {"x-api-key": PROXY_API_KEY}
+    return {"x-api-key": KIRO_GATEWAY_API_KEY}
 
 
 @pytest.fixture
@@ -358,7 +358,7 @@ def sample_tool_definition() -> dict:
 @pytest.fixture
 def valid_proxy_api_key() -> str:
     """Valid API key for authentication tests."""
-    return PROXY_API_KEY
+    return KIRO_GATEWAY_API_KEY
 
 
 @pytest.fixture

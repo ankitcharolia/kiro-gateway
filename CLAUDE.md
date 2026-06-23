@@ -143,7 +143,7 @@ existing env vars take precedence over `.env`).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PROXY_API_KEY` | `test-proxy-key` | Bearer / `x-api-key` clients must send |
+| `KIRO_GATEWAY_API_KEY` | `test-proxy-key` | Bearer / `x-api-key` clients must send |
 | `KIRO_CLI_PATH` | `kiro-cli` | Path/name of the Kiro CLI binary |
 | `ACP_TRUST_TOOLS` | `true` | Auto-approve a single tool invocation on `session/request_permission`; set `false` to reject (read/answer-only posture) |
 | `ACP_WORKSPACE_DIR` | process cwd | Default `cwd` for ACP sessions (per-request `filesystem_roots` override it) |
@@ -164,14 +164,14 @@ existing env vars take precedence over `.env`).
 # Run (bare metal)
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # set PROXY_API_KEY
+cp .env.example .env          # set KIRO_GATEWAY_API_KEY
 kiro-cli login                # once
 python main.py                # serves on http://localhost:8000
 
 # Smoke test
 curl localhost:8000/health
-curl -H "Authorization: Bearer $PROXY_API_KEY" localhost:8000/v1/models
-curl -H "Authorization: Bearer $PROXY_API_KEY" -H 'Content-Type: application/json' \
+curl -H "Authorization: Bearer $KIRO_GATEWAY_API_KEY" localhost:8000/v1/models
+curl -H "Authorization: Bearer $KIRO_GATEWAY_API_KEY" -H 'Content-Type: application/json' \
   -d '{"model":"claude-sonnet-4.6","messages":[{"role":"user","content":"hi"}]}' \
   localhost:8000/v1/chat/completions
 

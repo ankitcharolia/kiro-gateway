@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import Header, HTTPException, APIRouter
 
-from kiro.config import APP_VERSION, PROXY_API_KEY, HIDDEN_MODELS
+from kiro.config import APP_VERSION, KIRO_GATEWAY_API_KEY, HIDDEN_MODELS
 from kiro.http_client import KiroHttpClient  # noqa: F401  (re-exported for tests)
 
 try:
@@ -29,7 +29,7 @@ async def verify_api_key(
     if len(parts) != 2 or parts[0] != "Bearer":
         raise HTTPException(status_code=401, detail="Invalid or missing API Key")
     token = parts[1]
-    if not token or token != PROXY_API_KEY:
+    if not token or token != KIRO_GATEWAY_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API Key")
     return True
 

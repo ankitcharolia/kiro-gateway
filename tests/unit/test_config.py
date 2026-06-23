@@ -15,7 +15,7 @@ from kiro.config import (
     KIRO_CLI_PATH,
     LOG_LEVEL,
     PORT,
-    PROXY_API_KEY,
+    KIRO_GATEWAY_API_KEY,
     settings,
 )
 
@@ -26,8 +26,8 @@ def test_app_version_is_string():
 
 
 def test_proxy_api_key_has_default():
-    assert isinstance(PROXY_API_KEY, str)
-    assert len(PROXY_API_KEY) > 0
+    assert isinstance(KIRO_GATEWAY_API_KEY, str)
+    assert len(KIRO_GATEWAY_API_KEY) > 0
 
 
 def test_compliance_mode_default_true():
@@ -81,7 +81,7 @@ def test_settings_object_exists():
 
 
 def test_settings_proxy_api_key():
-    assert settings.PROXY_API_KEY == PROXY_API_KEY
+    assert settings.KIRO_GATEWAY_API_KEY == KIRO_GATEWAY_API_KEY
 
 
 def test_settings_compliance_mode():
@@ -105,10 +105,10 @@ def test_settings_app_version():
 
 
 def test_proxy_api_key_from_env():
-    with patch.dict(os.environ, {"PROXY_API_KEY": "custom-key-123"}):
+    with patch.dict(os.environ, {"KIRO_GATEWAY_API_KEY": "custom-key-123"}):
         # Re-import to pick up env change would require reload;
         # verify settings object defaults match module-level values.
-        assert settings.PROXY_API_KEY == PROXY_API_KEY
+        assert settings.KIRO_GATEWAY_API_KEY == KIRO_GATEWAY_API_KEY
 
 
 def test_settings_feature_flags_are_bool():

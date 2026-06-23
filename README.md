@@ -129,7 +129,7 @@ pip install -r requirements.txt
 # 4. Configure environment
 cp .env.example .env
 # Open .env and set at minimum:
-#   PROXY_API_KEY=<your-chosen-secret-key>
+#   KIRO_GATEWAY_API_KEY=<your-chosen-secret-key>
 #   KIRO_CLI_PATH=kiro-cli    # full path if not on $PATH
 
 # 5. Authenticate with Kiro (once)
@@ -174,7 +174,7 @@ docker run -d \
   --name kiro-gateway \
   -p 8000:8000 \
   --user "$(id -u):$(id -g)" \
-  -e PROXY_API_KEY=change-me \
+  -e KIRO_GATEWAY_API_KEY=change-me \
   -v "${HOME}/.aws:/home/gateway/.aws" \
   -v "${HOME}/.kiro:/home/gateway/.kiro" \
   -v "${HOME}/.local/share/kiro-cli:/home/gateway/.local/share/kiro-cli" \
@@ -199,7 +199,7 @@ docker pull ghcr.io/ankitcharolia/kiro-gateway:vX.Y.Z
 git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
 cp .env.example .env
-# edit .env: set PROXY_API_KEY
+# edit .env: set KIRO_GATEWAY_API_KEY
 # add your UID/GID so the container can read your mounted credentials:
 printf 'UID=%s\nGID=%s\n' "$(id -u)" "$(id -g)" >> .env
 
@@ -226,7 +226,7 @@ docker run -d \
   --name kiro-gateway \
   -p 8000:8000 \
   --user "$(id -u):$(id -g)" \
-  -e PROXY_API_KEY=change-me \
+  -e KIRO_GATEWAY_API_KEY=change-me \
   -v "${HOME}/.aws:/home/gateway/.aws" \
   -v "${HOME}/.kiro:/home/gateway/.kiro" \
   -v "${HOME}/.local/share/kiro-cli:/home/gateway/.local/share/kiro-cli" \
@@ -241,7 +241,7 @@ All settings are read from environment variables (or a `.env` file).
 
 ```env
 # ── Required ──────────────────────────────────────────────────────────
-PROXY_API_KEY=change-me          # Secret key clients must send as Bearer / x-api-key
+KIRO_GATEWAY_API_KEY=change-me          # Secret key clients must send as Bearer / x-api-key
 
 # ── CLI path ──────────────────────────────────────────────────────────
 KIRO_CLI_PATH=kiro-cli           # Override if kiro-cli is not on $PATH
@@ -287,7 +287,7 @@ _(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, …)_
 | Setting | Value |
 |---|---|
 | Base URL | `http://localhost:8000/v1` |
-| API Key | value of `PROXY_API_KEY` |
+| API Key | value of `KIRO_GATEWAY_API_KEY` |
 | Model | `claude-sonnet-4.6` (or any Kiro-supported model: `auto`, `claude-opus-4.8`, …) |
 
 ### Anthropic-compatible clients
@@ -297,7 +297,7 @@ _(Claude Code, Kilo Code, Craft-agent, OpenClaw, …)_
 | Setting | Value |
 |---|---|
 | Base URL | `http://localhost:8000` |
-| API Key header | `x-api-key: <PROXY_API_KEY>` |
+| API Key header | `x-api-key: <KIRO_GATEWAY_API_KEY>` |
 | Model | `claude-sonnet-4.6` |
 
 ### OpenClaw — quick setup
@@ -308,7 +308,7 @@ OpenClaw supports both OpenAI and Anthropic API modes. Use the OpenAI shim for m
 {
   "provider": "openai",
   "base_url": "http://localhost:8000/v1",
-  "api_key": "<PROXY_API_KEY>",
+  "api_key": "<KIRO_GATEWAY_API_KEY>",
   "model": "claude-sonnet-4.6"
 }
 ```
@@ -319,7 +319,7 @@ Or use the Anthropic shim if OpenClaw is configured with an Anthropic provider:
 {
   "provider": "anthropic",
   "base_url": "http://localhost:8000",
-  "api_key": "<PROXY_API_KEY>",
+  "api_key": "<KIRO_GATEWAY_API_KEY>",
   "model": "claude-sonnet-4.6"
 }
 ```
@@ -459,7 +459,7 @@ git push origin vX.Y.Z
 - Prefer **ACP-native IDEs** whenever available — zero translation overhead.
 - Scope `ACP_WORKSPACE_DIR` to a single project directory.
 - Set `ACP_TRUST_TOOLS=false` for an answer-only deployment where the agent must not edit files or run commands.
-- Never share `PROXY_API_KEY` — treat it like any API secret.
+- Never share `KIRO_GATEWAY_API_KEY` — treat it like any API secret.
 - All Kiro authentication lives in `kiro-cli`. The gateway never touches credentials.
 
 ---

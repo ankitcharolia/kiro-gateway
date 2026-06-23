@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi.testclient import TestClient
 import httpx
 
-from kiro.config import PROXY_API_KEY
+from kiro.config import KIRO_GATEWAY_API_KEY
 
 
 class TestFullChatCompletionFlow:

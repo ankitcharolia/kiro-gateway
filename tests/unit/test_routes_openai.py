@@ -23,7 +23,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from kiro.routes_openai import verify_api_key, router
-from kiro.config import PROXY_API_KEY, APP_VERSION
+from kiro.config import KIRO_GATEWAY_API_KEY, APP_VERSION
 
 
 # =============================================================================
@@ -40,7 +40,7 @@ class TestVerifyApiKey:
         Purpose: Ensure correct API keys are accepted.
         """
         print("Setup: Creating valid Bearer token...")
-        valid_header = f"Bearer {PROXY_API_KEY}"
+        valid_header = f"Bearer {KIRO_GATEWAY_API_KEY}"
         
         print("Action: Calling verify_api_key...")
         result = await verify_api_key(valid_header)
@@ -102,7 +102,7 @@ class TestVerifyApiKey:
         Purpose: Ensure proper Authorization header format is required.
         """
         print("Setup: API key without Bearer prefix...")
-        wrong_format = PROXY_API_KEY  # Without "Bearer "
+        wrong_format = KIRO_GATEWAY_API_KEY  # Without "Bearer "
         
         print("Action: Calling verify_api_key...")
         with pytest.raises(HTTPException) as exc_info:
@@ -118,7 +118,7 @@ class TestVerifyApiKey:
         Purpose: Ensure strict format validation.
         """
         print("Setup: Bearer token with extra spaces...")
-        malformed = f"Bearer  {PROXY_API_KEY}"  # Double space
+        malformed = f"Bearer  {KIRO_GATEWAY_API_KEY}"  # Double space
         
         print("Action: Calling verify_api_key...")
         with pytest.raises(HTTPException) as exc_info:
@@ -134,7 +134,7 @@ class TestVerifyApiKey:
         Purpose: Ensure case-sensitive Bearer prefix.
         """
         print("Setup: Lowercase bearer prefix...")
-        lowercase = f"bearer {PROXY_API_KEY}"
+        lowercase = f"bearer {KIRO_GATEWAY_API_KEY}"
         
         print("Action: Calling verify_api_key...")
         with pytest.raises(HTTPException) as exc_info:

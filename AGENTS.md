@@ -82,7 +82,7 @@ Kiro Backend
 # Run (bare metal)
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # set PROXY_API_KEY
+cp .env.example .env          # set KIRO_GATEWAY_API_KEY
 kiro-cli login                # once
 python main.py                # http://localhost:8000  (--host / --port to override)
 
@@ -189,8 +189,8 @@ translators emit OpenAI/Anthropic/ACP SSE.
 | Anthropic | POST | `/v1/messages/count_tokens` (local tokenizer estimate) |
 | ACP | POST | `/acp/chat`, `/acp/chat/stream` |
 
-Auth: OpenAI uses `Authorization: Bearer <PROXY_API_KEY>`; Anthropic uses
-`x-api-key: <PROXY_API_KEY>`.
+Auth: OpenAI uses `Authorization: Bearer <KIRO_GATEWAY_API_KEY>`; Anthropic uses
+`x-api-key: <KIRO_GATEWAY_API_KEY>`.
 
 ## Configuration
 
@@ -199,7 +199,7 @@ take precedence over `.env`).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PROXY_API_KEY` | `test-proxy-key` | Client auth secret |
+| `KIRO_GATEWAY_API_KEY` | `test-proxy-key` | Client auth secret |
 | `KIRO_CLI_PATH` | `kiro-cli` | Path/name of the Kiro CLI binary |
 | `KIRO_MODELS` | `auto,claude-opus-4.8,claude-sonnet-4.6` | Fallback `/v1/models` list before the live catalogue is discovered |
 | `ACP_TRUST_TOOLS` | `true` | Auto-approve (`true`) or reject (`false`) tool permission requests |

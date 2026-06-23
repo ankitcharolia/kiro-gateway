@@ -28,7 +28,7 @@ services:
       - "${SERVER_PORT:-8000}:8000"
     environment:
       # ── Required ────────────────────────────────────────────────────
-      PROXY_API_KEY: ${PROXY_API_KEY:-change-me}
+      KIRO_GATEWAY_API_KEY: ${KIRO_GATEWAY_API_KEY:-change-me}
       # ── Tool execution ──────────────────────────────────────────────
       # true  = auto-approve kiro-cli built-in tool runs (file edits, commands)
       # false = answer-only (every tool permission request is denied)

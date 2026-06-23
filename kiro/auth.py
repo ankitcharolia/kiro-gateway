@@ -2,7 +2,7 @@
 from __future__ import annotations
 from typing import Optional
 from fastapi import HTTPException
-from kiro.config import PROXY_API_KEY
+from kiro.config import KIRO_GATEWAY_API_KEY
 
 
 def extract_bearer(authorization: Optional[str]) -> Optional[str]:
@@ -17,5 +17,5 @@ def extract_bearer(authorization: Optional[str]) -> Optional[str]:
 
 def validate_proxy_key(token: Optional[str]) -> None:
     """Raise 401 if token is invalid."""
-    if not token or token != PROXY_API_KEY:
+    if not token or token != KIRO_GATEWAY_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API Key")

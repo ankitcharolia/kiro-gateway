@@ -41,7 +41,7 @@ jobs:
         run: |
           pytest --tb=short --cov=kiro --cov-report=term-missing --cov-report=xml -q
         env:
-          PROXY_API_KEY: test-proxy-key
+          KIRO_GATEWAY_API_KEY: test-proxy-key
           COMPLIANCE_MODE: "true"
           ACCOUNT_SYSTEM: "false"
           TRUNCATION_RECOVERY: "true"
