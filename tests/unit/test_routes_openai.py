@@ -521,8 +521,9 @@ class TestChatCompletionsWithTools:
         )
         
         print(f"Status: {response.status_code}")
-        # Should pass validation
-        assert response.status_code != 422
+        # Should pass validation and complete (regression: OpenAI nested tools
+        # used to fail PromptParams validation → 502).
+        assert response.status_code == 200
     
     def test_accepts_multiple_tools(self, test_client, valid_proxy_api_key):
         """
@@ -560,7 +561,7 @@ class TestChatCompletionsWithTools:
         )
         
         print(f"Status: {response.status_code}")
-        assert response.status_code != 422
+        assert response.status_code == 200
 
 
 class TestChatCompletionsOptionalParams:

@@ -32,6 +32,75 @@ from kiro.acp_models import (
 )
 
 
+def normalize_tool_definitions(tools: Optional[list[Any]]) -> list[dict]:
+    """Normalise heterogeneous tool definitions to the ACP tool-definition shape.
+
+    Callers reach the gateway through several APIs, each with its own tool
+    encoding:
+
+    * OpenAI chat completions — ``{"type": "function", "function": {"name",
+      "description", "parameters"}}`` (nested, no top-level ``name``).
+    * OpenAI Responses — ``{"type": "function", "name", "description",
+      "parameters"}`` (flat).
+    * Anthropic — ``{"name", "description", "input_schema"}``.
+    * Native ACP — :class:`ACPToolDefinition` models / equivalent dicts.
+
+    :class:`~kiro.acp_models.PromptParams` validates ``tools`` as
+    :class:`~kiro.acp_models.ACPToolDefinition`, which requires a top-level
+    ``name`` and uses ``input_schema``. Passing an OpenAI-nested tool dict
+    straight through therefore raises a Pydantic ``ValidationError`` ("Field
+    required: tools.N.name"). This helper flattens every supported shape into
+    ``{"name", "description", "input_schema"}`` so all routes share one safe
+    code path.
+
+    Args:
+        tools: Tool definitions as dicts or Pydantic models, in any of the
+            supported encodings, or ``None``.
+
+    Returns:
+        A list of dicts with top-level ``name``/``description``/``input_schema``
+        that satisfy :class:`ACPToolDefinition`. Entries without a resolvable
+        name are skipped. Returns an empty list when ``tools`` is falsy.
+    """
+    if not tools:
+        return []
+
+    normalized: list[dict] = []
+    for tool in tools:
+        # Pydantic models (e.g. ACPToolDefinition, OAITool) → plain dict.
+        if hasattr(tool, "model_dump"):
+            tool = tool.model_dump()
+        if not isinstance(tool, dict):
+            logger.debug(f"Skipping non-dict tool definition: {type(tool)!r}")
+            continue
+
+        # OpenAI chat completions nests the definition under "function".
+        nested = tool.get("function")
+        source = nested if isinstance(nested, dict) else tool
+
+        name = source.get("name") or tool.get("name") or ""
+        if not name:
+            logger.debug("Skipping tool definition without a name")
+            continue
+
+        description = source.get("description") or tool.get("description") or ""
+        input_schema = (
+            source.get("input_schema")
+            or source.get("parameters")
+            or tool.get("input_schema")
+            or tool.get("parameters")
+            or {}
+        )
+
+        normalized.append({
+            "name": name,
+            "description": description,
+            "input_schema": input_schema,
+        })
+
+    return normalized
+
+
 class ShimService:
     """Stateless orchestration layer shared by all route families."""
 
@@ -73,7 +142,7 @@ class ShimService:
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
-            tools=tools or [],
+            tools=normalize_tool_definitions(tools),
             stream=False,
         )
         result = await self._acp.prompt(params)
@@ -106,7 +175,7 @@ class ShimService:
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
-            tools=tools or [],
+            tools=normalize_tool_definitions(tools),
             stream=True,
         )
         async for event in self._acp.prompt_stream(params):
@@ -133,7 +202,7 @@ class ShimService:
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
-            tools=tools or [],
+            tools=normalize_tool_definitions(tools),
             tool_results=tool_results,
             stream=False,
         )

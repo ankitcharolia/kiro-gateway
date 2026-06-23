@@ -32,6 +32,8 @@ class StubACP:
         }
         # Records the model passed to new_session so tests can assert forwarding.
         self.last_model: str | None = None
+        # Records the PromptParams passed to prompt/prompt_stream.
+        self.last_params = None
         self.available_models: list[dict] = []
 
     async def new_session(self, capabilities=None, cwd=None, model=None) -> str:
@@ -39,9 +41,11 @@ class StubACP:
         return "stub-session-id"
 
     async def prompt(self, params) -> dict:
+        self.last_params = params
         return self._prompt_result
 
     async def prompt_stream(self, params):
+        self.last_params = params
         for event in self._events:
             yield event
 
@@ -180,3 +184,95 @@ async def test_available_models_proxies_to_acp_client():
     svc = ShimService(acp)
     models = svc.available_models()
     assert [m["id"] for m in models] == ["claude-sonnet-4.6"]
+
+
+# ---------------------------------------------------------------------------
+# Tool-definition normalisation (regression: PromptParams validation)
+# ---------------------------------------------------------------------------
+
+from kiro.shim_service import normalize_tool_definitions
+
+
+class TestNormalizeToolDefinitions:
+    """Unit tests for normalize_tool_definitions across all caller encodings."""
+
+    def test_openai_chat_nested_function_is_flattened(self):
+        """OpenAI chat tools ({type, function:{...}}) gain a top-level name."""
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "edit",
+                "description": "Edit a file",
+                "parameters": {"type": "object", "required": ["command"]},
+            },
+        }]
+        result = normalize_tool_definitions(tools)
+        assert result == [{
+            "name": "edit",
+            "description": "Edit a file",
+            "input_schema": {"type": "object", "required": ["command"]},
+        }]
+
+    def test_anthropic_input_schema_is_preserved(self):
+        """Anthropic tools ({name, description, input_schema}) pass through intact."""
+        tools = [{"name": "grep", "description": "search", "input_schema": {"type": "object"}}]
+        result = normalize_tool_definitions(tools)
+        assert result == [{"name": "grep", "description": "search", "input_schema": {"type": "object"}}]
+
+    def test_responses_flat_function_is_normalised(self):
+        """OpenAI Responses tools (flat {type, name, parameters}) are normalised."""
+        tools = [{"type": "function", "name": "web", "parameters": {"type": "object"}}]
+        result = normalize_tool_definitions(tools)
+        assert result == [{"name": "web", "description": "", "input_schema": {"type": "object"}}]
+
+    def test_pydantic_model_is_supported(self):
+        """ACPToolDefinition models are dumped and normalised."""
+        from kiro.acp_models import ACPToolDefinition
+        tools = [ACPToolDefinition(name="ls", description="list", input_schema={"type": "object"})]
+        result = normalize_tool_definitions(tools)
+        assert result == [{"name": "ls", "description": "list", "input_schema": {"type": "object"}}]
+
+    def test_nameless_tool_is_skipped(self):
+        """A tool without a resolvable name is dropped rather than crashing."""
+        tools = [{"type": "function", "function": {"description": "no name"}}]
+        assert normalize_tool_definitions(tools) == []
+
+    def test_none_and_empty_return_empty_list(self):
+        """Falsy tool inputs normalise to an empty list."""
+        assert normalize_tool_definitions(None) == []
+        assert normalize_tool_definitions([]) == []
+
+    def test_output_satisfies_prompt_params(self):
+        """Normalised tools validate against PromptParams (the original bug)."""
+        from kiro.acp_models import PromptParams
+        tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
+        params = PromptParams(session_id="s", messages=[], tools=normalize_tool_definitions(tools))
+        assert params.tools[0].name == "f"
+
+
+@pytest.mark.asyncio
+async def test_complete_accepts_openai_nested_tools():
+    """complete() no longer raises on OpenAI chat-format tools (issue: PromptParams.name)."""
+    acp = StubACP(
+        stream_events=[],
+        prompt_result={"content": "ok", "finish_reason": "stop", "tool_calls": [], "usage": {}},
+    )
+    svc = ShimService(acp)
+    tools = [{"type": "function", "function": {"name": "edit", "parameters": {"type": "object"}}}]
+    result = await svc.complete([{"role": "user", "content": "hi"}], tools=tools)
+    assert result.get("content") == "ok"
+    # Tools reached PromptParams with a valid top-level name.
+    assert acp.last_params.tools[0].name == "edit"
+
+
+@pytest.mark.asyncio
+async def test_stream_tokens_accepts_openai_nested_tools():
+    """stream_tokens() no longer raises on OpenAI chat-format tools."""
+    acp = StubACP([
+        {"type": "text", "content": "hi"},
+        {"type": "done", "finish_reason": "stop"},
+    ])
+    svc = ShimService(acp)
+    tools = [{"type": "function", "function": {"name": "grep", "parameters": {"type": "object"}}}]
+    await collect_stream(svc.stream_tokens([{"role": "user", "content": "hi"}], tools=tools))
+    assert acp.last_params.tools[0].name == "grep"
