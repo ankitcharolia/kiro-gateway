@@ -337,3 +337,111 @@ class TestSystemToText:
         assert _system_to_text([]) is None
         assert _system_to_text([{"type": "text"}]) is None  # no text key
 
+
+
+# ---------------------------------------------------------------------------
+# Auth enforcement (issue #39): completion endpoints require the gateway key
+# (x-api-key: <KIRO_GATEWAY_API_KEY>) on both streaming and non-streaming
+# paths. A wrong/absent key must return 401. An Authorization: Bearer header
+# is accepted as a fallback.
+# ---------------------------------------------------------------------------
+
+class TestAnthropicShimAuth:
+    """The Anthropic shim completion routes enforce x-api-key auth."""
+
+    _MESSAGE_PAYLOAD = {
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 256,
+        "messages": [{"role": "user", "content": "Say hello"}],
+    }
+    _COUNT_PAYLOAD = {
+        "model": "claude-sonnet-4.6",
+        "messages": [{"role": "user", "content": "Hello world"}],
+    }
+
+    def _bad_headers(self, invalid_proxy_api_key) -> dict:
+        return {"x-api-key": invalid_proxy_api_key}
+
+    # -- /v1/messages --------------------------------------------------------
+
+    def test_messages_missing_key_returns_401(self, sync_client):
+        response = sync_client.post("/v1/messages", json=self._MESSAGE_PAYLOAD)
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Invalid or missing API Key"
+
+    def test_messages_bad_key_returns_401(self, sync_client, invalid_proxy_api_key):
+        response = sync_client.post(
+            "/v1/messages",
+            json=self._MESSAGE_PAYLOAD,
+            headers=self._bad_headers(invalid_proxy_api_key),
+        )
+        assert response.status_code == 401
+
+    def test_messages_valid_key_returns_200(self, sync_client, anthropic_headers):
+        response = sync_client.post(
+            "/v1/messages", json=self._MESSAGE_PAYLOAD, headers=anthropic_headers
+        )
+        assert response.status_code == 200
+
+    def test_messages_bearer_fallback_returns_200(self, sync_client):
+        """An Authorization: Bearer header is accepted on the Anthropic shim."""
+        from kiro.config import KIRO_GATEWAY_API_KEY
+
+        response = sync_client.post(
+            "/v1/messages",
+            json=self._MESSAGE_PAYLOAD,
+            headers={"Authorization": f"Bearer {KIRO_GATEWAY_API_KEY}"},
+        )
+        assert response.status_code == 200
+
+    def test_messages_stream_missing_key_returns_401(self, sync_client):
+        payload = {**self._MESSAGE_PAYLOAD, "stream": True}
+        response = sync_client.post("/v1/messages", json=payload)
+        assert response.status_code == 401
+
+    def test_messages_stream_bad_key_returns_401(self, sync_client, invalid_proxy_api_key):
+        payload = {**self._MESSAGE_PAYLOAD, "stream": True}
+        response = sync_client.post(
+            "/v1/messages", json=payload, headers=self._bad_headers(invalid_proxy_api_key)
+        )
+        assert response.status_code == 401
+
+    def test_messages_stream_valid_key_returns_200(self, sync_client, anthropic_headers):
+        payload = {**self._MESSAGE_PAYLOAD, "stream": True}
+        response = sync_client.post(
+            "/v1/messages", json=payload, headers=anthropic_headers
+        )
+        assert response.status_code == 200
+
+    def test_messages_auth_enforced_on_all_prefixes(self, sync_client):
+        """Auth applies wherever the Anthropic shim is mounted, not just /v1."""
+        for path in ("/messages", "/anthropic/v1/messages", "/anthropic/messages"):
+            response = sync_client.post(path, json=self._MESSAGE_PAYLOAD)
+            assert response.status_code == 401, f"{path} returned {response.status_code}"
+
+    # -- /v1/messages/count_tokens ------------------------------------------
+
+    def test_count_tokens_missing_key_returns_401(self, sync_client):
+        response = sync_client.post("/v1/messages/count_tokens", json=self._COUNT_PAYLOAD)
+        assert response.status_code == 401
+
+    def test_count_tokens_bad_key_returns_401(self, sync_client, invalid_proxy_api_key):
+        response = sync_client.post(
+            "/v1/messages/count_tokens",
+            json=self._COUNT_PAYLOAD,
+            headers=self._bad_headers(invalid_proxy_api_key),
+        )
+        assert response.status_code == 401
+
+    def test_count_tokens_valid_key_returns_200(self, sync_client, anthropic_headers):
+        response = sync_client.post(
+            "/v1/messages/count_tokens", json=self._COUNT_PAYLOAD, headers=anthropic_headers
+        )
+        assert response.status_code == 200
+
+    # -- /v1/models stays public --------------------------------------------
+
+    def test_anthropic_models_prefix_is_public(self, sync_client):
+        """GET /anthropic/v1/models requires no key (discovery endpoint)."""
+        response = sync_client.get("/anthropic/v1/models")
+        assert response.status_code == 200

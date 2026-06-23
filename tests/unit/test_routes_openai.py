@@ -340,33 +340,33 @@ class TestModelsEndpoint:
 class TestChatCompletionsAuthentication:
     """Tests for authentication on /v1/chat/completions endpoint.
 
-    The ACP shim does not enforce API-key authentication on this endpoint.
-    Authentication is handled at the kiro-cli level.
+    The shim enforces the gateway API key (``Authorization: Bearer
+    <KIRO_GATEWAY_API_KEY>``) on this endpoint (issue #39). A wrong or missing
+    key is rejected with 401 before any ACP work is done.
     """
 
     def test_chat_completions_requires_authentication(self, test_client):
         """
-        What it does: Verifies chat completions responds (no auth guard in shim).
-        Purpose: Document that /v1/chat/completions is accessible without a key.
+        What it does: Verifies chat completions rejects a request with no key.
+        Purpose: Ensure /v1/chat/completions is not accessible without a key.
         """
         response = test_client.post(
             "/v1/chat/completions",
             json={"model": "claude-sonnet-4-5", "messages": [{"role": "user", "content": "Hello"}]},
         )
-        # Shim does not enforce auth; valid request returns 200 or 502 (ACP error)
-        assert response.status_code in {200, 422, 500, 502}
+        assert response.status_code == 401
 
     def test_chat_completions_rejects_invalid_key(self, test_client, invalid_proxy_api_key):
         """
-        What it does: Verifies chat completions responds regardless of API key in shim.
-        Purpose: Document that auth is not enforced at the shim layer.
+        What it does: Verifies chat completions rejects an invalid API key.
+        Purpose: Ensure auth is enforced at the shim layer.
         """
         response = test_client.post(
             "/v1/chat/completions",
             headers={"Authorization": f"Bearer {invalid_proxy_api_key}"},
             json={"model": "claude-sonnet-4-5", "messages": [{"role": "user", "content": "Hello"}]},
         )
-        assert response.status_code in {200, 422, 500, 502}
+        assert response.status_code == 401
 
 
 class TestChatCompletionsValidation:

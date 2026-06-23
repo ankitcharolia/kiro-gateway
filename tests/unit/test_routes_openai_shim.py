@@ -190,3 +190,118 @@ def test_openai_embeddings_returns_501(sync_client, openai_headers):
     response = sync_client.post("/v1/embeddings", json=payload, headers=openai_headers)
     assert response.status_code == 501
     assert "embeddings" in response.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Auth enforcement (issue #39): completion endpoints require the gateway key
+# (Authorization: Bearer <KIRO_GATEWAY_API_KEY>) on both streaming and
+# non-streaming paths. A wrong/absent key must return 401.
+# ---------------------------------------------------------------------------
+
+class TestOpenAIShimAuth:
+    """The OpenAI shim completion routes enforce Bearer auth."""
+
+    _CHAT_PAYLOAD = {
+        "model": "claude-sonnet-4-5",
+        "messages": [{"role": "user", "content": "Say hello"}],
+    }
+    _RESPONSES_PAYLOAD = {"model": "claude-sonnet-4.6", "input": "Say hello"}
+
+    def _bad_headers(self, invalid_proxy_api_key) -> dict:
+        return {"Authorization": f"Bearer {invalid_proxy_api_key}"}
+
+    # -- /v1/chat/completions ------------------------------------------------
+
+    def test_chat_completions_missing_key_returns_401(self, sync_client):
+        response = sync_client.post("/v1/chat/completions", json=self._CHAT_PAYLOAD)
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Invalid or missing API Key"
+
+    def test_chat_completions_bad_key_returns_401(self, sync_client, invalid_proxy_api_key):
+        response = sync_client.post(
+            "/v1/chat/completions",
+            json=self._CHAT_PAYLOAD,
+            headers=self._bad_headers(invalid_proxy_api_key),
+        )
+        assert response.status_code == 401
+
+    def test_chat_completions_valid_key_returns_200(self, sync_client, openai_headers):
+        response = sync_client.post(
+            "/v1/chat/completions", json=self._CHAT_PAYLOAD, headers=openai_headers
+        )
+        assert response.status_code == 200
+
+    def test_chat_completions_stream_missing_key_returns_401(self, sync_client):
+        payload = {**self._CHAT_PAYLOAD, "stream": True}
+        response = sync_client.post("/v1/chat/completions", json=payload)
+        assert response.status_code == 401
+
+    def test_chat_completions_stream_bad_key_returns_401(self, sync_client, invalid_proxy_api_key):
+        payload = {**self._CHAT_PAYLOAD, "stream": True}
+        response = sync_client.post(
+            "/v1/chat/completions", json=payload, headers=self._bad_headers(invalid_proxy_api_key)
+        )
+        assert response.status_code == 401
+
+    def test_chat_completions_stream_valid_key_returns_200(self, sync_client, openai_headers):
+        payload = {**self._CHAT_PAYLOAD, "stream": True}
+        response = sync_client.post(
+            "/v1/chat/completions", json=payload, headers=openai_headers
+        )
+        assert response.status_code == 200
+
+    # -- /v1/responses -------------------------------------------------------
+
+    def test_responses_missing_key_returns_401(self, sync_client):
+        response = sync_client.post("/v1/responses", json=self._RESPONSES_PAYLOAD)
+        assert response.status_code == 401
+
+    def test_responses_bad_key_returns_401(self, sync_client, invalid_proxy_api_key):
+        response = sync_client.post(
+            "/v1/responses",
+            json=self._RESPONSES_PAYLOAD,
+            headers=self._bad_headers(invalid_proxy_api_key),
+        )
+        assert response.status_code == 401
+
+    def test_responses_valid_key_returns_200(self, sync_client, openai_headers):
+        response = sync_client.post(
+            "/v1/responses", json=self._RESPONSES_PAYLOAD, headers=openai_headers
+        )
+        assert response.status_code == 200
+
+    def test_responses_stream_bad_key_returns_401(self, sync_client, invalid_proxy_api_key):
+        payload = {**self._RESPONSES_PAYLOAD, "stream": True}
+        response = sync_client.post(
+            "/v1/responses", json=payload, headers=self._bad_headers(invalid_proxy_api_key)
+        )
+        assert response.status_code == 401
+
+    def test_responses_stream_valid_key_returns_200(self, sync_client, openai_headers):
+        payload = {**self._RESPONSES_PAYLOAD, "stream": True}
+        response = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert response.status_code == 200
+
+    # -- /v1/embeddings ------------------------------------------------------
+
+    def test_embeddings_missing_key_returns_401(self, sync_client):
+        response = sync_client.post(
+            "/v1/embeddings", json={"model": "text-embedding-3-small", "input": "x"}
+        )
+        assert response.status_code == 401
+
+    def test_embeddings_valid_key_returns_501(self, sync_client, openai_headers):
+        """Auth passes, then the endpoint reports its honest 501."""
+        response = sync_client.post(
+            "/v1/embeddings",
+            json={"model": "text-embedding-3-small", "input": "x"},
+            headers=openai_headers,
+        )
+        assert response.status_code == 501
+
+    # -- /v1/models stays public --------------------------------------------
+
+    def test_models_is_public(self, sync_client):
+        """GET /v1/models requires no key (discovery endpoint, per policy)."""
+        response = sync_client.get("/v1/models")
+        assert response.status_code == 200

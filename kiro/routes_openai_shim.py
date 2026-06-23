@@ -33,6 +33,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalCapability
+from kiro.auth import verify_openai_key
 from kiro.config import DEFAULT_KIRO_MODELS
 from kiro.shim_service import ShimService
 
@@ -155,7 +156,7 @@ async def list_models(shim: ShimService = Depends(_get_shim)):
 # POST /v1/chat/completions
 # ---------------------------------------------------------------------------
 
-@router.post("/chat/completions")
+@router.post("/chat/completions", dependencies=[Depends(verify_openai_key)])
 async def chat_completions(
     body: OAIChatRequest,
     shim: ShimService = Depends(_get_shim),
@@ -445,7 +446,7 @@ def _build_response_object(
     }
 
 
-@router.post("/responses")
+@router.post("/responses", dependencies=[Depends(verify_openai_key)])
 async def create_response(
     body: OAIResponsesRequest,
     shim: ShimService = Depends(_get_shim),
@@ -691,7 +692,7 @@ async def _responses_stream(
 # clear 501 Not Implemented.
 # ===========================================================================
 
-@router.post("/embeddings")
+@router.post("/embeddings", dependencies=[Depends(verify_openai_key)])
 async def create_embeddings():
     """Embeddings are not supported: kiro-cli/ACP exposes no embeddings model."""
     raise HTTPException(
