@@ -1,0 +1,41 @@
+// Put this configuration in ~/.config/opencode/opencode.json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "kiro": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Kiro (AWS)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "change-me"
+      },
+      "models": {
+        "claude-sonnet-4.6": {
+          "name": "Claude Sonnet 4.6",
+          "limit": { "context": 1000000, "output": 64000 },
+          "variants": {
+            "low":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 4000  } } },
+            "medium": { "options": { "thinking": { "type": "enabled", "budgetTokens": 8000  } } },
+            "high":   { "options": { "thinking": { "type": "enabled", "budgetTokens": 16000 } } },
+            "max":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 32000 } } }
+          }
+        },
+        "claude-opus-4.8": {
+          "name": "Claude Opus 4.8",
+          "limit": { "context": 1000000, "output": 32000 },
+          "variants": {
+            "low":    { "options": { "outputConfig": { "effort": "low"    } } },
+            "medium": { "options": { "outputConfig": { "effort": "medium" } } },
+            "high":   { "options": { "outputConfig": { "effort": "high"   } } },
+            "xhigh":  { "options": { "outputConfig": { "effort": "xhigh"  } } },
+            "max":    { "options": { "outputConfig": { "effort": "max"    } } }
+          }
+        },
+        "auto": {
+          "name": "Auto",
+          "limit": { "context": 1000000, "output": 64000 }
+        }
+      }
+    }
+  }
+}

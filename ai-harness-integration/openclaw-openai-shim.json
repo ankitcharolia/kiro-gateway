@@ -1,0 +1,30 @@
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "kiro": {
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "apiKey": "change-me",
+        "api": "openai-completions",
+        "models": [
+          { "id": "claude-sonnet-4.6", "name": "Claude Sonnet 4.6" },
+          { "id": "claude-opus-4.8",   "name": "Claude Opus 4.8"   },
+          { "id": "auto",              "name": "Auto"               }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "kiro/claude-sonnet-4.6",
+        "fallbacks": ["kiro/auto"]
+      },
+      "models": {
+        "kiro/claude-sonnet-4.6": { "alias": "sonnet"  },
+        "kiro/claude-opus-4.8":   { "alias": "opus"    },
+        "kiro/auto":              { "alias": "auto"    }
+      }
+    }
+  }
+}

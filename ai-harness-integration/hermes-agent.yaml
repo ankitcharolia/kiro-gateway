@@ -1,0 +1,20 @@
+# Put the following in ~/.hermes/config.yaml
+model:
+  provider: kiro
+  default: auto
+  base_url: http://127.0.0.1:8000/v1
+  context_length: 1000000
+providers:
+  kiro:
+    base_url: http://127.0.0.1:8000/v1
+    api_key: ${KIRO_GATEWAY_API_KEY}
+    model: auto
+fallback_providers:
+- provider: kiro
+  model: claude-opus-4-8
+- provider: kiro
+  model: auto
+
+
+# Put the following in ~/.hermes/.env
+# KIRO_GATEWAY_API_KEY=change-me
