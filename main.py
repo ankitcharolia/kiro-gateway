@@ -112,7 +112,14 @@ if settings.ACP_ENABLED:
 if settings.OPENAI_SHIM_ENABLED:
     app.include_router(openai_shim_router)
 if settings.ANTHROPIC_SHIM_ENABLED:
-    app.include_router(anthropic_shim_router)
+    # Mount the Anthropic shim under every common base-URL convention so a
+    # client works whether it treats the gateway root, "/v1", "/anthropic" or
+    # "/anthropic/v1" as its base URL (and whether it appends "/messages" or
+    # "/v1/messages"). The router itself declares relative paths.
+    # Included after the OpenAI shim so the OpenAI "/v1/models" handler keeps
+    # precedence on that shared path.
+    for _anthropic_prefix in ("/v1", "", "/anthropic/v1", "/anthropic"):
+        app.include_router(anthropic_shim_router, prefix=_anthropic_prefix)
 
 
 @app.get("/health", tags=["Health"])

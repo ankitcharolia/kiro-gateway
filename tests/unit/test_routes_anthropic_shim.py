@@ -178,3 +178,162 @@ def test_anthropic_count_tokens_content_blocks(sync_client, anthropic_headers):
     )
     assert response.status_code == 200
     assert response.json()["input_tokens"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Base-URL path mounts — the Anthropic shim must answer on every common
+# base-URL convention (regression: clients hitting /messages and
+# /anthropic/v1/messages got 404 when only /v1/messages was mounted).
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest
+
+
+class TestAnthropicBasePathMounts:
+    """The Anthropic shim is mounted under several base-path prefixes."""
+
+    _MESSAGE_PAYLOAD = {
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 256,
+        "messages": [{"role": "user", "content": "Hi"}],
+    }
+
+    @_pytest.mark.parametrize(
+        "path",
+        [
+            "/v1/messages",            # standard Anthropic base URL
+            "/messages",               # base URL already includes the version
+            "/anthropic/v1/messages",  # provider-namespaced base URL
+            "/anthropic/messages",     # provider-namespaced, no version segment
+        ],
+    )
+    def test_messages_reachable_on_all_prefixes(self, sync_client, anthropic_headers, path):
+        """POST <prefix>/messages returns 200, never 404."""
+        response = sync_client.post(path, json=self._MESSAGE_PAYLOAD, headers=anthropic_headers)
+        assert response.status_code == 200, f"{path} returned {response.status_code}"
+        assert response.json().get("role") == "assistant"
+
+    @_pytest.mark.parametrize(
+        "path",
+        [
+            "/messages",
+            "/anthropic/v1/messages",
+            "/anthropic/messages",
+        ],
+    )
+    def test_messages_not_404(self, sync_client, anthropic_headers, path):
+        """The previously-404 paths from the bug report now resolve."""
+        response = sync_client.post(path, json=self._MESSAGE_PAYLOAD, headers=anthropic_headers)
+        assert response.status_code != 404
+
+    @_pytest.mark.parametrize(
+        "path",
+        ["/anthropic/v1/models", "/anthropic/models"],
+    )
+    def test_models_reachable_on_anthropic_prefixes(self, sync_client, anthropic_headers, path):
+        """GET <anthropic prefix>/models returns the Anthropic model listing."""
+        response = sync_client.get(path, headers=anthropic_headers)
+        assert response.status_code == 200
+        assert "data" in response.json()
+
+    def test_count_tokens_reachable_on_anthropic_prefix(self, sync_client, anthropic_headers):
+        """count_tokens is mounted under the provider-namespaced prefix too."""
+        response = sync_client.post(
+            "/anthropic/v1/messages/count_tokens",
+            json={"model": "claude-sonnet-4.6", "messages": [{"role": "user", "content": "hi"}]},
+            headers=anthropic_headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["input_tokens"] > 0
+
+
+# ---------------------------------------------------------------------------
+# system field as a list of content blocks — Anthropic SDK / Claude Code send
+# `system` as an array (often with cache_control). It must not 422.
+# ---------------------------------------------------------------------------
+
+class TestAnthropicSystemField:
+    """The Anthropic `system` field accepts both string and block-list forms."""
+
+    def test_messages_accepts_system_as_string(self, sync_client, anthropic_headers):
+        payload = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 256,
+            "system": "You are terse.",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        response = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert response.status_code == 200
+
+    def test_messages_accepts_system_as_block_list(self, sync_client, anthropic_headers):
+        """Regression: system as a list of text blocks used to 422."""
+        payload = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 256,
+            "system": [
+                {"type": "text", "text": "You are Claude Code.",
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Be concise."},
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        }
+        response = sync_client.post(
+            "/anthropic/v1/messages", json=payload, headers=anthropic_headers
+        )
+        assert response.status_code == 200, response.text
+        assert response.json().get("role") == "assistant"
+
+    def test_messages_full_sdk_payload_does_not_422(self, sync_client, anthropic_headers):
+        """A realistic SDK payload (extra fields + block-list system) validates."""
+        payload = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "system": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "metadata": {"user_id": "abc"},
+            "stop_sequences": ["X"],
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "top_k": 40,
+            "tool_choice": {"type": "auto"},
+            "tools": [
+                {"name": "Bash", "description": "run", "input_schema": {"type": "object"},
+                 "cache_control": {"type": "ephemeral"}},
+            ],
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+        }
+        response = sync_client.post("/messages", json=payload, headers=anthropic_headers)
+        assert response.status_code != 422, response.text
+        assert response.status_code == 200
+
+    def test_count_tokens_accepts_system_as_block_list(self, sync_client, anthropic_headers):
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "system": [{"type": "text", "text": "You are a verbose assistant."}],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        response = sync_client.post(
+            "/v1/messages/count_tokens", json=payload, headers=anthropic_headers
+        )
+        assert response.status_code == 200
+        assert response.json()["input_tokens"] > 0
+
+
+class TestSystemToText:
+    """Unit tests for the `_system_to_text` flattener."""
+
+    def test_string_passthrough(self):
+        from kiro.routes_anthropic_shim import _system_to_text
+        assert _system_to_text("hello") == "hello"
+
+    def test_block_list_is_joined(self):
+        from kiro.routes_anthropic_shim import _system_to_text
+        blocks = [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
+        assert _system_to_text(blocks) == "a\nb"
+
+    def test_none_and_empty(self):
+        from kiro.routes_anthropic_shim import _system_to_text
+        assert _system_to_text(None) is None
+        assert _system_to_text([]) is None
+        assert _system_to_text([{"type": "text"}]) is None  # no text key
+

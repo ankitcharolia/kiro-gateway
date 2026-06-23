@@ -4,8 +4,14 @@ Anthropic-compatible shim routes backed by ACP.
 
 Endpoints
 ---------
-GET  /v1/models         (Anthropic models listing)
-POST /v1/messages       (streaming + non-streaming)
+The router declares relative paths (``/models``, ``/messages``,
+``/messages/count_tokens``). ``main.py`` mounts it under several base-path
+prefixes so clients work whichever base URL convention they use:
+
+* ``/v1/...``            — standard Anthropic base URL ``http://host:8000``
+* ``/...``               — base URL already includes the version, e.g. ``http://host:8000`` + ``/messages``
+* ``/anthropic/v1/...``  — explicit provider-namespaced base URL
+* ``/anthropic/...``     — provider-namespaced base URL without a version segment
 
 Fixes
 -----
@@ -71,7 +77,10 @@ class AnthropicTool(BaseModel):
 class AnthropicRequest(BaseModel):
     model: str = "claude-sonnet-4-5"
     messages: list[AnthropicMessage]
-    system: Optional[str] = None
+    # Anthropic accepts ``system`` as a plain string OR a list of text content
+    # blocks (often carrying ``cache_control``). Accept both so SDK/Claude Code
+    # style requests validate instead of failing with a 422.
+    system: str | list | None = None
     max_tokens: int = 4096
     temperature: Optional[float] = None
     tools: Optional[list[AnthropicTool]] = None
@@ -85,13 +94,43 @@ class AnthropicRequest(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _system_to_text(system: str | list | None) -> Optional[str]:
+    """Flatten an Anthropic ``system`` field to plain text.
+
+    The Anthropic Messages API accepts ``system`` as either a plain string or a
+    list of text content blocks, e.g. ``[{"type": "text", "text": "...",
+    "cache_control": {"type": "ephemeral"}}]``. This collapses either shape to a
+    single string.
+
+    Args:
+        system: The raw ``system`` value (string, list of blocks, or ``None``).
+
+    Returns:
+        The concatenated system text, or ``None`` when empty.
+    """
+    if not system:
+        return None
+    if isinstance(system, str):
+        return system
+    parts: list[str] = []
+    for block in system:
+        if isinstance(block, dict):
+            text = block.get("text")
+            if text:
+                parts.append(text)
+        elif isinstance(block, str):
+            parts.append(block)
+    return "\n".join(parts) or None
+
+
 def _anthropic_messages_to_acp(
     messages: list[AnthropicMessage],
-    system: Optional[str],
+    system: str | list | None,
 ) -> list[PromptMessage]:
     result = []
-    if system:
-        result.append(PromptMessage(role="user", content=f"[system]\n{system}"))
+    system_text = _system_to_text(system)
+    if system_text:
+        result.append(PromptMessage(role="user", content=f"[system]\n{system_text}"))
 
     for m in messages:
         role = "user" if m.role == "user" else "assistant"
@@ -147,7 +186,7 @@ def _get_shim(request: Request) -> ShimService:
 # GET /v1/models
 # ---------------------------------------------------------------------------
 
-@router.get("/v1/models")
+@router.get("/models")
 async def list_models(shim: ShimService = Depends(_get_shim)):
     """List available models (Anthropic listing shape).
 
@@ -177,7 +216,7 @@ async def list_models(shim: ShimService = Depends(_get_shim)):
 # POST /v1/messages
 # ---------------------------------------------------------------------------
 
-@router.post("/v1/messages")
+@router.post("/messages")
 async def create_message(
     body: AnthropicRequest,
     shim: ShimService = Depends(_get_shim),
@@ -421,11 +460,11 @@ async def _stream_response(
 class AnthropicCountTokensRequest(BaseModel):
     model: str = "claude-sonnet-4-5"
     messages: list[AnthropicMessage]
-    system: Optional[str] = None
+    system: str | list | None = None
     tools: Optional[list[AnthropicTool]] = None
 
 
-@router.post("/v1/messages/count_tokens")
+@router.post("/messages/count_tokens")
 async def count_message_tokens(body: AnthropicCountTokensRequest):
     """Estimate the input token count for an Anthropic Messages request.
 
