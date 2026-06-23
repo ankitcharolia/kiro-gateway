@@ -21,6 +21,14 @@ Wire protocol (as implemented by `kiro-cli acp`, agent version 2.x):
      notifications (no id) and may send ``session/request_permission``
      requests (with id) back to the gateway.
 
+  4. ``session/cancel`` (notification, no id)
+       params:  {"sessionId": "<uuid>"}
+     Sent when the client abandons a turn (disconnect / cancelled request).
+     The agent stops the current turn and returns the pending
+     ``session/prompt`` result with ``stopReason: "cancelled"``. This frees
+     the shared subprocess so a subsequent request is not head-of-line
+     blocked by the abandoned turn.
+
 ``session/update`` payloads carry an ``update.sessionUpdate`` discriminator:
   - ``agent_message_chunk``   → assistant text delta
   - ``agent_thought_chunk``   → reasoning/thinking delta
@@ -107,6 +115,10 @@ class ACPClient:
         self._prompt_sessions: dict[str, str] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
+        # Fire-and-forget session/cancel notification tasks, tracked so they
+        # survive the teardown of a disconnected streaming generator and can
+        # be cleaned up on stop().
+        self._cancel_tasks: set[asyncio.Task] = set()
         self._write_lock = asyncio.Lock()
         self._initialized = False
         # Kept for backward-compatibility with older tests/callers.
@@ -137,13 +149,14 @@ class ACPClient:
 
     async def stop(self) -> None:
         """Gracefully stop the subprocess and cancel reader tasks."""
-        for task in (self._reader_task, self._stderr_task):
+        for task in (self._reader_task, self._stderr_task, *self._cancel_tasks):
             if task:
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+        self._cancel_tasks.clear()
         if self._proc and self._proc.returncode is None:
             try:
                 if self._proc.stdin and not self._proc.stdin.is_closing():
@@ -383,20 +396,95 @@ class ACPClient:
         req_id = str(uuid.uuid4())
         self._prompt_sessions[req_id] = session_id
 
+        prompt_sent = False
+        completed = False
         try:
             await self._send(JsonRpcRequest(
                 id=req_id,
                 method="session/prompt",
                 params={"sessionId": session_id, "prompt": prompt_blocks},
             ))
+            prompt_sent = True
             while True:
                 event = await queue.get()
                 yield event
                 if event.get("type") in ("done", "error"):
+                    completed = True
                     break
         finally:
+            # If the turn was started but the consumer stopped before a
+            # terminal event — e.g. the client disconnected and the streaming
+            # generator is being torn down (GeneratorExit / CancelledError) —
+            # tell kiro-cli to abandon the turn. All requests multiplex over
+            # one subprocess, so an abandoned long turn would otherwise block
+            # every other request (head-of-line blocking). Fire-and-forget so
+            # the notification is still dispatched even while this generator is
+            # unwinding under cancellation.
+            if prompt_sent and not completed:
+                self._schedule_cancel(session_id)
             self._event_queues.pop(session_id, None)
             self._prompt_sessions.pop(req_id, None)
+
+    # ------------------------------------------------------------------
+    # Cancellation
+    # ------------------------------------------------------------------
+
+    async def cancel(self, session_id: str) -> None:
+        """Ask the agent to abandon the in-flight turn for a session.
+
+        Sends the ACP ``session/cancel`` notification (client → agent, no id)
+        with ``{"sessionId": ...}``. Verified against a live ``kiro-cli acp``
+        probe: the agent stops the current turn and returns the pending
+        ``session/prompt`` result with ``stopReason: "cancelled"``.
+
+        This is best-effort and idempotent from the caller's perspective; a
+        blank ``session_id`` is a no-op.
+
+        Args:
+            session_id: The ACP session whose current turn should be cancelled.
+        """
+        if not session_id:
+            return
+        await self._send_notification("session/cancel", {"sessionId": session_id})
+        logger.info(f"ACP session/cancel sent for session {session_id}")
+
+    async def _cancel_quietly(self, session_id: str) -> None:
+        """Run :meth:`cancel`, swallowing transport errors.
+
+        Cancellation happens during request teardown, where raising would be
+        useless and could mask the original disconnect. Failures (closed stdin,
+        no subprocess) are logged at WARNING and otherwise ignored.
+
+        Args:
+            session_id: The ACP session whose current turn should be cancelled.
+        """
+        try:
+            await self.cancel(session_id)
+        except (OSError, RuntimeError, ACPError) as exc:
+            logger.warning(f"session/cancel failed for {session_id}: {exc}")
+
+    def _schedule_cancel(self, session_id: str) -> None:
+        """Fire-and-forget a ``session/cancel`` notification.
+
+        Spawned as an independent, tracked task so the notification is written
+        even when the calling streaming generator is being torn down by a
+        client disconnect (the generator's ``finally`` cannot reliably ``await``
+        under ``CancelledError``). The task keeps a reference in
+        ``_cancel_tasks`` until it completes.
+
+        Args:
+            session_id: The ACP session whose current turn should be cancelled.
+        """
+        if not session_id:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (interpreter/loop teardown) — nothing to do.
+            return
+        task = loop.create_task(self._cancel_quietly(session_id))
+        self._cancel_tasks.add(task)
+        task.add_done_callback(self._cancel_tasks.discard)
 
     @staticmethod
     def _build_prompt_blocks(messages: list) -> list[dict]:
@@ -461,6 +549,22 @@ class ACPClient:
 
     async def _send(self, req: JsonRpcRequest) -> None:
         await self._write_line(req.model_dump_json())
+
+    async def _send_notification(self, method: str, params: dict) -> None:
+        """Write a JSON-RPC 2.0 notification (a request with no ``id``).
+
+        Notifications expect no response, per the JSON-RPC spec, and are how
+        ACP delivers ``session/cancel``.
+
+        Args:
+            method: The JSON-RPC method name (e.g. ``session/cancel``).
+            params: The method parameters.
+        """
+        await self._write_line(json.dumps({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }))
 
     async def _write_line(self, line: str) -> None:
         async with self._write_lock:

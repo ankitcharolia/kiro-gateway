@@ -12,13 +12,17 @@ import pytest
 import pytest_asyncio
 
 from kiro.acp_client import ACPClient
-from kiro.acp_models import PromptMessage
+from kiro.acp_models import PromptMessage, PromptParams
 
 # Capture the genuine new_session implementation at import time. The
 # session-scoped ``test_client`` fixture monkeypatches ``ACPClient.new_session``
 # for the whole test session, so tests that need the real method call this
 # reference directly instead of going through the (patched) class attribute.
 _REAL_NEW_SESSION = ACPClient.new_session
+# Likewise capture the genuine prompt_stream — the cancellation tests must
+# exercise the real generator, not the session-scoped mock installed by the
+# ``test_client`` fixture.
+_REAL_PROMPT_STREAM = ACPClient.prompt_stream
 
 
 # ---------------------------------------------------------------------------
@@ -272,3 +276,183 @@ class TestStdioBufferLimit:
         """A custom stdio buffer limit is honoured."""
         client = ACPClient(stdio_limit=1234567)
         assert client._stdio_limit == 1234567
+
+
+# ---------------------------------------------------------------------------
+# Cancellation (issue #41): abandoning a turn sends ACP session/cancel so the
+# shared kiro-cli subprocess is freed (no head-of-line blocking).
+# ---------------------------------------------------------------------------
+
+class TestCancellation:
+    """session/cancel is emitted when a turn is abandoned before completing."""
+
+    @staticmethod
+    def _capture_writes(client: ACPClient) -> list[str]:
+        written: list[str] = []
+
+        async def fake_write_line(line: str) -> None:
+            written.append(line)
+
+        client._write_line = fake_write_line  # type: ignore[assignment]
+        return written
+
+    @staticmethod
+    async def _drive_until_queue(client: ACPClient, session_id: str, events: list[dict]) -> None:
+        """Wait for prompt_stream to register its queue, then enqueue events."""
+        for _ in range(1000):
+            queue = client._event_queues.get(session_id)
+            if queue is not None:
+                for event in events:
+                    queue.put_nowait(event)
+                return
+            await asyncio.sleep(0)
+        raise AssertionError(f"queue for {session_id} never appeared")
+
+    @pytest.mark.asyncio
+    async def test_cancel_sends_session_cancel_notification(self):
+        """cancel() writes a JSON-RPC notification (no id) with the sessionId."""
+        client = ACPClient()
+        written = self._capture_writes(client)
+
+        await client.cancel("sess-1")
+
+        assert len(written) == 1
+        msg = json.loads(written[0])
+        assert msg["jsonrpc"] == "2.0"
+        assert msg["method"] == "session/cancel"
+        assert msg["params"] == {"sessionId": "sess-1"}
+        # A notification carries no id (verified against a live kiro-cli probe).
+        assert "id" not in msg
+
+    @pytest.mark.asyncio
+    async def test_cancel_empty_session_is_noop(self):
+        """A blank session id sends nothing."""
+        client = ACPClient()
+        written = self._capture_writes(client)
+
+        await client.cancel("")
+
+        assert written == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_quietly_swallows_write_error(self):
+        """_cancel_quietly never raises when the transport write fails."""
+        client = ACPClient()
+
+        async def boom(line: str) -> None:
+            raise OSError("stdin closed")
+
+        client._write_line = boom  # type: ignore[assignment]
+
+        # Must not raise.
+        await client._cancel_quietly("sess-1")
+
+    @pytest.mark.asyncio
+    async def test_prompt_stream_cancels_on_early_close(self):
+        """Closing the stream before a terminal event triggers session/cancel."""
+        client = ACPClient()
+        written = self._capture_writes(client)
+
+        params = PromptParams(
+            session_id="s1", messages=[PromptMessage(role="user", content="hi")]
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+
+        feeder = asyncio.create_task(
+            self._drive_until_queue(client, "s1", [{"type": "text", "content": "Hello"}])
+        )
+        first = await gen.__anext__()
+        await feeder
+        assert first == {"type": "text", "content": "Hello"}
+
+        # Consumer goes away before "done"/"error" (client disconnect).
+        await gen.aclose()
+
+        # Let the fire-and-forget cancel task run.
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if any('"session/cancel"' in w for w in written):
+                break
+
+        cancels = [w for w in written if '"session/cancel"' in w]
+        assert len(cancels) == 1, written
+        msg = json.loads(cancels[0])
+        assert msg["params"] == {"sessionId": "s1"}
+        assert "id" not in msg
+        # The session bookkeeping is cleaned up.
+        assert "s1" not in client._event_queues
+
+    @pytest.mark.asyncio
+    async def test_prompt_stream_no_cancel_on_normal_completion(self):
+        """A turn that reaches a terminal event must NOT be cancelled."""
+        client = ACPClient()
+        written = self._capture_writes(client)
+
+        params = PromptParams(
+            session_id="s2", messages=[PromptMessage(role="user", content="hi")]
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+
+        feeder = asyncio.create_task(
+            self._drive_until_queue(client, "s2", [
+                {"type": "text", "content": "Hello"},
+                {"type": "done", "finish_reason": "stop", "usage": {}},
+            ])
+        )
+        events = [event async for event in gen]
+        await feeder
+
+        # Give any (erroneous) scheduled cancel a chance to run.
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert [e["type"] for e in events] == ["text", "done"]
+        assert not any('"session/cancel"' in w for w in written)
+
+    @pytest.mark.asyncio
+    async def test_prompt_stream_no_cancel_on_error_event(self):
+        """An error terminal event is a completion — no cancel is sent."""
+        client = ACPClient()
+        written = self._capture_writes(client)
+
+        params = PromptParams(
+            session_id="s3", messages=[PromptMessage(role="user", content="hi")]
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+
+        feeder = asyncio.create_task(
+            self._drive_until_queue(client, "s3", [
+                {"type": "error", "message": "boom"},
+            ])
+        )
+        events = [event async for event in gen]
+        await feeder
+
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert [e["type"] for e in events] == ["error"]
+        assert not any('"session/cancel"' in w for w in written)
+
+    @pytest.mark.asyncio
+    async def test_schedule_cancel_tracks_and_clears_task(self):
+        """_schedule_cancel registers a task and auto-discards it when done."""
+        client = ACPClient()
+        self._capture_writes(client)
+
+        client._schedule_cancel("s9")
+        assert len(client._cancel_tasks) == 1
+
+        # Drain the scheduled task.
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if not client._cancel_tasks:
+                break
+        assert client._cancel_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_schedule_cancel_blank_session_is_noop(self):
+        """_schedule_cancel does nothing for a blank session id."""
+        client = ACPClient()
+        client._schedule_cancel("")
+        assert client._cancel_tasks == set()

@@ -11,6 +11,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from kiro.shim_service import ShimService
+from kiro.acp_client import ACPClient as _ACPClient
+
+# Capture the genuine prompt_stream at import time. The session-scoped
+# ``test_client`` fixture later monkeypatches ACPClient.prompt_stream for the
+# whole session; the cancellation passthrough test needs the real generator.
+_REAL_PROMPT_STREAM = _ACPClient.prompt_stream
 
 
 # ---------------------------------------------------------------------------
@@ -276,3 +282,60 @@ async def test_stream_tokens_accepts_openai_nested_tools():
     tools = [{"type": "function", "function": {"name": "grep", "parameters": {"type": "object"}}}]
     await collect_stream(svc.stream_tokens([{"role": "user", "content": "hi"}], tools=tools))
     assert acp.last_params.tools[0].name == "grep"
+
+
+# ---------------------------------------------------------------------------
+# Cancellation passthrough (issue #41): closing the stream_tokens generator
+# early must propagate to the real ACPClient and emit session/cancel.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stream_tokens_early_close_cancels_acp_session():
+    """Abandoning a ShimService stream cancels the underlying ACP turn."""
+    from kiro.acp_client import ACPClient
+
+    # The session-scoped ``test_client`` fixture monkeypatches
+    # ACPClient.prompt_stream/new_session for the whole test session, so bind
+    # the genuine prompt_stream onto this instance to exercise the real path.
+    real_prompt_stream = _REAL_PROMPT_STREAM
+
+    client = ACPClient()
+    written: list[str] = []
+
+    async def fake_write_line(line: str) -> None:
+        written.append(line)
+
+    async def fake_new_session(capabilities=None, cwd=None, model=None) -> str:
+        return "svc-sess"
+
+    client._write_line = fake_write_line  # type: ignore[assignment]
+    client.new_session = fake_new_session  # type: ignore[assignment]
+    client.prompt_stream = lambda params: real_prompt_stream(client, params)  # type: ignore[assignment]
+
+    svc = ShimService(client)
+    gen = svc.stream_tokens([{"role": "user", "content": "Hi"}])
+
+    async def feed() -> None:
+        for _ in range(1000):
+            queue = client._event_queues.get("svc-sess")
+            if queue is not None:
+                queue.put_nowait({"type": "text", "content": "partial"})
+                return
+            await asyncio.sleep(0)
+
+    feeder = asyncio.create_task(feed())
+    first = await gen.__anext__()
+    await feeder
+    assert first["type"] == "text"
+
+    # Client disconnects before completion.
+    await gen.aclose()
+
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if any('"session/cancel"' in w for w in written):
+            break
+
+    cancels = [w for w in written if '"session/cancel"' in w]
+    assert len(cancels) == 1
+    assert '"sessionId": "svc-sess"' in cancels[0] or '"sessionId":"svc-sess"' in cancels[0]
