@@ -84,6 +84,7 @@ For tools that only understand the OpenAI API (Cursor, Cline, Continue, OpenCode
 | Endpoint | Description |
 |---|---|
 | `GET /v1/models` | List available models (live catalogue from kiro-cli, with fallback) |
+| `GET /v1/models/{model}` | Retrieve a single model object (probed by some harnesses, e.g. hermes-agent) |
 | `POST /v1/chat/completions` | Streaming and non-streaming completions |
 | `POST /v1/responses` | OpenAI Responses API (streaming and non-streaming) |
 | `POST /v1/embeddings` | Returns `501 Not Implemented` — kiro-cli/ACP provides no embeddings model |
@@ -95,6 +96,7 @@ For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-
 | Endpoint | Description |
 |---|---|
 | `GET /v1/models` | List available models (live catalogue from kiro-cli, with fallback) |
+| `GET /v1/models/{model}` | Retrieve a single model object |
 | `POST /v1/messages` | Streaming and non-streaming messages |
 | `POST /v1/messages/count_tokens` | Estimate input tokens for a request (local tokenizer estimate) |
 
@@ -441,6 +443,50 @@ Sampling parameters are accepted on both shims, validated, and **forwarded** to
 > **model** (`model` → `session/set_model`); see [Models](#modes). Other OpenAI
 > params (`seed`, `n`, `frequency_penalty`, `presence_penalty`, `logit_bias`)
 > are likewise not honored by ACP and are ignored.
+
+---
+
+## Usage & token accounting
+
+Both shims return a `usage` object on every completion. The gateway **prefers
+real counts** reported by `kiro-cli` and otherwise falls back to a **consistent
+local tokenizer estimate** (tiktoken `cl100k_base` + a Claude correction
+factor — the same estimator used by `POST /v1/messages/count_tokens`), so a
+usage field is never silently `0`.
+
+| API / mode | Usage surface |
+|---|---|
+| OpenAI `/v1/chat/completions` (non-stream) | `usage.{prompt_tokens, completion_tokens, total_tokens}` |
+| OpenAI `/v1/chat/completions` (stream) | a final usage-only chunk (`choices: []`) **when** the request sets `stream_options: {"include_usage": true}` (OpenAI semantics) |
+| OpenAI `/v1/responses` (stream + non-stream) | `usage.{input_tokens, output_tokens, total_tokens}` |
+| Anthropic `/v1/messages` (non-stream) | `usage.{input_tokens, output_tokens}` |
+| Anthropic `/v1/messages` (stream) | `input_tokens` in `message_start`, `output_tokens` in `message_delta` |
+
+- **Real vs. estimated.** Each field is resolved independently: a reported,
+  positive count wins; otherwise that field is estimated. `kiro-cli` 2.x does
+  not report usage over ACP (its `/usage` view is an interactive REPL command,
+  not part of the `session/prompt` result), so today most counts are estimates.
+  The gateway already reads any usage `kiro-cli` emits — on the prompt result,
+  a `session/update`, or under the ACP `_meta` extension — so real counts are
+  surfaced automatically if a future `kiro-cli` provides them, with **no
+  gateway change required**.
+- **`/usage` is not a harness feature.** `/usage` is a slash command of the
+  interactive `kiro-cli` chat TUI; harnesses (OpenAI/Anthropic clients) never
+  issue it — they read the `usage` object on each completion response, which the
+  gateway always fills. Sending the literal text `/usage` as a prompt does not
+  return token counts either: over ACP it is treated as ordinary prompt text,
+  and the gateway opens a fresh, stateless session per request, so there is no
+  cumulative interactive session for `/usage` to report on.
+- **Estimates are approximate.** They are suitable for budgeting and cost
+  displays, not exact billing.
+
+### logprobs (unsupported)
+
+The ACP path exposes no token log-probabilities, so `logprobs` is **not
+supported**. The OpenAI shim accepts the `logprobs` / `top_logprobs` request
+fields for API compatibility and reports `"logprobs": null` on each choice;
+the value is never populated. The Anthropic Messages API has no logprobs
+feature.
 
 ---
 

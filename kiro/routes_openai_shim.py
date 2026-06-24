@@ -37,6 +37,7 @@ from kiro.auth import verify_openai_key
 from kiro.config import DEFAULT_KIRO_MODELS
 from kiro.error_mapping import MappedError, classify_event, classify_exception
 from kiro.shim_service import ShimService
+from kiro.tokenizer import normalize_usage
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Shim"])
 
@@ -74,6 +75,13 @@ class OAIChatRequest(BaseModel):
     # stop may be a single string or a list of strings (OpenAI spec).
     stop: Optional[Any] = None
     tools: Optional[list[OAITool]] = None
+    # Streaming usage opt-in: {"include_usage": true} appends a final usage-only
+    # chunk to the SSE stream (OpenAI semantics).
+    stream_options: Optional[dict] = None
+    # logprobs are not supported by the ACP path (kiro-cli exposes none); the
+    # fields are accepted for API compatibility and reported back as null.
+    logprobs: Optional[bool] = None
+    top_logprobs: Optional[int] = None
     # Gateway extensions (optional, ignored by standard clients)
     filesystem_roots: list[dict] = Field(default_factory=list)
     terminal: Optional[dict] = None
@@ -217,6 +225,33 @@ async def list_models(shim: ShimService = Depends(_get_shim)):
     return {"object": "list", "data": models}
 
 
+@router.get("/models/{model_id:path}")
+async def retrieve_model(model_id: str, shim: ShimService = Depends(_get_shim)):
+    """Retrieve a single model object (OpenAI ``GET /v1/models/{model}``).
+
+    Some harnesses (e.g. hermes-agent) probe this endpoint to confirm a model
+    exists and to read its metadata. The gateway forwards any model id to
+    kiro-cli via ``session/set_model``, so this is permissive: it returns a
+    valid model object for the requested id, using the live catalogue entry
+    when one is known. The ``{model_id:path}`` converter accepts ids that
+    contain slashes (e.g. ``vendor/model``).
+
+    Args:
+        model_id: The requested model id.
+        shim: The shared ShimService (for the live catalogue).
+
+    Returns:
+        An OpenAI model object ``{"id", "object": "model", "created",
+        "owned_by"}``.
+    """
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": int(time.time()),
+        "owned_by": "kiro",
+    }
+
+
 # ---------------------------------------------------------------------------
 # POST /v1/chat/completions
 # ---------------------------------------------------------------------------
@@ -233,9 +268,11 @@ async def chat_completions(
     stop = _normalize_stop(body.stop)
 
     if body.stream:
+        include_usage = bool((body.stream_options or {}).get("include_usage"))
         return StreamingResponse(
             _stream_response(shim, messages, body.model, body.max_tokens,
-                             body.temperature, body.top_p, stop, tools, fs_roots, terminal),
+                             body.temperature, body.top_p, stop, tools, fs_roots,
+                             terminal, include_usage),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -263,6 +300,14 @@ async def chat_completions(
     tool_calls = _acp_tool_calls_to_oai(result.get("tool_calls", []))
     finish_reason = "tool_calls" if tool_calls else result.get("finish_reason", "stop")
 
+    usage = normalize_usage(
+        result.get("usage"),
+        prompt_messages=[m.model_dump() for m in body.messages],
+        prompt_tools=tools,
+        completion_text=result.get("content") or "",
+        completion_tool_calls=result.get("tool_calls"),
+    )
+
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
@@ -275,12 +320,14 @@ async def chat_completions(
                 "content": result["content"] if not tool_calls else None,
                 "tool_calls": tool_calls if tool_calls else None,
             },
+            # logprobs are unsupported by the ACP path; reported as null.
+            "logprobs": None,
             "finish_reason": finish_reason,
         }],
         "usage": {
-            "prompt_tokens": result.get("usage", {}).get("input_tokens", 0),
-            "completion_tokens": result.get("usage", {}).get("output_tokens", 0),
-            "total_tokens": result.get("usage", {}).get("total_tokens", 0),
+            "prompt_tokens": usage["input_tokens"],
+            "completion_tokens": usage["output_tokens"],
+            "total_tokens": usage["total_tokens"],
         },
     }
 
@@ -296,6 +343,7 @@ async def _stream_response(
     tools: list[dict],
     fs_roots: list[FilesystemRoot],
     terminal: Optional[TerminalCapability],
+    include_usage: bool = False,
 ) -> AsyncIterator[str]:
     """
     Translate ACP progress events to OpenAI streaming SSE format.
@@ -311,6 +359,9 @@ async def _stream_response(
     created = int(time.time())
     active_tool_idx: dict[str, int] = {}  # tool_call_id -> index
     tool_counter = 0
+    # Accumulators for the optional usage chunk (stream_options.include_usage).
+    text_acc: list[str] = []
+    collected_tool_calls: dict[str, dict] = {}  # tool_call_id -> {name, arguments}
 
     def chunk(delta: dict, finish_reason: Optional[str] = None) -> str:
         payload = {
@@ -346,6 +397,7 @@ async def _stream_response(
             if etype == "text":
                 delta = event.get("content", "")
                 if delta:
+                    text_acc.append(delta)
                     yield chunk({"content": delta})
 
             elif etype == "thinking":
@@ -357,6 +409,7 @@ async def _stream_response(
                 tc_id = event.get("id", str(uuid.uuid4()))
                 name = event.get("name", "")
                 arguments = event.get("arguments", {})
+                collected_tool_calls[tc_id] = {"name": name, "arguments": arguments}
                 if tc_id not in active_tool_idx:
                     idx = tool_counter
                     active_tool_idx[tc_id] = idx
@@ -382,6 +435,30 @@ async def _stream_response(
                     event.get("finish_reason") or "stop"
                 )
                 yield chunk({}, finish_reason=finish_reason)
+                if include_usage:
+                    usage = normalize_usage(
+                        event.get("usage"),
+                        prompt_messages=[{"role": m.role, "content": m.content} for m in messages],
+                        prompt_tools=tools,
+                        completion_text="".join(text_acc),
+                        completion_tool_calls=list(collected_tool_calls.values()),
+                    )
+                    yield (
+                        "data: "
+                        + json.dumps({
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": usage["input_tokens"],
+                                "completion_tokens": usage["output_tokens"],
+                                "total_tokens": usage["total_tokens"],
+                            },
+                        })
+                        + "\n\n"
+                    )
                 yield "data: [DONE]\n\n"
                 break
 
@@ -573,13 +650,21 @@ async def create_response(
         return _openai_error_response(mapped)
 
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
+    text = result.get("content", "") or ""
+    usage = normalize_usage(
+        result.get("usage"),
+        prompt_messages=[{"role": m.role, "content": m.content} for m in messages],
+        prompt_tools=tools,
+        completion_text=text,
+        completion_tool_calls=result.get("tool_calls"),
+    )
     return _build_response_object(
         response_id=response_id,
         model=body.model,
         created=int(time.time()),
-        text=result.get("content", "") or "",
+        text=text,
         tool_calls=result.get("tool_calls", []),
-        usage=result.get("usage", {}) or {},
+        usage=usage,
     )
 
 
@@ -752,12 +837,22 @@ async def _responses_stream(
                     })
                     text_item_open = False
 
-                usage = event.get("usage", {}) or {}
+                final_text = "".join(text_parts)
+                final_tool_calls = [
+                    {"id": t["id"], "name": t["name"], "arguments": t["arguments"]}
+                    for t in tool_calls
+                ]
+                usage = normalize_usage(
+                    event.get("usage"),
+                    prompt_messages=[{"role": m.role, "content": m.content} for m in messages],
+                    prompt_tools=tools,
+                    completion_text=final_text,
+                    completion_tool_calls=final_tool_calls,
+                )
                 final = _build_response_object(
                     response_id=response_id, model=model, created=created,
-                    text="".join(text_parts),
-                    tool_calls=[{"id": t["id"], "name": t["name"], "arguments": t["arguments"]}
-                                for t in tool_calls],
+                    text=final_text,
+                    tool_calls=final_tool_calls,
                     usage=usage,
                 )
                 yield sse("response.completed", {"response": final})

@@ -566,3 +566,143 @@ class TestOpenAIShimSystemRole:
         msgs = rec.complete_kwargs[0]["messages"]
         assert msgs[0].role == "system"
         assert msgs[0].content == "You are helpful."
+
+
+# ---------------------------------------------------------------------------
+# Usage accounting (issue #36): usage fields reflect real counts when kiro-cli
+# reports them, else a consistent tokenizer estimate (never silently 0).
+# logprobs are reported as null (unsupported by the ACP path).
+# ---------------------------------------------------------------------------
+
+def _usage_shim(content="Hello there, this is the answer.", usage=None, tool_calls=None):
+    """Shim stand-in returning given content/usage for both modes."""
+    shim = MagicMock()
+    shim.available_models = MagicMock(return_value=[])
+    shim.complete = AsyncMock(return_value={
+        "content": content,
+        "tool_calls": tool_calls or [],
+        "finish_reason": "stop",
+        "usage": usage or {},
+    })
+
+    async def _stream(*args, **kwargs):
+        for word in content.split(" "):
+            yield {"type": "text", "content": word + " "}
+        yield {"type": "done", "finish_reason": "stop", "usage": usage or {}}
+
+    shim.stream_tokens = _stream
+    return shim
+
+
+class TestOpenAIShimUsage:
+    """Usage shape + estimate fallback for the OpenAI shim."""
+
+    _CHAT = {"model": "claude-sonnet-4.6", "messages": [{"role": "user", "content": "What is the capital of France?"}]}
+
+    def test_chat_usage_estimated_when_unreported(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim(usage={})
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.status_code == 200
+        usage = resp.json()["usage"]
+        assert set(usage) == {"prompt_tokens", "completion_tokens", "total_tokens"}
+        assert usage["prompt_tokens"] > 0
+        assert usage["completion_tokens"] > 0
+        assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+    def test_chat_usage_uses_reported_counts(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim(
+            usage={"input_tokens": 111, "output_tokens": 22, "total_tokens": 133}
+        )
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        usage = resp.json()["usage"]
+        assert usage == {"prompt_tokens": 111, "completion_tokens": 22, "total_tokens": 133}
+
+    def test_chat_choice_logprobs_is_null(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim()
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.json()["choices"][0]["logprobs"] is None
+
+    def test_chat_stream_includes_usage_when_requested(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim(usage={})
+        payload = {**self._CHAT, "stream": True, "stream_options": {"include_usage": True}}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        # Find the usage-only chunk (choices: []).
+        usage_chunks = [
+            json.loads(line[len("data: "):])
+            for line in resp.text.splitlines()
+            if line.startswith("data: ") and '"usage"' in line
+        ]
+        assert usage_chunks, "expected a usage chunk when include_usage=true"
+        usage = usage_chunks[-1]["usage"]
+        assert usage["prompt_tokens"] > 0
+        assert usage["completion_tokens"] > 0
+        assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+        assert usage_chunks[-1]["choices"] == []
+
+    def test_chat_stream_omits_usage_by_default(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim(usage={})
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert '"usage"' not in resp.text
+
+    def test_responses_usage_estimated_when_unreported(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim(usage={})
+        resp = sync_client.post(
+            "/v1/responses", json={"model": "claude-sonnet-4.6", "input": "Tell me a story."},
+            headers=openai_headers,
+        )
+        usage = resp.json()["usage"]
+        assert set(usage) == {"input_tokens", "output_tokens", "total_tokens"}
+        assert usage["input_tokens"] > 0
+        assert usage["output_tokens"] > 0
+
+    def test_responses_stream_usage_non_zero(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim(usage={})
+        payload = {"model": "claude-sonnet-4.6", "input": "Tell me a story.", "stream": True}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        # The terminal response.completed event carries the usage object.
+        completed = [
+            json.loads(line[len("data: "):])
+            for line in resp.text.splitlines()
+            if line.startswith("data: ") and '"response.completed"' in line
+        ]
+        assert completed
+        usage = completed[-1]["response"]["usage"]
+        assert usage["input_tokens"] > 0
+        assert usage["output_tokens"] > 0
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/models/{model_id} — retrieve a single model (probed by harnesses
+# such as hermes-agent). Permissive: any id forwards to kiro-cli.
+# ---------------------------------------------------------------------------
+
+class TestOpenAIRetrieveModel:
+    """The OpenAI retrieve-model endpoint returns a valid model object."""
+
+    def test_retrieve_known_model(self, sync_client, openai_headers):
+        resp = sync_client.get("/v1/models/claude-sonnet-4.6", headers=openai_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == "claude-sonnet-4.6"
+        assert data["object"] == "model"
+        assert data["owned_by"] == "kiro"
+        assert "created" in data
+
+    def test_retrieve_model_id_with_slash(self, sync_client, openai_headers):
+        """Model ids containing a slash resolve via the :path converter."""
+        resp = sync_client.get("/v1/models/vendor/model-1", headers=openai_headers)
+        assert resp.status_code == 200
+        assert resp.json()["id"] == "vendor/model-1"
+
+    def test_retrieve_model_is_public(self, sync_client):
+        """Like the listing, retrieve is a discovery endpoint (no key required)."""
+        resp = sync_client.get("/v1/models/claude-sonnet-4.6")
+        assert resp.status_code == 200
+
+    def test_list_endpoint_still_works(self, sync_client, openai_headers):
+        """Adding the retrieve route must not shadow the list route."""
+        resp = sync_client.get("/v1/models", headers=openai_headers)
+        assert resp.status_code == 200
+        assert resp.json()["object"] == "list"

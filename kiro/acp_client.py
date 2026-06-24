@@ -127,6 +127,12 @@ class ACPClient:
         # {"id", "name", "description"}), and kiro-cli's current default model.
         self._available_models: list[dict] = []
         self._current_model_id: Optional[str] = None
+        # Per-session token usage captured from session/update notifications,
+        # merged into the terminal "done" event. kiro-cli 2.x does not report
+        # usage over ACP today (its /usage view is an interactive REPL command),
+        # so this is usually empty and the shims fall back to a tokenizer
+        # estimate; it is forward-compatible if a future kiro-cli emits counts.
+        self._session_usage: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -439,6 +445,7 @@ class ACPClient:
                 self._schedule_cancel(session_id)
             self._event_queues.pop(session_id, None)
             self._prompt_sessions.pop(req_id, None)
+            self._session_usage.pop(session_id, None)
 
     # ------------------------------------------------------------------
     # Cancellation
@@ -717,11 +724,98 @@ class ACPClient:
             return
         result = msg.get("result") or {}
         stop_reason = result.get("stopReason", "end_turn") if isinstance(result, dict) else "end_turn"
+        usage = self._find_usage(result)
+        # Merge anything captured from session/update notifications (result
+        # wins per key when both are present).
+        captured = self._session_usage.pop(session_id, {})
+        if captured:
+            usage = {**captured, **usage}
         queue.put_nowait({
             "type": "done",
             "finish_reason": _STOP_REASON_MAP.get(stop_reason, "stop"),
-            "usage": {},
+            "usage": usage,
         })
+
+    @staticmethod
+    def _normalize_usage_keys(usage: Any) -> dict:
+        """Normalise a usage dict to ``{input,output,total}_tokens`` int keys.
+
+        Accepts both ``snake_case`` and ``camelCase`` variants (and the OpenAI
+        ``prompt``/``completion`` spellings) so usage reported in any common
+        shape is surfaced verbatim.
+
+        Args:
+            usage: A candidate usage mapping (or anything; non-dicts yield ``{}``).
+
+        Returns:
+            A dict with any of ``input_tokens`` / ``output_tokens`` /
+            ``total_tokens`` that were present and parseable as ints.
+        """
+        if not isinstance(usage, dict):
+            return {}
+
+        def _pick(*keys: str) -> Optional[int]:
+            for key in keys:
+                value = usage.get(key)
+                if value is not None:
+                    try:
+                        return int(value)
+                    except (TypeError, ValueError):
+                        return None
+            return None
+
+        normalised: dict[str, int] = {}
+        input_tokens = _pick("input_tokens", "inputTokens", "promptTokens", "prompt_tokens")
+        output_tokens = _pick("output_tokens", "outputTokens", "completionTokens", "completion_tokens")
+        total_tokens = _pick("total_tokens", "totalTokens")
+        if input_tokens is not None:
+            normalised["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            normalised["output_tokens"] = output_tokens
+        if total_tokens is not None:
+            normalised["total_tokens"] = total_tokens
+        return normalised
+
+    @staticmethod
+    def _find_usage(obj: Any) -> dict:
+        """Locate and normalise token usage in an ACP payload.
+
+        Looks for a ``usage`` object at the top level and, failing that, under
+        the ACP ``_meta`` extension field.
+
+        Args:
+            obj: An ACP result or notification-params object.
+
+        Returns:
+            The normalised usage dict, or empty when none is present.
+        """
+        if not isinstance(obj, dict):
+            return {}
+        norm = ACPClient._normalize_usage_keys(obj.get("usage"))
+        if norm:
+            return norm
+        meta = obj.get("_meta")
+        if isinstance(meta, dict):
+            return ACPClient._normalize_usage_keys(meta.get("usage"))
+        return {}
+
+    @staticmethod
+    def _extract_usage(result: Any) -> dict:
+        """Normalise any token usage reported on a ``session/prompt`` result.
+
+        kiro-cli 2.x returns only ``{stopReason}`` (no usage), so this usually
+        yields an empty dict and the shims fall back to a tokenizer estimate.
+        It is forward-compatible: if a future kiro-cli reports usage — at the
+        top level or under ``_meta`` — the counts are surfaced verbatim.
+
+        Args:
+            result: The raw ``session/prompt`` result object.
+
+        Returns:
+            A dict with any reported ``input_tokens`` / ``output_tokens`` /
+            ``total_tokens``; empty when none are present.
+        """
+        return ACPClient._find_usage(result)
 
     def _handle_notification(self, msg: dict) -> None:
         """Translate ``session/update`` notifications into gateway events."""
@@ -741,6 +835,14 @@ class ACPClient:
 
         update = params.get("update", {})
         kind = update.get("sessionUpdate")
+
+        # kiro-cli may attach token usage to an update or its params/_meta
+        # (this is the same data its interactive /usage view shows). Capture it
+        # so the terminal "done" event can surface real counts instead of an
+        # estimate. Usually absent on kiro-cli 2.x; harmless when so.
+        captured = self._find_usage(update) or self._find_usage(params)
+        if captured:
+            self._session_usage.setdefault(session_id, {}).update(captured)
 
         if kind == "agent_message_chunk":
             text = self._extract_text(update.get("content"))

@@ -554,3 +554,101 @@ class TestGenerationMeta:
         assert len(prompt_lines) == 1
         payload = json.loads(prompt_lines[0])
         assert "_meta" not in payload["params"]
+
+
+# ---------------------------------------------------------------------------
+# Token usage extraction & capture (issue #36): surface real kiro-cli usage
+# when reported over ACP; otherwise leave it empty for the shims to estimate.
+# ---------------------------------------------------------------------------
+
+class TestACPUsageExtraction:
+    """_normalize_usage_keys / _find_usage / _extract_usage."""
+
+    def test_normalize_snake_case(self):
+        assert ACPClient._normalize_usage_keys(
+            {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+        ) == {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+
+    def test_normalize_camel_case(self):
+        assert ACPClient._normalize_usage_keys(
+            {"inputTokens": 3, "outputTokens": 4}
+        ) == {"input_tokens": 3, "output_tokens": 4}
+
+    def test_normalize_prompt_completion_spelling(self):
+        assert ACPClient._normalize_usage_keys(
+            {"promptTokens": 5, "completionTokens": 6}
+        ) == {"input_tokens": 5, "output_tokens": 6}
+
+    def test_normalize_non_dict_is_empty(self):
+        assert ACPClient._normalize_usage_keys(None) == {}
+        assert ACPClient._normalize_usage_keys("nope") == {}
+
+    def test_find_usage_top_level(self):
+        assert ACPClient._find_usage({"usage": {"input_tokens": 1}}) == {"input_tokens": 1}
+
+    def test_find_usage_under_meta(self):
+        assert ACPClient._find_usage(
+            {"_meta": {"usage": {"total_tokens": 9}}}
+        ) == {"total_tokens": 9}
+
+    def test_extract_usage_kiro_2x_result_is_empty(self):
+        # kiro-cli 2.x returns only {stopReason}; no usage to surface.
+        assert ACPClient._extract_usage({"stopReason": "end_turn"}) == {}
+
+
+class TestACPUsageCapture:
+    """Usage captured from session/update is merged into the done event."""
+
+    def test_finish_prompt_surfaces_result_usage(self):
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["sX"] = queue
+        client._prompt_sessions["req1"] = "sX"
+
+        client._finish_prompt("req1", {"result": {
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 12, "outputTokens": 8},
+        }})
+
+        done = queue.get_nowait()
+        assert done["type"] == "done"
+        assert done["usage"] == {"input_tokens": 12, "output_tokens": 8}
+
+    def test_session_update_usage_merged_into_done(self):
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["sY"] = queue
+
+        # A session/update notification carrying usage is captured.
+        client._handle_notification({
+            "method": "session/update",
+            "params": {
+                "sessionId": "sY",
+                "update": {"sessionUpdate": "agent_message_chunk",
+                           "content": {"text": "hi"}},
+                "_meta": {"usage": {"input_tokens": 20}},
+            },
+        })
+        # Drain the text event the update produced.
+        assert queue.get_nowait()["type"] == "text"
+        assert client._session_usage.get("sY") == {"input_tokens": 20}
+
+        client._prompt_sessions["req2"] = "sY"
+        client._finish_prompt("req2", {"result": {"stopReason": "end_turn"}})
+        done = queue.get_nowait()
+        assert done["usage"] == {"input_tokens": 20}
+
+    def test_result_usage_wins_over_captured(self):
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["sZ"] = queue
+        client._session_usage["sZ"] = {"input_tokens": 1, "output_tokens": 1}
+        client._prompt_sessions["req3"] = "sZ"
+
+        client._finish_prompt("req3", {"result": {
+            "stopReason": "end_turn",
+            "usage": {"input_tokens": 99},
+        }})
+        done = queue.get_nowait()
+        # Result input_tokens overrides captured; captured output_tokens kept.
+        assert done["usage"] == {"output_tokens": 1, "input_tokens": 99}

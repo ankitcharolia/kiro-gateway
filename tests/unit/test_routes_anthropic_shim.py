@@ -664,3 +664,138 @@ class TestAnthropicShimSystemRole:
         assert resp.status_code == 200
         msgs = rec.complete_kwargs[0]["messages"]
         assert all(m.role != "system" for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# Usage accounting (issue #36): non-streaming usage and streaming token counts
+# reflect real-or-estimated counts; the per-chunk +1 hack is gone.
+# ---------------------------------------------------------------------------
+
+def _anthropic_usage_shim(content="Paris is the capital of France.", usage=None, tool_calls=None):
+    shim = MagicMock()
+    shim.available_models = MagicMock(return_value=[])
+    shim.complete = AsyncMock(return_value={
+        "content": content,
+        "tool_calls": tool_calls or [],
+        "finish_reason": "stop",
+        "usage": usage or {},
+    })
+
+    async def _stream(*args, **kwargs):
+        for word in content.split(" "):
+            yield {"type": "text", "content": word + " "}
+        yield {"type": "done", "finish_reason": "stop", "usage": usage or {}}
+
+    shim.stream_tokens = _stream
+    return shim
+
+
+def _parse_anthropic_sse(text):
+    """Parse an Anthropic SSE body into a list of (event, data) tuples."""
+    import json as _json
+    events = []
+    event_name = None
+    for line in text.splitlines():
+        if line.startswith("event: "):
+            event_name = line[len("event: "):]
+        elif line.startswith("data: "):
+            events.append((event_name, _json.loads(line[len("data: "):])))
+    return events
+
+
+class TestAnthropicShimUsage:
+    """Usage shape + estimate fallback for the Anthropic shim."""
+
+    _MSG = {
+        "model": "claude-sonnet-4.6",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "What is the capital of France?"}],
+    }
+
+    def test_non_stream_usage_estimated_when_unreported(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_usage_shim(usage={})
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.status_code == 200
+        usage = resp.json()["usage"]
+        assert set(usage) == {"input_tokens", "output_tokens"}
+        assert usage["input_tokens"] > 0
+        assert usage["output_tokens"] > 0
+
+    def test_non_stream_usage_uses_reported(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_usage_shim(
+            usage={"input_tokens": 77, "output_tokens": 12}
+        )
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        usage = resp.json()["usage"]
+        assert usage == {"input_tokens": 77, "output_tokens": 12}
+
+    def test_non_stream_counts_system_in_input(self, sync_client, anthropic_headers):
+        """A larger system prompt yields a larger input-token estimate."""
+        sync_client.app.state.shim_service = _anthropic_usage_shim(usage={})
+        small = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        big_payload = {**self._MSG, "system": "You are a very thorough assistant. " * 20}
+        sync_client.app.state.shim_service = _anthropic_usage_shim(usage={})
+        big = sync_client.post("/v1/messages", json=big_payload, headers=anthropic_headers)
+        assert big.json()["usage"]["input_tokens"] > small.json()["usage"]["input_tokens"]
+
+    def test_stream_message_start_has_input_tokens(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_usage_shim(usage={})
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        events = _parse_anthropic_sse(resp.text)
+        starts = [d for name, d in events if name == "message_start"]
+        assert starts
+        assert starts[0]["message"]["usage"]["input_tokens"] > 0
+
+    def test_stream_message_delta_output_tokens_estimated(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_usage_shim(
+            content="Paris is the capital of France.", usage={}
+        )
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        events = _parse_anthropic_sse(resp.text)
+        deltas = [d for name, d in events if name == "message_delta"]
+        assert deltas
+        output_tokens = deltas[-1]["usage"]["output_tokens"]
+        # A real estimate of the generated text, not the old per-chunk count
+        # (6 words would have produced 6 under the +1 hack).
+        assert output_tokens > 0
+
+    def test_stream_message_delta_uses_reported_output(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_usage_shim(
+            usage={"output_tokens": 999}
+        )
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        events = _parse_anthropic_sse(resp.text)
+        deltas = [d for name, d in events if name == "message_delta"]
+        assert deltas[-1]["usage"]["output_tokens"] == 999
+
+
+# ---------------------------------------------------------------------------
+# GET /models/{model_id} — Anthropic retrieve-model on the namespaced prefixes
+# (the /v1 prefix is owned by the OpenAI shim, included first).
+# ---------------------------------------------------------------------------
+
+class TestAnthropicRetrieveModel:
+    """The Anthropic retrieve-model endpoint returns a valid model object."""
+
+    def test_retrieve_on_anthropic_prefix(self, sync_client, anthropic_headers):
+        resp = sync_client.get(
+            "/anthropic/v1/models/claude-sonnet-4.6", headers=anthropic_headers
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["type"] == "model"
+        assert data["id"] == "claude-sonnet-4.6"
+        assert "display_name" in data
+
+    def test_retrieve_uses_live_display_name(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service.available_models = lambda: [
+            {"id": "claude-opus-4.8", "name": "Claude Opus 4.8", "description": ""},
+        ]
+        resp = sync_client.get(
+            "/anthropic/models/claude-opus-4.8", headers=anthropic_headers
+        )
+        assert resp.status_code == 200
+        assert resp.json()["display_name"] == "Claude Opus 4.8"

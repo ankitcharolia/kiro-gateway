@@ -213,16 +213,49 @@ provenance is preserved instead of being flattened to anonymous user text:
   multiple system messages distinct. ACP exposes no system channel, so this
   labelled single-block serialisation is the faithful representation.
 
+## Usage & token accounting (`kiro/tokenizer.py`)
+
+`normalize_usage(reported, prompt_messages, prompt_tools, prompt_system,
+completion_text, completion_tool_calls)` returns
+`{input_tokens, output_tokens, total_tokens, estimated}`. It **prefers real
+counts** reported by kiro-cli and falls back per field to a tokenizer estimate
+(tiktoken `cl100k_base` + Claude correction), so a field is never silently `0`.
+All four completion surfaces use it:
+
+- OpenAI non-stream chat + Responses; Anthropic non-stream messages.
+- OpenAI chat **stream** emits a usage-only chunk (`choices: []`) only when the
+  request sets `stream_options.include_usage` (OpenAI semantics); Responses
+  stream fills `response.completed.usage`.
+- Anthropic **stream** puts the input estimate in `message_start` and the
+  reported-or-estimated `output_tokens` in `message_delta` (the old per-chunk
+  `+1` hack is gone).
+
+`ACPClient` surfaces any usage kiro-cli reports over ACP — on the
+`session/prompt` result, a `session/update`, or under `_meta` — via
+`_find_usage` / `_normalize_usage_keys` (accept snake/camel + prompt/completion
+spellings), captured per session and merged into the terminal `done` event
+(result wins). kiro-cli 2.x reports none today (its `/usage` is an interactive
+REPL command, not an ACP message, and the gateway is stateless per request), so
+counts are normally estimates; no gateway change is needed if a future kiro-cli
+reports them.
+
+**logprobs are unsupported** (ACP exposes none): the OpenAI shim accepts
+`logprobs`/`top_logprobs` for compatibility and returns `"logprobs": null` per
+choice. When touching usage, keep all shims/modes consistent and assert the
+usage **shape** in tests.
+
 ## API Endpoints
 
 | Mode | Method | Endpoint |
 |---|---|---|
 | Health | GET | `/health` |
 | OpenAI | GET | `/v1/models` |
+| OpenAI | GET | `/v1/models/{model}` (retrieve a single model; probed by some harnesses) |
 | OpenAI | POST | `/v1/chat/completions` (stream + non-stream) |
 | OpenAI | POST | `/v1/responses` (Responses API, stream + non-stream) |
 | OpenAI | POST | `/v1/embeddings` (501 — ACP has no embeddings model) |
 | Anthropic | GET | `/v1/models` |
+| Anthropic | GET | `/v1/models/{model}` (retrieve a single model) |
 | Anthropic | POST | `/v1/messages` (stream + non-stream) |
 | Anthropic | POST | `/v1/messages/count_tokens` (local tokenizer estimate) |
 | ACP | POST | `/acp/chat`, `/acp/chat/stream` |

@@ -46,7 +46,7 @@ from kiro.auth import verify_anthropic_key
 from kiro.config import DEFAULT_KIRO_MODELS
 from kiro.error_mapping import MappedError, classify_event, classify_exception
 from kiro.shim_service import ShimService
-from kiro.tokenizer import estimate_request_tokens
+from kiro.tokenizer import estimate_request_tokens, normalize_usage
 
 router = APIRouter(tags=["Anthropic Shim"])
 
@@ -240,6 +240,30 @@ async def list_models(shim: ShimService = Depends(_get_shim)):
     return {"data": data}
 
 
+@router.get("/models/{model_id:path}")
+async def retrieve_model(model_id: str, shim: ShimService = Depends(_get_shim)):
+    """Retrieve a single model object (Anthropic ``GET /v1/models/{model}``).
+
+    Permissive like the listing: the gateway forwards any model id to kiro-cli,
+    so this returns a valid model object for the requested id, using the live
+    catalogue's ``display_name`` when known. ``{model_id:path}`` accepts ids
+    containing slashes.
+
+    Args:
+        model_id: The requested model id.
+        shim: The shared ShimService (for the live catalogue).
+
+    Returns:
+        An Anthropic model object ``{"type": "model", "id", "display_name"}``.
+    """
+    display_name = model_id
+    for entry in shim.available_models():
+        if entry.get("id") == model_id:
+            display_name = entry.get("name") or model_id
+            break
+    return {"type": "model", "id": model_id, "display_name": display_name}
+
+
 # ---------------------------------------------------------------------------
 # POST /v1/messages
 # ---------------------------------------------------------------------------
@@ -297,6 +321,15 @@ async def create_message(
 
     stop_reason = "tool_use" if result.get("tool_calls") else "end_turn"
 
+    usage = normalize_usage(
+        result.get("usage"),
+        prompt_messages=[{"role": m.role, "content": m.content} for m in body.messages],
+        prompt_tools=tools,
+        prompt_system=body.system,
+        completion_text=result.get("content") or "",
+        completion_tool_calls=result.get("tool_calls"),
+    )
+
     return {
         "id": f"msg_{uuid.uuid4().hex[:12]}",
         "type": "message",
@@ -306,8 +339,8 @@ async def create_message(
         "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": {
-            "input_tokens": result.get("usage", {}).get("input_tokens", 0),
-            "output_tokens": result.get("usage", {}).get("output_tokens", 0),
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
         },
     }
 
@@ -340,11 +373,19 @@ async def _stream_response(
       error          → error event
     """
     msg_id = f"msg_{uuid.uuid4().hex[:12]}"
-    input_tokens = 0
-    output_tokens = 0
+    # Estimate input tokens up front so message_start carries a real count
+    # (kiro-cli does not report usage on the prompt result today). Output
+    # tokens are estimated from the accumulated text/tool calls at the end.
+    input_tokens = estimate_request_tokens(
+        [{"role": m.role, "content": m.content} for m in messages],
+        tools=tools or None,
+    )
     block_idx = 0
     in_text_block = False
     active_tool_blocks: dict[str, int] = {}  # tool_call_id -> block_index
+    # Accumulators for the output-token estimate emitted at message_delta.
+    text_acc: list[str] = []
+    collected_tool_calls: dict[str, dict] = {}  # tool_call_id -> {name, arguments}
 
     def sse(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
@@ -360,7 +401,7 @@ async def _stream_response(
             "model": model,
             "stop_reason": None,
             "stop_sequence": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "usage": {"input_tokens": input_tokens, "output_tokens": 0},
         },
     })
 
@@ -398,7 +439,7 @@ async def _stream_response(
                     "index": block_idx,
                     "delta": {"type": "text_delta", "text": delta},
                 })
-                output_tokens += 1  # rough count until usage arrives in done event
+                text_acc.append(delta)
 
             elif etype == "thinking":
                 # Reasoning is not surfaced on the Anthropic content stream.
@@ -408,6 +449,7 @@ async def _stream_response(
                 tc_id = event.get("id", str(uuid.uuid4()))
                 name = event.get("name", "")
                 arguments = event.get("arguments", {})
+                collected_tool_calls[tc_id] = {"name": name, "arguments": arguments}
 
                 if tc_id not in active_tool_blocks:
                     # Close the text block if open
@@ -457,6 +499,14 @@ async def _stream_response(
                 elif stop_reason == "length":
                     stop_reason = "max_tokens"
 
+                # Prefer a count reported by kiro-cli; otherwise estimate from
+                # the accumulated output text and tool calls (consistent with
+                # the input estimate emitted in message_start).
+                output_usage = normalize_usage(
+                    usage,
+                    completion_text="".join(text_acc),
+                    completion_tool_calls=list(collected_tool_calls.values()),
+                )
                 yield sse("message_delta", {
                     "type": "message_delta",
                     "delta": {
@@ -464,7 +514,7 @@ async def _stream_response(
                         "stop_sequence": None,
                     },
                     "usage": {
-                        "output_tokens": usage.get("output_tokens", output_tokens),
+                        "output_tokens": output_usage["output_tokens"],
                     },
                 })
                 yield sse("message_stop", {"type": "message_stop"})

@@ -161,3 +161,112 @@ def estimate_tokens(
 ) -> int:
     """Backward-compatible alias for estimate_request_tokens."""
     return estimate_request_tokens(messages, tools)
+
+
+def _coerce_int(value: Any) -> int:
+    """Coerce a reported token count to a non-negative int, else ``0``.
+
+    Args:
+        value: A value that may be an int, numeric string, or ``None``.
+
+    Returns:
+        The non-negative integer value, or ``0`` when it cannot be parsed.
+    """
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return result if result > 0 else 0
+
+
+def estimate_completion_tokens(
+    text: Optional[str],
+    tool_calls: Optional[List[Dict[str, Any]]] = None,
+    apply_claude_correction: bool = True,
+) -> int:
+    """Estimate output tokens for generated assistant text and tool calls.
+
+    Uses the same tokenizer (and Claude correction factor) as the prompt-side
+    estimate so input and output counts are consistent.
+
+    Args:
+        text: The generated assistant text (may be empty).
+        tool_calls: Generated tool calls, each a dict with ``name`` and either
+            ``arguments`` (OpenAI) or ``input`` (Anthropic).
+        apply_claude_correction: Whether to apply the Claude correction factor.
+
+    Returns:
+        The estimated number of completion tokens.
+    """
+    total = count_tokens(text, apply_claude_correction) if text else 0
+    for tc in tool_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        args = tc.get("arguments")
+        if args is None:
+            args = tc.get("input", {})
+        args_text = args if isinstance(args, str) else json.dumps(args or {})
+        total += count_tokens(args_text, apply_claude_correction)
+        total += count_tokens(str(tc.get("name", "")), apply_claude_correction)
+        total += 10  # per tool-call structural overhead
+    return total
+
+
+def normalize_usage(
+    reported: Optional[Dict[str, Any]],
+    prompt_messages: Optional[List[Dict[str, Any]]] = None,
+    prompt_tools: Optional[List[Dict[str, Any]]] = None,
+    prompt_system: Optional[Union[str, List[Dict[str, Any]]]] = None,
+    completion_text: Optional[str] = "",
+    completion_tool_calls: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Build a normalised usage dict, preferring real counts over estimates.
+
+    kiro-cli (ACP) does not currently report token usage on a ``session/prompt``
+    result, so most fields fall back to a tokenizer estimate. When a future
+    kiro-cli reports counts, those are surfaced verbatim. Each field is resolved
+    independently: a reported, positive value wins; otherwise a consistent
+    tokenizer estimate is used so a field is never silently ``0``.
+
+    Args:
+        reported: Usage counts reported by kiro-cli (may be ``None`` or empty),
+            with keys ``input_tokens`` / ``output_tokens`` / ``total_tokens``.
+        prompt_messages: The request messages (token-view dicts) for the
+            input-token estimate.
+        prompt_tools: Tool definitions injected into the prompt.
+        prompt_system: System prompt (string or block list) for the estimate.
+        completion_text: The generated assistant text for the output estimate.
+        completion_tool_calls: Generated tool calls for the output estimate.
+
+    Returns:
+        A dict with ``input_tokens``, ``output_tokens``, ``total_tokens`` (ints)
+        and ``estimated`` (bool — ``True`` when any field was estimated rather
+        than reported).
+    """
+    reported = reported or {}
+    input_reported = _coerce_int(reported.get("input_tokens"))
+    output_reported = _coerce_int(reported.get("output_tokens"))
+    total_reported = _coerce_int(reported.get("total_tokens"))
+
+    estimated = False
+
+    if input_reported:
+        input_tokens = input_reported
+    else:
+        input_tokens = estimate_request_tokens(prompt_messages, prompt_tools, prompt_system)
+        estimated = estimated or input_tokens > 0
+
+    if output_reported:
+        output_tokens = output_reported
+    else:
+        output_tokens = estimate_completion_tokens(completion_text, completion_tool_calls)
+        estimated = estimated or output_tokens > 0
+
+    total_tokens = total_reported or (input_tokens + output_tokens)
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "estimated": estimated,
+    }
