@@ -154,6 +154,32 @@ client-side `fs`/`terminal` capabilities, so it only answers permission
 requests (auto-approve `allow_once` when `ACP_TRUST_TOOLS=true`, else
 `reject_once`).
 
+### Tools & function calling (verified against a live kiro-cli 2.8.0 probe)
+
+Two distinct cases — do not conflate them:
+
+- **kiro-cli built-in tools (code/files/shell/AWS/web): work end-to-end.** The
+  agent runs them itself within the turn; a probe prompt to run `echo <marker>`
+  produced a `tool_call` (`kind: execute`), one `session/request_permission`
+  (auto-approved), and the marker in the response. Harnesses drive these and get
+  the final answer. **By default the shims do NOT surface this activity as
+  `tool_calls`/`tool_use`** (`ACP_SURFACE_TOOL_CALLS=false`) — emitting kiro-cli's
+  own tools as client-executable calls breaks harnesses that validate tool names
+  ("unavailable tool") or loop on `finish_reason=tool_calls`. `ShimService`
+  filters `tool_call` events / empties `tool_calls` unless surfacing is on; the
+  native `/acp/chat` route always surfaces. Keep `ACP_TRUST_TOOLS=true` (run the
+  tools) independent of `ACP_SURFACE_TOOL_CALLS` (show the calls).
+- **Client-declared tools (the harness's own functions): NOT honored by
+  kiro-cli.** Tool defs on `session/prompt` (top-level `tools` **and**
+  `_meta.tools`) are accepted but ignored — the probe model said it had no such
+  tool. The only external-tool channel is **MCP servers** at `session/new`
+  (`mcpCapabilities.http: true`), executed by the MCP server, not the harness.
+  `ACPClient._tool_meta` still forwards normalized client tools under
+  `_meta.tools` (schema-safe, forward-compatible, merged with
+  `generationConfig`) so they reach kiro-cli if a future version ingests them —
+  but OpenAI/Anthropic-style client-side function calling does **not** round-trip
+  today (issue #31). Do not claim it does.
+
 ## Internal Event Contract
 
 `ACPClient` normalises `session/update` notifications and the terminal prompt
@@ -274,6 +300,7 @@ take precedence over `.env`).
 | `KIRO_CLI_PATH` | `kiro-cli` | Path/name of the Kiro CLI binary |
 | `KIRO_MODELS` | `auto,claude-opus-4.8,claude-sonnet-4.6` | Fallback `/v1/models` list before the live catalogue is discovered |
 | `ACP_TRUST_TOOLS` | `true` | Auto-approve (`true`) or reject (`false`) tool permission requests |
+| `ACP_SURFACE_TOOL_CALLS` | `false` | Expose kiro-cli's built-in tool calls to the OpenAI/Anthropic shims as `tool_calls`/`tool_use` (`true`) or suppress them so the shims return a clean completion (`false`, default). ACP-native route always surfaces. |
 | `ACP_WORKSPACE_DIR` | process cwd | Default session `cwd` |
 | `ACP_TIMEOUT` | `120` | Seconds to await a JSON-RPC response |
 | `ACP_STDIO_MAX_BYTES` | `16777216` (16 MiB) | Max bytes per ACP stdout line; raise for very large tool outputs in long turns |

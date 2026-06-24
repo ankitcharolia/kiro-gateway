@@ -706,3 +706,147 @@ class TestOpenAIRetrieveModel:
         resp = sync_client.get("/v1/models", headers=openai_headers)
         assert resp.status_code == 200
         assert resp.json()["object"] == "list"
+
+
+# ---------------------------------------------------------------------------
+# Client tool forwarding (issue #31): client-declared tools reach the ACP
+# prompt path via ShimService in both modes. (kiro-cli does not honor client
+# tools today — verified by live probe — but the gateway forwards them.)
+# ---------------------------------------------------------------------------
+
+_WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get current weather.",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    },
+}
+
+
+class TestOpenAIShimToolForwarding:
+    """Client tools reach ShimService for chat + responses, both modes."""
+
+    def test_chat_non_stream_forwards_tools(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "weather in Berlin?"}],
+            "tools": [_WEATHER_TOOL],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        tools = rec.complete_kwargs[0]["tools"]
+        assert any(
+            (t.get("function") or t).get("name") == "get_weather" for t in tools
+        )
+
+    def test_chat_stream_forwards_tools(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "weather?"}],
+            "stream": True,
+            "tools": [_WEATHER_TOOL],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        tools = rec.stream_kwargs[0]["tools"]
+        assert any((t.get("function") or t).get("name") == "get_weather" for t in tools)
+
+    def test_responses_non_stream_forwards_tools(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "input": "weather?",
+            "tools": [{"type": "function", "name": "get_weather",
+                       "description": "w", "parameters": {"type": "object"}}],
+        }
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        assert rec.complete_kwargs[0]["tools"]
+
+    def test_responses_stream_forwards_tools(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6", "input": "weather?", "stream": True,
+            "tools": [{"type": "function", "name": "get_weather",
+                       "description": "w", "parameters": {"type": "object"}}],
+        }
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        assert rec.stream_kwargs[0]["tools"]
+
+
+# ---------------------------------------------------------------------------
+# Built-in tool-call surfacing gate (ACP_SURFACE_TOOL_CALLS): by default the
+# OpenAI shim does NOT surface kiro-cli's own built-in tool calls (so harnesses
+# never see an "unavailable tool"); opt-in restores the old behavior.
+# ---------------------------------------------------------------------------
+
+from kiro.shim_service import ShimService as _ShimService
+from kiro.config import settings as _settings
+
+
+class _ToolEmittingACP:
+    """Stub ACP client whose turn includes a kiro-cli built-in tool call."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "Berlin is sunny.",
+            "finish_reason": "stop",
+            "tool_calls": [{"id": "c1", "name": "Fetching web content", "arguments": {}}],
+            "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "text", "content": "Berlin is sunny."}
+        yield {"type": "tool_call", "id": "c1", "name": "Fetching web content", "arguments": {}}
+        yield {"type": "done", "finish_reason": "stop"}
+
+
+class TestOpenAIShimToolSurfacingGate:
+    """Default off suppresses built-in tool calls; opt-in surfaces them."""
+
+    _CHAT = {"model": "claude-sonnet-4.6", "messages": [{"role": "user", "content": "weather?"}]}
+
+    def test_chat_non_stream_default_suppresses_tool_calls(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.status_code == 200
+        choice = resp.json()["choices"][0]
+        assert choice["message"].get("tool_calls") is None
+        assert choice["message"]["content"] == "Berlin is sunny."
+        assert choice["finish_reason"] == "stop"
+
+    def test_chat_non_stream_optin_surfaces_tool_calls(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        choice = resp.json()["choices"][0]
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["message"]["tool_calls"][0]["function"]["name"] == "Fetching web content"
+
+    def test_chat_stream_default_suppresses_tool_calls(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert '"tool_calls"' not in resp.text
+        assert '"finish_reason": "stop"' in resp.text
+
+    def test_chat_stream_optin_surfaces_tool_calls(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert '"tool_calls"' in resp.text
+        assert "Fetching web content" in resp.text

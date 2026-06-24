@@ -260,6 +260,12 @@ KIRO_MODELS=auto,claude-opus-4.8,claude-sonnet-4.6
 # asks the gateway for permission first. true = auto-approve each request,
 # false = reject (read/answer-only posture).
 ACP_TRUST_TOOLS=true
+# Expose kiro-cli's own built-in tool calls to the OpenAI/Anthropic shims as
+# executable tool_calls/tool_use? Default false — kiro-cli runs them itself and
+# returns the final answer, so the shims work with every harness. Enable only
+# for ACP-aware UIs that just display tool activity (the native /acp/chat route
+# always surfaces it).
+ACP_SURFACE_TOOL_CALLS=false
 ACP_WORKSPACE_DIR=               # Default session cwd (defaults to process cwd)
 ACP_TIMEOUT=120                  # Seconds to await a JSON-RPC response
 ACP_STDIO_MAX_BYTES=16777216     # Max bytes per ACP stdout line (16 MiB) — raise
@@ -492,7 +498,46 @@ feature.
 
 ## Tool-call round-trips
 
-Both shims surface the tool activity that `kiro-cli` performs:
+> [!IMPORTANT]
+> **How tools work with kiro-cli (verified against a live `kiro-cli` 2.8.0 ACP
+> probe).** `kiro-cli` over ACP is an **autonomous agent**, not a raw
+> function-calling model. There are two distinct cases:
+>
+> 1. **kiro-cli's own built-in tools (code, file read/edit, shell/command
+>    execution, AWS, web search) — fully supported through the gateway.** When a
+>    harness sends a prompt, kiro-cli decides to run these itself, asks the
+>    gateway for permission, executes them inside the session working directory,
+>    and continues the turn. *Probe confirmation:* a prompt asking it to run
+>    `echo <marker>` produced a `tool_call` (`kind: execute`), one
+>    `session/request_permission` (auto-approved `allow_once`), and the marker
+>    appeared in the streamed response. So harnesses **can** drive kiro-cli's
+>    built-in agentic toolset through the gateway. By default the shims present
+>    the result as a normal completion (the tool activity is **not** surfaced as
+>    executable `tool_calls`/`tool_use` — see `ACP_SURFACE_TOOL_CALLS` below);
+>    harnesses never execute these tools themselves.
+> 2. **Client-declared tools (the harness's own functions) — not honored by
+>    kiro-cli today.** Definitions sent on `session/prompt` (whether as a
+>    top-level `tools` field or under `_meta.tools`) are accepted without error
+>    but ignored: in the probe the model replied that it had *no* such tool and
+>    listed only its built-ins. ACP's only channel for *external* tools is **MCP
+>    servers** registered at `session/new` (kiro-cli advertises
+>    `mcpCapabilities.http: true`), where the **MCP server — not the harness —**
+>    executes the tool. The gateway still **forwards** normalized client tool
+>    definitions under the schema-safe `_meta.tools` extension (consistent with
+>    the sampling-param forwarding) so they reach kiro-cli and take effect
+>    automatically if a future version ingests them — but **OpenAI/Anthropic-style
+>    client-side function calling does not round-trip through kiro-cli today.**
+>    See [issue #31](https://github.com/ankitcharolia/kiro-gateway/issues/31).
+
+**By default the shims do not surface kiro-cli's built-in tool activity as
+executable `tool_calls`/`tool_use`** (`ACP_SURFACE_TOOL_CALLS=false`). kiro-cli
+runs the tools itself and streams the finished answer, so a harness receives a
+normal completion (`finish_reason=stop` / `end_turn`) — never a tool call for a
+tool it didn't declare and can't run. This is what makes the gateway work with
+every harness out of the box.
+
+When `ACP_SURFACE_TOOL_CALLS=true` (opt-in, for ACP-aware UIs that just display
+activity), the round-trip is:
 
 1. `kiro-cli` decides to run one of its built-in tools and asks the gateway for
    permission via `session/request_permission`.
@@ -502,11 +547,10 @@ Both shims surface the tool activity that `kiro-cli` performs:
 4. `kiro-cli` executes the tool itself and continues the same turn, streaming
    the resulting assistant text.
 
-Parallel tool calls are surfaced in the OpenAI shim via index-tracked
-`tool_calls` delta chunks. Because each gateway request opens a fresh ACP
-session, tool execution and continuation happen entirely inside `kiro-cli`
-within a single turn — callers receive the tool activity for visibility rather
-than having to execute tools themselves.
+The native `/acp/chat` route always surfaces this activity (ACP clients display
+it and never execute it, per the protocol). Either way, tool execution and
+continuation happen entirely inside `kiro-cli` within a single turn — callers
+never execute tools themselves.
 
 ---
 
@@ -527,6 +571,13 @@ ACP_TRUST_TOOLS=true     # auto-approve built-in tool runs (file edits, commands
 ACP_TRUST_TOOLS=false    # answer-only: every tool permission request is denied
 ACP_WORKSPACE_DIR=/path  # working directory kiro-cli operates in (default: process cwd)
 ```
+
+> **Surfacing vs. execution.** `ACP_TRUST_TOOLS` controls whether kiro-cli is
+> *allowed to run* its built-in tools; `ACP_SURFACE_TOOL_CALLS` (default
+> `false`) controls whether that activity is *shown* to the OpenAI/Anthropic
+> shims as `tool_calls`/`tool_use`. Keep `ACP_TRUST_TOOLS=true` so the agent can
+> use its full toolset, and leave `ACP_SURFACE_TOOL_CALLS=false` so harnesses
+> receive a clean completion instead of a tool call they cannot execute.
 
 > **Security:** with `ACP_TRUST_TOOLS=true` the agent can write files and run
 > commands in `ACP_WORKSPACE_DIR` without human confirmation. Use `false` for a

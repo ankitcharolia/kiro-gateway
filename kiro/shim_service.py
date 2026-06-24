@@ -130,9 +130,20 @@ class ShimService:
         tools: Optional[list[dict]] = None,
         filesystem_roots: Optional[list[FilesystemRoot]] = None,
         terminal: Optional[TerminalCapability] = None,
+        surface_tool_calls: bool = True,
     ) -> dict[str, Any]:
         """
         Run a full non-streaming completion.
+
+        Args:
+            surface_tool_calls: When ``False``, kiro-cli's own built-in tool
+                calls are not exposed in the result (``tool_calls`` is emptied).
+                kiro-cli still runs those tools internally and the final text is
+                unaffected — they are simply not presented as client-executable
+                tool calls. Used by the OpenAI/Anthropic shims (default off via
+                ``ACP_SURFACE_TOOL_CALLS``) so harnesses are not asked to execute
+                tools they never declared. The ACP-native route leaves this
+                ``True``.
 
         Returns:
             {"content": str, "tool_calls": list[dict],
@@ -152,7 +163,10 @@ class ShimService:
             stream=False,
         )
         result = await self._acp.prompt(params)
-        return self._normalize_result(result)
+        normalized = self._normalize_result(result)
+        if not surface_tool_calls:
+            normalized["tool_calls"] = []
+        return normalized
 
     # ------------------------------------------------------------------
     # Streaming completion
@@ -170,12 +184,22 @@ class ShimService:
         tools: Optional[list[dict]] = None,
         filesystem_roots: Optional[list[FilesystemRoot]] = None,
         terminal: Optional[TerminalCapability] = None,
+        surface_tool_calls: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
         """
         Stream normalised ACP events to the caller as they arrive.
 
         Each yielded item is a plain dict with a ``type`` of ``text``,
         ``thinking``, ``tool_call``, ``done`` or ``error``.
+
+        Args:
+            surface_tool_calls: When ``False``, ``tool_call`` events (kiro-cli's
+                own built-in tool activity) are filtered out of the stream.
+                kiro-cli still executes those tools internally and the streamed
+                ``text``/``done`` events are unaffected. The OpenAI/Anthropic
+                shims pass ``False`` by default (``ACP_SURFACE_TOOL_CALLS``) so a
+                harness is never handed a tool call it cannot execute; the
+                ACP-native route leaves this ``True``.
         """
         session_id = await self._new_session(filesystem_roots, terminal, model)
         params = PromptParams(
@@ -191,6 +215,8 @@ class ShimService:
             stream=True,
         )
         async for event in self._acp.prompt_stream(params):
+            if not surface_tool_calls and event.get("type") == "tool_call":
+                continue
             yield event
 
     # ------------------------------------------------------------------

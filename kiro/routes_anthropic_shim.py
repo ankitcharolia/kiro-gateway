@@ -43,7 +43,7 @@ from pydantic import BaseModel, Field
 
 from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalCapability
 from kiro.auth import verify_anthropic_key
-from kiro.config import DEFAULT_KIRO_MODELS
+from kiro.config import DEFAULT_KIRO_MODELS, settings
 from kiro.error_mapping import MappedError, classify_event, classify_exception
 from kiro.shim_service import ShimService
 from kiro.tokenizer import estimate_request_tokens, normalize_usage
@@ -300,6 +300,7 @@ async def create_message(
             tools=tools,
             filesystem_roots=fs_roots,
             terminal=terminal,
+            surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
         )
     except Exception as exc:
         mapped = classify_exception(exc)
@@ -420,6 +421,7 @@ async def _stream_response(
             tools=tools,
             filesystem_roots=fs_roots,
             terminal=terminal,
+            surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
         ):
             etype = event.get("type")
 

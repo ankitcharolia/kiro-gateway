@@ -90,6 +90,20 @@ ACP_STDIO_MAX_BYTES: int = int(
 # (ACP_TRUST_TOOLS=false) to run the agent in a read/answer-only posture.
 ACP_TRUST_TOOLS: bool = os.environ.get("ACP_TRUST_TOOLS", "true").lower() != "false"
 
+# Whether to surface kiro-cli's OWN built-in tool activity (web search, file
+# edits, command execution, …) to the OpenAI/Anthropic shims as executable
+# ``tool_calls`` / ``tool_use`` blocks. Default false: kiro-cli is an
+# autonomous agent that runs these tools itself and streams the final answer,
+# so emitting them as client-executable tool calls breaks harnesses that
+# validate tool names against their own registry ("unavailable tool") or that
+# loop on ``finish_reason=tool_calls``. With this false the shims behave like a
+# clean text endpoint and work with every harness; set true only for ACP-aware
+# UIs that merely display tool activity. The ACP-native route (/acp/chat)
+# always surfaces tool activity regardless, per the ACP contract.
+ACP_SURFACE_TOOL_CALLS: bool = (
+    os.environ.get("ACP_SURFACE_TOOL_CALLS", "false").lower() == "true"
+)
+
 # Default working directory for ACP sessions. Coding agents may override this
 # per-request via filesystem_roots; otherwise the gateway process cwd is used.
 ACP_WORKSPACE_DIR: str = os.environ.get("ACP_WORKSPACE_DIR", os.getcwd())
@@ -129,6 +143,7 @@ class _Settings:
     ACP_TIMEOUT: int = field(default_factory=lambda: ACP_TIMEOUT)
     ACP_STDIO_MAX_BYTES: int = field(default_factory=lambda: ACP_STDIO_MAX_BYTES)
     ACP_TRUST_TOOLS: bool = field(default_factory=lambda: ACP_TRUST_TOOLS)
+    ACP_SURFACE_TOOL_CALLS: bool = field(default_factory=lambda: ACP_SURFACE_TOOL_CALLS)
     ACP_WORKSPACE_DIR: str = field(default_factory=lambda: ACP_WORKSPACE_DIR)
 
     # Feature flags (default enabled; override via env)

@@ -384,3 +384,79 @@ async def test_stream_tokens_forwards_sampling_params():
     assert p.top_p == 0.5
     assert p.top_k == 9
     assert p.stop == ["Z"]
+
+
+# ---------------------------------------------------------------------------
+# surface_tool_calls gating (issue #31 follow-up): the shims suppress kiro-cli's
+# own built-in tool activity so harnesses are not handed tools they cannot
+# execute. kiro-cli still runs the tools internally; only the surfacing changes.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stream_tokens_suppresses_tool_calls_when_off():
+    """surface_tool_calls=False drops tool_call events but keeps text/done."""
+    acp = StubACP([
+        {"type": "text", "content": "Searching… "},
+        {"type": "tool_call", "id": "c1", "name": "Fetching web content", "arguments": {}},
+        {"type": "text", "content": "Berlin is sunny."},
+        {"type": "done", "finish_reason": "stop"},
+    ])
+    svc = ShimService(acp)
+    events = await collect_stream(
+        svc.stream_tokens([{"role": "user", "content": "weather?"}], surface_tool_calls=False)
+    )
+    assert not any(e.get("type") == "tool_call" for e in events)
+    # Text and terminal events are preserved.
+    assert [e["content"] for e in events if e.get("type") == "text"] == [
+        "Searching… ", "Berlin is sunny."
+    ]
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_stream_tokens_surfaces_tool_calls_when_on():
+    """surface_tool_calls=True (default) passes tool_call events through."""
+    acp = StubACP([
+        {"type": "tool_call", "id": "c1", "name": "Fetching web content", "arguments": {}},
+        {"type": "done", "finish_reason": "stop"},
+    ])
+    svc = ShimService(acp)
+    events = await collect_stream(
+        svc.stream_tokens([{"role": "user", "content": "weather?"}], surface_tool_calls=True)
+    )
+    assert any(e.get("type") == "tool_call" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_complete_empties_tool_calls_when_off():
+    """surface_tool_calls=False clears tool_calls on the non-streaming result."""
+    acp = StubACP(
+        [{"type": "done", "finish_reason": "tool_calls"}],
+        prompt_result={
+            "content": "Berlin is sunny.",
+            "finish_reason": "stop",
+            "tool_calls": [{"id": "c1", "name": "Fetching web content", "arguments": {}}],
+            "usage": {},
+        },
+    )
+    svc = ShimService(acp)
+    result = await svc.complete([{"role": "user", "content": "weather?"}], surface_tool_calls=False)
+    assert result["tool_calls"] == []
+    assert result["content"] == "Berlin is sunny."
+
+
+@pytest.mark.asyncio
+async def test_complete_keeps_tool_calls_when_on():
+    """surface_tool_calls=True (default) keeps the built-in tool calls."""
+    acp = StubACP(
+        [{"type": "done", "finish_reason": "tool_calls"}],
+        prompt_result={
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [{"id": "c1", "name": "read_file", "arguments": {}}],
+            "usage": {},
+        },
+    )
+    svc = ShimService(acp)
+    result = await svc.complete([{"role": "user", "content": "read"}], surface_tool_calls=True)
+    assert result["tool_calls"] and result["tool_calls"][0]["name"] == "read_file"

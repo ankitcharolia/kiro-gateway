@@ -799,3 +799,117 @@ class TestAnthropicRetrieveModel:
         )
         assert resp.status_code == 200
         assert resp.json()["display_name"] == "Claude Opus 4.8"
+
+
+# ---------------------------------------------------------------------------
+# Client tool forwarding (issue #31): Anthropic-declared tools reach the ACP
+# prompt path via ShimService in both modes.
+# ---------------------------------------------------------------------------
+
+class TestAnthropicShimToolForwarding:
+    """Client tools reach ShimService for /v1/messages, both modes."""
+
+    _TOOL = {
+        "name": "get_weather",
+        "description": "Get current weather.",
+        "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }
+
+    def test_non_stream_forwards_tools(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "weather?"}],
+            "tools": [self._TOOL],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        tools = rec.complete_kwargs[0]["tools"]
+        assert any(t.get("name") == "get_weather" for t in tools)
+
+    def test_stream_forwards_tools(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "stream": True,
+            "messages": [{"role": "user", "content": "weather?"}],
+            "tools": [self._TOOL],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        tools = rec.stream_kwargs[0]["tools"]
+        assert any(t.get("name") == "get_weather" for t in tools)
+
+
+# ---------------------------------------------------------------------------
+# Built-in tool-call surfacing gate (ACP_SURFACE_TOOL_CALLS) — Anthropic shim.
+# ---------------------------------------------------------------------------
+
+from kiro.shim_service import ShimService as _ShimService
+from kiro.config import settings as _settings
+
+
+class _ToolEmittingACP:
+    """Stub ACP client whose turn includes a kiro-cli built-in tool call."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "Berlin is sunny.",
+            "finish_reason": "stop",
+            "tool_calls": [{"id": "c1", "name": "Fetching web content", "arguments": {}}],
+            "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "text", "content": "Berlin is sunny."}
+        yield {"type": "tool_call", "id": "c1", "name": "Fetching web content", "arguments": {}}
+        yield {"type": "done", "finish_reason": "stop"}
+
+
+class TestAnthropicShimToolSurfacingGate:
+    """Default off suppresses built-in tool_use; opt-in surfaces it."""
+
+    _MSG = {
+        "model": "claude-sonnet-4.6", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "weather?"}],
+    }
+
+    def test_non_stream_default_suppresses_tool_use(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert all(b["type"] != "tool_use" for b in body["content"])
+        assert body["stop_reason"] == "end_turn"
+        assert body["content"][0]["text"] == "Berlin is sunny."
+
+    def test_non_stream_optin_surfaces_tool_use(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        body = resp.json()
+        assert any(b["type"] == "tool_use" for b in body["content"])
+        assert body["stop_reason"] == "tool_use"
+
+    def test_stream_default_suppresses_tool_use(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert '"tool_use"' not in resp.text
+
+    def test_stream_optin_surfaces_tool_use(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert '"tool_use"' in resp.text
+        assert "Fetching web content" in resp.text
