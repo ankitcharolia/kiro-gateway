@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
-## Unreleased
+## 2.1.1 (2026-06-24)
 
 ### Features
 
@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format follows
 
 * **auth:** enforce KIRO_GATEWAY_API_KEY on shim routes ([#39](https://github.com/ankitcharolia/kiro-gateway/pull/39)) ([5d37820](https://github.com/ankitcharolia/kiro-gateway/commit/5d378206e57d44a0d8a85ff87b0d068dc4606c33))
 * **acp:** cancel the kiro-cli turn on client disconnect ([#41](https://github.com/ankitcharolia/kiro-gateway/pull/41)) ([a7ecedd](https://github.com/ankitcharolia/kiro-gateway/commit/a7ecedd3788a1a685d107c78ebfc4b21b06bdf19))
+
+### CI/CD & Build
+
+* add issue/PR auto-labeling, missing-info bot, and grouped release notes ([1ed120a](https://github.com/ankitcharolia/kiro-gateway/commit/1ed120a768b714304dfa683d8bdc2b7ee7b355f1))
 
 ## 2.1.0 (2026-06-23)
 
@@ -90,34 +94,6 @@ All notable changes to this project are documented here. The format follows
 * **deps:** update dependency python to 3.14 ([d62be02](https://github.com/ankitcharolia/kiro-gateway/commit/d62be022218d538241251c6ea972b3aa0801c89c))
 
 ## 1.0.2 (2026-06-13)
-
-### Bug Fixes
-
-* resolve Docker build failure, Trivy SARIF missing file, and CodeQL v3 deprecation ([90e9822](https://github.com/ankitcharolia/kiro-gateway/commit/90e9822a3fdd6f398d62bb1d8ac4bf2753d51fcb))
-* remove GHCR visibility curl call that 404s before package exists ([e63f760](https://github.com/ankitcharolia/kiro-gateway/commit/e63f76079cc5e04c2c42e5fdfade006033e264b7))
-
-### Dependencies
-
-* **deps:** update dependency python ([8cb6421](https://github.com/ankitcharolia/kiro-gateway/commit/8cb642119644217800af05086dbd90907c2b9e11))
-* **deps:** update docker/build-push-action action to v7 ([e137303](https://github.com/ankitcharolia/kiro-gateway/commit/e137303ea8cd47d47d4ce03594e785d5a53931c9))
-* **deps:** update docker/build-push-action action to v7 ([5611c26](https://github.com/ankitcharolia/kiro-gateway/commit/5611c2616939ba13ac2ebaf23932a67c3e981c94))
-* **deps:** update github artifact actions to v7 ([3c25864](https://github.com/ankitcharolia/kiro-gateway/commit/3c2586422e9d885235a1a75e158b7b353849c6f7))
-* **deps:** update docker/setup-buildx-action action to v4 ([3b576a5](https://github.com/ankitcharolia/kiro-gateway/commit/3b576a55cfa0ed9f0831e6593816bc6dac4c0498))
-* **deps:** update docker/login-action action to v4 ([58654a9](https://github.com/ankitcharolia/kiro-gateway/commit/58654a9b0b2e2ea86f511a8e6955031f850891b7))
-* **deps:** update actions/cache action to v5 ([0739afc](https://github.com/ankitcharolia/kiro-gateway/commit/0739afccbeb99f096dc4484205efb35c6ac3636f))
-* **deps:** update docker/metadata-action action to v6 ([198f75d](https://github.com/ankitcharolia/kiro-gateway/commit/198f75d8c38fbab17fb3a592819bb4927fece385))
-* **deps:** update actions/checkout action to v4.3.1 ([0f36118](https://github.com/ankitcharolia/kiro-gateway/commit/0f36118a89277e8b2c1a834973417012f92a7182))
-* **deps:** update actions/checkout action to v6 ([adb2a8d](https://github.com/ankitcharolia/kiro-gateway/commit/adb2a8d3b0c6d0e045d9e0f1c97cea3756a333c6))
-* **deps:** update actions/attest-build-provenance action to v4 ([f4f8490](https://github.com/ankitcharolia/kiro-gateway/commit/f4f84909acbd6f4a94a35c1f3c1687e7790d8ed4))
-* **deps:** update actions/setup-python action to v6 ([83558ab](https://github.com/ankitcharolia/kiro-gateway/commit/83558abde8e44a8c19f7be65b8bf13162571f402))
-* **deps:** update docker/setup-qemu-action action to v4 ([bf0fbe5](https://github.com/ankitcharolia/kiro-gateway/commit/bf0fbe515d1698be325100c120d880281e73eff4))
-* **deps:** update dependency python ([1a89d7a](https://github.com/ankitcharolia/kiro-gateway/commit/1a89d7a98f1860cd4025c3184c284ec930f2c9ad))
-
-### Chores
-
-* upgrade all GitHub Actions to Node.js 24-compatible versions ([afb39bc](https://github.com/ankitcharolia/kiro-gateway/commit/afb39bca5554f97387a33055e0315bb8b46c65fa))
-
-## 1.0.0 (2026-06-13)
 
 ### Features
 
@@ -314,6 +290,8 @@ All notable changes to this project are documented here. The format follows
 * add ACPChatRequest and ACPChatResponse to acp_models ([ce2d7a8](https://github.com/ankitcharolia/kiro-gateway/commit/ce2d7a802dd6f3c6ed9d87f0229c316e39f300ee))
 * mock ACPClient subprocess in integration test_client fixture ([f8458ab](https://github.com/ankitcharolia/kiro-gateway/commit/f8458ab4ae7ec4746cdf5c26d36c698a67ec0c9a))
 * add mock_auth_manager fixture and update ModelResolver for testability ([6aa8c07](https://github.com/ankitcharolia/kiro-gateway/commit/6aa8c078c55d8a7186c7230230132bf821aeeae0))
+* resolve Docker build failure, Trivy SARIF missing file, and CodeQL v3 deprecation ([90e9822](https://github.com/ankitcharolia/kiro-gateway/commit/90e9822a3fdd6f398d62bb1d8ac4bf2753d51fcb))
+* remove GHCR visibility curl call that 404s before package exists ([e63f760](https://github.com/ankitcharolia/kiro-gateway/commit/e63f76079cc5e04c2c42e5fdfade006033e264b7))
 
 ### Refactoring
 
@@ -391,6 +369,20 @@ All notable changes to this project are documented here. The format follows
 * **deps:** update dependency python ([a17fb10](https://github.com/ankitcharolia/kiro-gateway/commit/a17fb10d5ea01197b8330a784e5b58012bbd0324))
 * **deps:** update actions/setup-python action to v6 ([e9bb588](https://github.com/ankitcharolia/kiro-gateway/commit/e9bb588b7193d435be47b9e75dc4368499a74cb8))
 * **deps:** update docker/build-push-action action to v7 ([d0c09ea](https://github.com/ankitcharolia/kiro-gateway/commit/d0c09ea8d650ed90d9f011311df4580fd5062dc2))
+* **deps:** update dependency python ([8cb6421](https://github.com/ankitcharolia/kiro-gateway/commit/8cb642119644217800af05086dbd90907c2b9e11))
+* **deps:** update docker/build-push-action action to v7 ([e137303](https://github.com/ankitcharolia/kiro-gateway/commit/e137303ea8cd47d47d4ce03594e785d5a53931c9))
+* **deps:** update docker/build-push-action action to v7 ([5611c26](https://github.com/ankitcharolia/kiro-gateway/commit/5611c2616939ba13ac2ebaf23932a67c3e981c94))
+* **deps:** update github artifact actions to v7 ([3c25864](https://github.com/ankitcharolia/kiro-gateway/commit/3c2586422e9d885235a1a75e158b7b353849c6f7))
+* **deps:** update docker/setup-buildx-action action to v4 ([3b576a5](https://github.com/ankitcharolia/kiro-gateway/commit/3b576a55cfa0ed9f0831e6593816bc6dac4c0498))
+* **deps:** update docker/login-action action to v4 ([58654a9](https://github.com/ankitcharolia/kiro-gateway/commit/58654a9b0b2e2ea86f511a8e6955031f850891b7))
+* **deps:** update actions/cache action to v5 ([0739afc](https://github.com/ankitcharolia/kiro-gateway/commit/0739afccbeb99f096dc4484205efb35c6ac3636f))
+* **deps:** update docker/metadata-action action to v6 ([198f75d](https://github.com/ankitcharolia/kiro-gateway/commit/198f75d8c38fbab17fb3a592819bb4927fece385))
+* **deps:** update actions/checkout action to v4.3.1 ([0f36118](https://github.com/ankitcharolia/kiro-gateway/commit/0f36118a89277e8b2c1a834973417012f92a7182))
+* **deps:** update actions/checkout action to v6 ([adb2a8d](https://github.com/ankitcharolia/kiro-gateway/commit/adb2a8d3b0c6d0e045d9e0f1c97cea3756a333c6))
+* **deps:** update actions/attest-build-provenance action to v4 ([f4f8490](https://github.com/ankitcharolia/kiro-gateway/commit/f4f84909acbd6f4a94a35c1f3c1687e7790d8ed4))
+* **deps:** update actions/setup-python action to v6 ([83558ab](https://github.com/ankitcharolia/kiro-gateway/commit/83558abde8e44a8c19f7be65b8bf13162571f402))
+* **deps:** update docker/setup-qemu-action action to v4 ([bf0fbe5](https://github.com/ankitcharolia/kiro-gateway/commit/bf0fbe515d1698be325100c120d880281e73eff4))
+* **deps:** update dependency python ([1a89d7a](https://github.com/ankitcharolia/kiro-gateway/commit/1a89d7a98f1860cd4025c3184c284ec930f2c9ad))
 
 ### Chores
 
@@ -436,6 +428,7 @@ All notable changes to this project are documented here. The format follows
 * remove redundant flat test (superseded by tests/unit/) ([cde8e50](https://github.com/ankitcharolia/kiro-gateway/commit/cde8e50efbf631a7b5a822ebdac453a99b704776))
 * remove redundant flat test (superseded by tests/unit/) ([242ab12](https://github.com/ankitcharolia/kiro-gateway/commit/242ab12b3e44e58df07262cd107fac54e17e9639))
 * replace Jwadow with ankitcharolia as maintainer ([9dbfc03](https://github.com/ankitcharolia/kiro-gateway/commit/9dbfc03338885c94f34aa0858dcbfb423c255ac1))
+* upgrade all GitHub Actions to Node.js 24-compatible versions ([afb39bc](https://github.com/ankitcharolia/kiro-gateway/commit/afb39bca5554f97387a33055e0315bb8b46c65fa))
 
 ### Other
 
