@@ -28,13 +28,14 @@ import uuid
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalCapability
 from kiro.auth import verify_openai_key
 from kiro.config import DEFAULT_KIRO_MODELS
+from kiro.error_mapping import MappedError, classify_event, classify_exception
 from kiro.shim_service import ShimService
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Shim"])
@@ -83,14 +84,36 @@ class OAIChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _oai_messages_to_acp(messages: list[OAIMessage]) -> list[PromptMessage]:
-    """Convert OpenAI message list to ACP PromptMessage list."""
+    """Convert an OpenAI message list to an ACP ``PromptMessage`` list.
+
+    Role handling preserves instruction provenance instead of silently
+    flattening it into anonymous user text:
+
+    * ``system`` and ``developer`` are kept as distinct roles. ACP has no
+      dedicated system channel, so the prompt serialiser
+      (:func:`ACPClient._build_prompt_blocks`) renders them with explicit
+      ``System:`` / ``Developer:`` labels, keeping each message separate and in
+      order rather than merging them.
+    * ``assistant`` is preserved.
+    * ``tool`` (and any other role) is rendered as ``user`` content; tool
+      results additionally carry a ``[tool_result id=...]`` marker for context.
+
+    Args:
+        messages: The OpenAI request messages.
+
+    Returns:
+        A list of :class:`PromptMessage` preserving role provenance.
+    """
     result = []
     for m in messages:
         role = m.role
-        if role == "system":
-            role = "user"  # ACP uses user role for system context
-        if role not in ("user", "assistant", "tool"):
-            role = "user"
+        if role in ("system", "developer"):
+            acp_role = role
+        elif role == "assistant":
+            acp_role = "assistant"
+        else:
+            # user, tool, function, or anything unexpected → user content.
+            acp_role = "user"
 
         # Flatten content
         if isinstance(m.content, list):
@@ -111,7 +134,7 @@ def _oai_messages_to_acp(messages: list[OAIMessage]) -> list[PromptMessage]:
         if m.role == "tool" and m.tool_call_id:
             content = f"[tool_result id={m.tool_call_id}]\n{content}"
 
-        result.append(PromptMessage(role=role, content=str(content)))
+        result.append(PromptMessage(role=acp_role, content=str(content)))
     return result
 
 
@@ -132,6 +155,24 @@ def _acp_tool_calls_to_oai(tool_calls: list[dict]) -> list[dict]:
 
 def _get_shim(request: Request) -> ShimService:
     return request.app.state.shim_service
+
+
+def _openai_error_response(mapped: MappedError) -> JSONResponse:
+    """Build a native OpenAI error ``JSONResponse`` from a classified error.
+
+    Args:
+        mapped: The classified error carrying the status code, message, native
+            ``type`` and optional ``Retry-After`` hint.
+
+    Returns:
+        A :class:`JSONResponse` with the OpenAI ``{"error": {...}}`` body, the
+        mapped HTTP status code, and a ``Retry-After`` header when available.
+    """
+    return JSONResponse(
+        status_code=mapped.status_code,
+        content=mapped.to_openai_error(),
+        headers=mapped.headers(),
+    )
 
 
 def _normalize_stop(stop: Any) -> Optional[list[str]]:
@@ -213,8 +254,11 @@ async def chat_completions(
             terminal=terminal,
         )
     except Exception as exc:
-        logger.error(f"OpenAI shim complete error: {exc}")
-        raise HTTPException(status_code=502, detail=str(exc))
+        mapped = classify_exception(exc)
+        logger.error(
+            f"OpenAI shim complete error (status={mapped.status_code}): {exc}"
+        )
+        return _openai_error_response(mapped)
 
     tool_calls = _acp_tool_calls_to_oai(result.get("tool_calls", []))
     finish_reason = "tool_calls" if tool_calls else result.get("finish_reason", "stop")
@@ -342,15 +386,26 @@ async def _stream_response(
                 break
 
             elif etype == "error":
-                message = event.get("message") or event.get("error") or "Unknown error"
-                error_payload = {"error": {"message": message, "type": "acp_error"}}
+                mapped = classify_event(event)
+                error_payload = {"error": {
+                    "message": mapped.message,
+                    "type": mapped.openai_type,
+                    "code": None,
+                    "param": None,
+                }}
                 yield f"data: {json.dumps(error_payload)}\n\n"
                 yield "data: [DONE]\n\n"
                 break
 
     except Exception as exc:
-        logger.error(f"OpenAI stream error: {exc}")
-        error_payload = {"error": {"message": str(exc), "type": "gateway_error"}}
+        mapped = classify_exception(exc)
+        logger.error(f"OpenAI stream error (status={mapped.status_code}): {exc}")
+        error_payload = {"error": {
+            "message": mapped.message,
+            "type": mapped.openai_type,
+            "code": None,
+            "param": None,
+        }}
         yield f"data: {json.dumps(error_payload)}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -399,8 +454,10 @@ def _responses_input_to_acp(
     """
     messages: list[PromptMessage] = []
     if instructions:
-        # ACP has no dedicated system role; surface instructions as user text.
-        messages.append(PromptMessage(role="user", content=str(instructions)))
+        # The Responses API ``instructions`` field is system-level guidance.
+        # Preserve it as a distinct system role (rendered with a ``System:``
+        # label) rather than collapsing it into anonymous user text.
+        messages.append(PromptMessage(role="system", content=str(instructions)))
 
     if isinstance(input_value, str):
         messages.append(PromptMessage(role="user", content=input_value))
@@ -509,8 +566,11 @@ async def create_response(
             terminal=terminal,
         )
     except Exception as exc:
-        logger.error(f"OpenAI responses complete error: {exc}")
-        raise HTTPException(status_code=502, detail=str(exc))
+        mapped = classify_exception(exc)
+        logger.error(
+            f"OpenAI responses complete error (status={mapped.status_code}): {exc}"
+        )
+        return _openai_error_response(mapped)
 
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
     return _build_response_object(
@@ -704,16 +764,19 @@ async def _responses_stream(
                 break
 
             elif etype == "error":
-                message = event.get("message") or event.get("error") or "Unknown error"
+                mapped = classify_event(event)
                 failed = base_response("failed")
-                failed["error"] = {"message": message, "type": "acp_error"}
+                failed["error"] = {"message": mapped.message, "type": mapped.openai_type}
                 yield sse("response.failed", {"response": failed})
                 break
 
     except Exception as exc:
-        logger.error(f"OpenAI responses stream error: {exc}")
+        mapped = classify_exception(exc)
+        logger.error(
+            f"OpenAI responses stream error (status={mapped.status_code}): {exc}"
+        )
         failed = base_response("failed")
-        failed["error"] = {"message": str(exc), "type": "gateway_error"}
+        failed["error"] = {"message": mapped.message, "type": mapped.openai_type}
         yield sse("response.failed", {"response": failed})
 
 

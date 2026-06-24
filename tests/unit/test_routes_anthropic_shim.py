@@ -515,3 +515,152 @@ class TestAnthropicShimSamplingForwarding:
         assert kw["top_p"] == 0.4
         assert kw["top_k"] == 10
         assert kw["stop"] == ["STOP"]
+
+
+# ---------------------------------------------------------------------------
+# Error mapping (issue #44): ACP/upstream failures surface with the right HTTP
+# status and the Anthropic native error shape, in both modes.
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock, MagicMock
+
+from kiro.acp_client import ACPError
+
+
+def _anthropic_error_shim_complete(exc):
+    shim = MagicMock()
+    shim.available_models = MagicMock(return_value=[])
+    shim.complete = AsyncMock(side_effect=exc)
+    return shim
+
+
+def _anthropic_error_shim_stream(event):
+    shim = MagicMock()
+    shim.available_models = MagicMock(return_value=[])
+
+    async def _stream(*args, **kwargs):
+        yield event
+
+    shim.stream_tokens = _stream
+    return shim
+
+
+class TestAnthropicShimErrorMapping:
+    """Non-streaming + streaming error classification for the Anthropic shim."""
+
+    _MSG = {
+        "model": "claude-sonnet-4.6",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+
+    def test_non_stream_rate_limit_returns_429(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_error_shim_complete(
+            ACPError(-32000, "Rate limit exceeded, retry after 15")
+        )
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.status_code == 429
+        body = resp.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "rate_limit_error"
+        assert resp.headers.get("retry-after") == "15"
+
+    def test_non_stream_overloaded_returns_503(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_error_shim_complete(
+            ACPError(-32000, "service is overloaded")
+        )
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.status_code == 503
+        assert resp.json()["error"]["type"] == "overloaded_error"
+
+    def test_non_stream_timeout_returns_504(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_error_shim_complete(
+            ACPError(-32000, "ACP session/prompt timed out after 120s")
+        )
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.status_code == 504
+        assert resp.json()["error"]["type"] == "api_error"
+
+    def test_non_stream_default_returns_502(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_error_shim_complete(
+            ACPError(-32000, "kiro-cli subprocess exited")
+        )
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.status_code == 502
+        assert resp.json()["error"]["type"] == "api_error"
+
+    def test_stream_rate_limit_error_type(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_error_shim_stream(
+            {"type": "error", "message": "rate limit exceeded", "code": -32000}
+        )
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        assert "event: error" in resp.text
+        assert '"type": "rate_limit_error"' in resp.text
+
+    def test_stream_overloaded_error_type(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_error_shim_stream(
+            {"type": "error", "message": "overloaded", "code": -32000}
+        )
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        assert '"type": "overloaded_error"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# System-role handling (issue #44): the Anthropic `system` field is preserved
+# as a distinct system role (no ad-hoc [system] user prefix).
+# ---------------------------------------------------------------------------
+
+class TestAnthropicShimSystemRole:
+    """The system prompt is carried as a distinct system role, not user text."""
+
+    def test_system_string_becomes_system_role(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "system": "Be terse.",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        msgs = rec.complete_kwargs[0]["messages"]
+        assert msgs[0].role == "system"
+        assert msgs[0].content == "Be terse."
+        # The legacy ad-hoc prefix must be gone.
+        assert "[system]" not in msgs[0].content
+
+    def test_system_block_list_flattened_into_system_role(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "system": [
+                {"type": "text", "text": "Line A."},
+                {"type": "text", "text": "Line B."},
+            ],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        msgs = rec.complete_kwargs[0]["messages"]
+        assert msgs[0].role == "system"
+        assert msgs[0].content == "Line A.\nLine B."
+
+    def test_no_system_means_no_system_message(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        msgs = rec.complete_kwargs[0]["messages"]
+        assert all(m.role != "system" for m in msgs)

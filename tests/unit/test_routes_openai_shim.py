@@ -391,3 +391,178 @@ class TestOpenAIShimSamplingForwarding:
         resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
         assert resp.status_code == 200
         assert rec.stream_kwargs[0]["top_p"] == 0.33
+
+
+# ---------------------------------------------------------------------------
+# Error mapping (issue #44): ACP/upstream failures surface with the right HTTP
+# status and the OpenAI native error shape, in both streaming and non-streaming
+# paths.
+# ---------------------------------------------------------------------------
+
+from kiro.acp_client import ACPError
+
+
+def _error_shim_complete(exc):
+    """Build a shim whose complete() raises ``exc``."""
+    shim = MagicMock()
+    shim.available_models = MagicMock(return_value=[])
+    shim.complete = AsyncMock(side_effect=exc)
+    return shim
+
+
+def _error_shim_stream(event):
+    """Build a shim whose stream_tokens() emits a single error ``event``."""
+    shim = MagicMock()
+    shim.available_models = MagicMock(return_value=[])
+
+    async def _stream(*args, **kwargs):
+        yield event
+
+    shim.stream_tokens = _stream
+    return shim
+
+
+class TestOpenAIShimErrorMapping:
+    """Non-streaming + streaming error classification for the OpenAI shim."""
+
+    _CHAT = {"model": "claude-sonnet-4.6", "messages": [{"role": "user", "content": "hi"}]}
+
+    def test_chat_non_stream_rate_limit_returns_429(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_complete(
+            ACPError(-32000, "Rate limit exceeded, retry after 30")
+        )
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.status_code == 429
+        body = resp.json()
+        assert body["error"]["type"] == "rate_limit_error"
+        assert resp.headers.get("retry-after") == "30"
+
+    def test_chat_non_stream_overloaded_returns_503(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_complete(
+            ACPError(-32000, "service is overloaded")
+        )
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.status_code == 503
+        assert resp.json()["error"]["type"] == "server_error"
+
+    def test_chat_non_stream_timeout_returns_504(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_complete(
+            ACPError(-32000, "ACP session/prompt timed out after 120s")
+        )
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.status_code == 504
+
+    def test_chat_non_stream_default_returns_502(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_complete(
+            ACPError(-32000, "kiro-cli subprocess exited")
+        )
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.status_code == 502
+        assert resp.json()["error"]["type"] == "server_error"
+
+    def test_chat_stream_rate_limit_error_type(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_stream(
+            {"type": "error", "message": "rate limit exceeded", "code": -32000}
+        )
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200  # SSE body already started
+        assert '"type": "rate_limit_error"' in resp.text
+        assert "data: [DONE]" in resp.text
+
+    def test_responses_non_stream_rate_limit_returns_429(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_complete(
+            ACPError(-32000, "Too Many Requests")
+        )
+        resp = sync_client.post(
+            "/v1/responses", json={"model": "claude-sonnet-4.6", "input": "hi"},
+            headers=openai_headers,
+        )
+        assert resp.status_code == 429
+        assert resp.json()["error"]["type"] == "rate_limit_error"
+
+    def test_responses_stream_error_uses_mapped_type(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_stream(
+            {"type": "error", "message": "overloaded", "code": -32000}
+        )
+        payload = {"model": "claude-sonnet-4.6", "input": "hi", "stream": True}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        assert "event: response.failed" in resp.text
+        assert '"type": "server_error"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# System-role handling (issue #44): system/developer roles are preserved
+# distinctly (not flattened to anonymous user text), and instructions map to a
+# system role in the Responses API.
+# ---------------------------------------------------------------------------
+
+class TestOpenAIShimSystemRole:
+    """system/developer provenance is preserved through to ACP messages."""
+
+    def test_chat_preserves_system_and_developer_roles(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [
+                {"role": "system", "content": "Be terse."},
+                {"role": "developer", "content": "Use Python."},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        roles = [(m.role, m.content) for m in rec.complete_kwargs[0]["messages"]]
+        assert roles == [
+            ("system", "Be terse."),
+            ("developer", "Use Python."),
+            ("user", "hi"),
+        ]
+
+    def test_chat_multiple_system_messages_not_merged(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [
+                {"role": "system", "content": "Rule one."},
+                {"role": "system", "content": "Rule two."},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        system_msgs = [m.content for m in rec.complete_kwargs[0]["messages"] if m.role == "system"]
+        assert system_msgs == ["Rule one.", "Rule two."]
+
+    def test_tool_role_does_not_break_and_maps_to_user(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "tool", "tool_call_id": "abc", "content": "sunny"},
+            ],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        msgs = rec.complete_kwargs[0]["messages"]
+        assert msgs[-1].role == "user"
+        assert "[tool_result id=abc]" in msgs[-1].content
+
+    def test_responses_instructions_map_to_system_role(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "instructions": "You are helpful.",
+            "input": "hi",
+        }
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        msgs = rec.complete_kwargs[0]["messages"]
+        assert msgs[0].role == "system"
+        assert msgs[0].content == "You are helpful."
