@@ -42,7 +42,21 @@ jobs:
             }
 
             const number = target.number;
-            const author = target.user && target.user.login;
+            const authorObj = target.user || {};
+            const author = authorObj.login;
+
+            // Bots (renovate, dependabot, github-actions, …) open PRs that have
+            // no linked issue and never ship tests by design. Asking them for
+            // "more info" is noise — skip them entirely.
+            const isBot =
+              authorObj.type === "Bot" ||
+              /\[bot\]$/i.test(author || "") ||
+              /^(renovate|dependabot|github-actions|pre-commit-ci)\b/i.test(author || "");
+            if (isBot) {
+              core.info(`Author ${author} is a bot; skipping completeness check.`);
+              return;
+            }
+
             const title = (target.title || "").trim();
             const body = (target.body || "").trim();
             const bodyLower = body.toLowerCase();
@@ -54,16 +68,23 @@ jobs:
               if (body.length < 30) {
                 missing.push("a **description** of what this PR changes and why");
               }
-              const linksIssue =
-                /\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#\d+/i.test(body) ||
-                /#\d+/.test(body);
-              if (!linksIssue) {
-                missing.push("a **linked issue** (e.g. `Closes #123`) or context for the change");
-              }
-              const mentionsTests =
-                /\btest|pytest|verif|how (i|we) (tested|verified)|coverage\b/i.test(bodyLower);
-              if (!mentionsTests) {
-                missing.push("a note on **testing** — `pytest -q` output or why tests aren't needed");
+              // Only code-bearing changes need a testing note. Derive the kind
+              // from the conventional-commit type in the title: docs/chore/ci/
+              // build/style/test and dependency bumps are exempt.
+              const conv = title.match(/^([a-z]+)(?:\(([^)]*)\))?(!)?:\s+/i);
+              const convType = conv ? conv[1].toLowerCase() : null;
+              const convScope = conv ? (conv[2] || "").toLowerCase() : "";
+              const noTestTypes = new Set(["docs", "doc", "chore", "ci", "build", "style", "test", "tests"]);
+              const isDepBump = convScope.includes("deps");
+              // No conventional type → assume it touches code (be conservative).
+              const isCodeChange = !isDepBump && (convType === null || !noTestTypes.has(convType));
+              if (isCodeChange) {
+                const mentionsTests =
+                  /\b(test|tests|pytest|verif(y|ied)|coverage)\b/i.test(bodyLower) ||
+                  /how (i|we) (tested|verified)/i.test(bodyLower);
+                if (!mentionsTests) {
+                  missing.push("a note on **testing** — e.g. `pytest -q` output, or why tests aren't needed");
+                }
               }
             } else {
               // Issues.

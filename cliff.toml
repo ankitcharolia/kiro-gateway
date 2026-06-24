@@ -36,7 +36,14 @@ body = """
 {% for commit in commits %}
 * {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | split(pat="\n") | first | trim }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/ankitcharolia/kiro-gateway/commit/{{ commit.id }}))
 {%- endfor %}
-{% endfor %}\n
+{% endfor %}\
+{% set contributors = github.contributors | default(value=[]) | filter(attribute="username") %}
+{% if contributors | length > 0 %}
+### ❤️ Thanks to our contributors
+{% for contributor in contributors %}
+* @{{ contributor.username }}{% if contributor.is_first_time %} — first contribution 🎉{% endif %}
+{%- endfor %}
+{% endif %}\n
 """
 
 footer = ""
@@ -84,3 +91,13 @@ skip_tags = ""
 ignore_tags = ""
 topo_order = false
 sort_commits = "oldest"
+
+# GitHub integration: lets the release body resolve commit authors to GitHub
+# usernames and build the per-release contributors list (the "Thanks to our
+# contributors" section). Requires a token at generation time — the release
+# workflow passes the built-in GITHUB_TOKEN. With no token the API calls return
+# empty usernames, which the template filters out, so the section is simply
+# omitted (e.g. for local runs).
+[remote.github]
+owner = "ankitcharolia"
+repo = "kiro-gateway"
