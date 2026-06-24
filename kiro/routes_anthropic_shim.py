@@ -36,14 +36,15 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalCapability
 from kiro.auth import verify_anthropic_key
 from kiro.config import DEFAULT_KIRO_MODELS
+from kiro.error_mapping import MappedError, classify_event, classify_exception
 from kiro.shim_service import ShimService
 from kiro.tokenizer import estimate_request_tokens
 
@@ -134,7 +135,11 @@ def _anthropic_messages_to_acp(
     result = []
     system_text = _system_to_text(system)
     if system_text:
-        result.append(PromptMessage(role="user", content=f"[system]\n{system_text}"))
+        # Preserve the system prompt as a distinct system role. ACP has no
+        # dedicated system channel, so the prompt serialiser renders it with a
+        # ``System:`` label — faithful to its provenance, instead of the older
+        # ad-hoc ``[system]`` prefix on a user turn.
+        result.append(PromptMessage(role="system", content=system_text))
 
     for m in messages:
         role = "user" if m.role == "user" else "assistant"
@@ -184,6 +189,25 @@ def _anthropic_tools_to_acp(tools: list[AnthropicTool]) -> list[dict]:
 
 def _get_shim(request: Request) -> ShimService:
     return request.app.state.shim_service
+
+
+def _anthropic_error_response(mapped: MappedError) -> JSONResponse:
+    """Build a native Anthropic error ``JSONResponse`` from a classified error.
+
+    Args:
+        mapped: The classified error carrying the status code, message, native
+            ``type`` and optional ``Retry-After`` hint.
+
+    Returns:
+        A :class:`JSONResponse` with the Anthropic ``{"type": "error",
+        "error": {...}}`` body, the mapped HTTP status code, and a
+        ``Retry-After`` header when available.
+    """
+    return JSONResponse(
+        status_code=mapped.status_code,
+        content=mapped.to_anthropic_error(),
+        headers=mapped.headers(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +278,11 @@ async def create_message(
             terminal=terminal,
         )
     except Exception as exc:
-        logger.error(f"Anthropic shim complete error: {exc}")
-        raise HTTPException(status_code=502, detail=str(exc))
+        mapped = classify_exception(exc)
+        logger.error(
+            f"Anthropic shim complete error (status={mapped.status_code}): {exc}"
+        )
+        return _anthropic_error_response(mapped)
 
     content_blocks: list[dict] = []
     if result["content"]:
@@ -444,21 +471,22 @@ async def _stream_response(
                 break
 
             elif etype == "error":
-                message = event.get("message") or event.get("error") or "Unknown ACP error"
+                mapped = classify_event(event)
                 yield sse("error", {
                     "type": "error",
                     "error": {
-                        "type": "api_error",
-                        "message": message,
+                        "type": mapped.anthropic_type,
+                        "message": mapped.message,
                     },
                 })
                 break
 
     except Exception as exc:
-        logger.error(f"Anthropic stream error: {exc}")
+        mapped = classify_exception(exc)
+        logger.error(f"Anthropic stream error (status={mapped.status_code}): {exc}")
         yield sse("error", {
             "type": "error",
-            "error": {"type": "gateway_error", "message": str(exc)},
+            "error": {"type": mapped.anthropic_type, "message": mapped.message},
         })
 
 

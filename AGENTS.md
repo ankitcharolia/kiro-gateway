@@ -166,7 +166,7 @@ translators emit OpenAI/Anthropic/ACP SSE.
 | `{"type": "thinking"}` | `content: str` | `agent_thought_chunk` |
 | `{"type": "tool_call"}` | `id, name, arguments: dict` | `tool_call` |
 | `{"type": "done"}` | `finish_reason: str, usage: dict` | prompt result `stopReason` |
-| `{"type": "error"}` | `message: str` | JSON-RPC error / subprocess exit |
+| `{"type": "error"}` | `message: str`, optional `code: int`, `data: Any` | JSON-RPC error / subprocess exit |
 
 - Events are **dicts** — access with `event.get("type")`, never attribute access.
   This is what the tests assert and the routes consume.
@@ -174,6 +174,44 @@ translators emit OpenAI/Anthropic/ACP SSE.
   `tool_use → tool_calls`); the Anthropic route maps `stop → end_turn` back.
 - `thinking` is **not** surfaced on the OpenAI/Anthropic content streams; it is
   emitted as an event for native-ACP consumers.
+- `error` events carry the JSON-RPC `code`/`data` when available so
+  `kiro.error_mapping` can classify them; non-streaming completions surface the
+  same failure as an `ACPError(code, message, data)`.
+
+## Error Mapping (`kiro/error_mapping.py`)
+
+A single classifier maps ACP/upstream failures to an HTTP status code and the
+**native** OpenAI/Anthropic error envelope, used by **both** shims in **both**
+modes — never a bare `502 {"detail": ...}`.
+
+| Condition (matched in message/data) | Status | OpenAI `type` | Anthropic `type` |
+|---|---|---|---|
+| rate limit / throttle / quota / `429` | `429` | `rate_limit_error` | `rate_limit_error` |
+| overloaded / unavailable / capacity | `503` | `server_error` | `overloaded_error` |
+| timeout / deadline | `504` | `server_error` | `api_error` |
+| default | `502` | `server_error` | `api_error` |
+
+- `classify_exception(exc)` for non-streaming (reads `ACPError.code/.data`);
+  `classify_event(event)` for streaming error events. Both delegate to
+  `classify_error(message, code, data)` — classification is message-based.
+- Non-streaming routes return a native error `JSONResponse` (with a
+  `Retry-After` header when the message carries a retry hint); streaming routes
+  put the mapped `type` in the terminal error event (the stream is already
+  `200`). When adding error handling, keep all four paths consistent.
+
+## System & developer roles
+
+`PromptMessage.role` is `user | assistant | system | developer`. Instruction
+provenance is preserved instead of being flattened to anonymous user text:
+
+- OpenAI `system`/`developer` keep their roles; `tool`/other → `user` (tool
+  results keep a `[tool_result id=…]` marker). Responses `instructions` → `system`.
+- Anthropic `system` (string or block list) → a single `system` role (no ad-hoc
+  `[system]` user prefix).
+- `ACPClient._build_prompt_blocks` renders each message with a `System:` /
+  `Developer:` / `User:` / `Assistant:` label, preserving order and keeping
+  multiple system messages distinct. ACP exposes no system channel, so this
+  labelled single-block serialisation is the faithful representation.
 
 ## API Endpoints
 

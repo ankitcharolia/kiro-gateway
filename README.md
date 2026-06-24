@@ -345,6 +345,59 @@ http://localhost:8000/acp/chat/stream  # SSE streaming
 
 ---
 
+## Error handling
+
+ACP/upstream failures are classified into the correct HTTP status code and
+returned in each API's **native error shape** (instead of a generic `502` with
+a bare `{"detail": ...}` body), so harness retry/back-off logic behaves
+correctly. The same classification applies to **both shims** and **both**
+streaming and non-streaming paths.
+
+| Upstream condition | HTTP status | OpenAI error `type` | Anthropic error `type` |
+|---|---|---|---|
+| Rate limit / throttle / quota / `429` | `429` | `rate_limit_error` | `rate_limit_error` |
+| Overloaded / unavailable / capacity | `503` | `server_error` | `overloaded_error` |
+| Timeout / deadline exceeded | `504` | `server_error` | `api_error` |
+| Any other failure (default) | `502` | `server_error` | `api_error` |
+
+- **Non-streaming.** The response status code is the mapped code and the body
+  is the native envelope — OpenAI `{"error": {"message", "type", "code",
+  "param"}}`; Anthropic `{"type": "error", "error": {"type", "message"}}`. When
+  the upstream message carries a retry hint (e.g. "retry after 30"), a
+  `Retry-After` header is added (most relevant for `429`).
+- **Streaming.** The SSE stream has already begun (HTTP `200`), so the mapped
+  error `type` is carried in the terminal error event: an OpenAI error chunk
+  (followed by `[DONE]`), a Responses `response.failed` event, or an Anthropic
+  `error` event.
+
+Classification is message-based (kiro-cli surfaces upstream conditions as
+text), so it works identically whether the failure arrives as a JSON-RPC error
+on a non-streaming completion or as a streaming error event.
+
+---
+
+## System & developer roles
+
+Instruction provenance is preserved rather than flattened into anonymous user
+text. ACP has no dedicated system channel, so a fresh-session prompt is
+serialised into a single text block — but each message keeps its role label
+(`System:` / `Developer:` / `User:` / `Assistant:`) and its order, and multiple
+system messages are kept distinct rather than merged.
+
+| Client input | Carried as | Rendered prompt label |
+|---|---|---|
+| OpenAI `system` message | `system` role | `System:` |
+| OpenAI `developer` message | `developer` role | `Developer:` |
+| OpenAI `tool` message | `user` role (with `[tool_result id=…]` marker) | `User:` |
+| OpenAI Responses `instructions` | `system` role | `System:` |
+| Anthropic `system` field (string or block list) | `system` role | `System:` |
+
+> kiro-cli treats the whole serialised prompt as one turn; these labels make
+> the system/developer instructions legible to the agent without inventing a
+> system channel the protocol does not expose.
+
+---
+
 ## Generation parameters
 
 Sampling parameters are accepted on both shims, validated, and **forwarded** to

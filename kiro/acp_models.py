@@ -68,7 +68,7 @@ ACPContentBlock = ContentBlock
 # ---------------------------------------------------------------------------
 
 class PromptMessage(BaseModel):
-    role: Literal["user", "assistant", "system"]
+    role: Literal["user", "assistant", "system", "developer"]
     content: Union[str, List[Dict[str, Any]]]
 
 

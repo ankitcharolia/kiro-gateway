@@ -369,7 +369,11 @@ class ACPClient:
                 finish_reason = event.get("finish_reason", "stop")
                 usage = event.get("usage", {}) or {}
             elif etype == "error":
-                raise ACPError(-32000, event.get("message", "ACP prompt failed"))
+                raise ACPError(
+                    event.get("code", -32000),
+                    event.get("message", "ACP prompt failed"),
+                    event.get("data"),
+                )
 
         return {
             "content": "".join(content_parts),
@@ -539,7 +543,12 @@ class ACPClient:
         message is sent verbatim; multi-turn histories are rendered with
         ``Role:`` labels so the agent retains context.
         """
-        label = {"user": "User", "assistant": "Assistant", "system": "System"}
+        label = {
+            "user": "User",
+            "assistant": "Assistant",
+            "system": "System",
+            "developer": "Developer",
+        }
         parts: list[tuple[str, str]] = []
         for m in messages:
             role = getattr(m, "role", None) if not isinstance(m, dict) else m.get("role")
@@ -658,7 +667,7 @@ class ACPClient:
                 fut.set_exception(ACPError(-32000, message))
         self._pending.clear()
         for queue in list(self._event_queues.values()):
-            queue.put_nowait({"type": "error", "message": message})
+            queue.put_nowait({"type": "error", "message": message, "code": -32000})
 
     def _dispatch(self, line: str) -> None:
         """Route a single JSON-RPC line to the right handler."""
@@ -702,6 +711,8 @@ class ACPClient:
             queue.put_nowait({
                 "type": "error",
                 "message": err.get("message", "ACP prompt error"),
+                "code": err.get("code"),
+                "data": err.get("data"),
             })
             return
         result = msg.get("result") or {}
