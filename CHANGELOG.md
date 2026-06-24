@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.1.2 (2026-06-24)
+
+### Features
+
+* **usage:** accurate token accounting + retrieve-model endpoint ([2f8deea](https://github.com/ankitcharolia/kiro-gateway/commit/2f8deea15d327aa1f4ec2609bfc6c4635f00f3fc))
+* **tools:** forward client tool definitions to kiro-cli via ACP _meta ([#31](https://github.com/ankitcharolia/kiro-gateway/pull/31)) ([e4a525a](https://github.com/ankitcharolia/kiro-gateway/commit/e4a525ab2e8efe31c2093b703f6c311432883699))
+
+### Bug Fixes
+
+* **ci:** improve labeling accuracy, skip bots, add release contributors ([0ee54e1](https://github.com/ankitcharolia/kiro-gateway/commit/0ee54e166a9a29b60a7e2b6b1ccac5c28c6c441a))
+* **shims:** typed error mapping and faithful system/developer roles ([c3ebc6d](https://github.com/ankitcharolia/kiro-gateway/commit/c3ebc6de40f94782abfcbb653343a6ef43e8b07d))
+* **tools:** stop surfacing kiro-cli built-in tool calls to shims by default ([#31](https://github.com/ankitcharolia/kiro-gateway/pull/31)) ([d3c0549](https://github.com/ankitcharolia/kiro-gateway/commit/d3c054952f2ba7b2dcc3034a3bcb0d62c74129f1))
+
+### Documentation
+
+* **changelog:** update for v2.1.1 [skip ci] ([7c3173d](https://github.com/ankitcharolia/kiro-gateway/commit/7c3173dfef3c3f810a5eb8f73727057a543992b0))
+
+### Dependencies
+
+* **deps:** update crazy-max/ghaction-github-labeler action to v6 ([26cae84](https://github.com/ankitcharolia/kiro-gateway/commit/26cae84a4470d02a2d6d4983cced907f8d19b771))
+* **deps:** update actions/github-script action to v9 ([4109efc](https://github.com/ankitcharolia/kiro-gateway/commit/4109efc2c254e06836e505fc21aa3f4af43d7100))
+* **deps:** update actions/setup-python action to v6.3.0 ([c7636eb](https://github.com/ankitcharolia/kiro-gateway/commit/c7636ebcbd45d2be9adfac5cabea141dc53d2cc1))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @renovate[bot]
+* @github-actions[bot] — first contribution 🎉
+
 ## 2.1.1 (2026-06-24)
 
 ### Features
@@ -18,6 +48,7 @@ All notable changes to this project are documented here. The format follows
 ### CI/CD & Build
 
 * add issue/PR auto-labeling, missing-info bot, and grouped release notes ([1ed120a](https://github.com/ankitcharolia/kiro-gateway/commit/1ed120a768b714304dfa683d8bdc2b7ee7b355f1))
+
 
 ## 2.1.0 (2026-06-23)
 
@@ -39,6 +70,12 @@ All notable changes to this project are documented here. The format follows
 ### Dependencies
 
 * **deps:** update actions/cache action to v6 ([90b9394](https://github.com/ankitcharolia/kiro-gateway/commit/90b939420807cde674c7e490d48a467a7973df32))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @renovate[bot]
 
 ## 2.0.0 (2026-06-19)
 
@@ -78,6 +115,12 @@ All notable changes to this project are documented here. The format follows
 * **docker:** bundle official Kiro CLI in image and mount credentials read-write ([ec2d138](https://github.com/ankitcharolia/kiro-gateway/commit/ec2d13884d5ae47ad52520e6e0efeccf7d10b0e9))
 * **python:** standardize toolchain on Python 3.14 ([69f10ca](https://github.com/ankitcharolia/kiro-gateway/commit/69f10cab25131bf1e5f089753d2b2b709f352dc9))
 
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @renovate[bot]
+
 ## 1.1.0 (2026-06-13)
 
 ### Documentation
@@ -92,6 +135,12 @@ All notable changes to this project are documented here. The format follows
 
 * **deps:** update actions/checkout action to v6 ([4f055d1](https://github.com/ankitcharolia/kiro-gateway/commit/4f055d120920f7cd8e26deb6ba325a5ec1d68607))
 * **deps:** update dependency python to 3.14 ([d62be02](https://github.com/ankitcharolia/kiro-gateway/commit/d62be022218d538241251c6ea972b3aa0801c89c))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @renovate[bot]
 
 ## 1.0.2 (2026-06-13)
 
@@ -435,5 +484,20 @@ All notable changes to this project are documented here. The format follows
 * enforce single-account mode, disable multi-account failover ([e0a1948](https://github.com/ankitcharolia/kiro-gateway/commit/e0a194807cd6657f4f2a77bc4677bb911c46bdd8))
 * strip credentials.json.example to single-account patterns only ([76cfd38](https://github.com/ankitcharolia/kiro-gateway/commit/76cfd3868262aa89ebbc14d84377b8bac614a40d))
 * update README to remove multi-account promotion ([7848a58](https://github.com/ankitcharolia/kiro-gateway/commit/7848a58eb6f885f6f5e819ca8108d20700aafdd3))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia — first contribution 🎉
+* @renovate[bot] — first contribution 🎉
+* @jwadow — first contribution 🎉
+* @bhaskoro-muthohar — first contribution 🎉
+* @ramaiyaKushal — first contribution 🎉
+* @Logesh-waran2003 — first contribution 🎉
+* @leikaiwei — first contribution 🎉
+* @Ry-DS — first contribution 🎉
+* @PAzter1101 — first contribution 🎉
+* @kilhyeonjun — first contribution 🎉
+* @Kartvya69 — first contribution 🎉
 
 
