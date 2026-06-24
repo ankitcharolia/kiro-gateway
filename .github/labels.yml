@@ -1,0 +1,71 @@
+# Label definitions for kiro-gateway.
+#
+# Synced to GitHub by .github/workflows/labels.yml on every push to main that
+# touches this file (and on manual dispatch). The auto-labeler
+# (.github/workflows/triage.yml) and the missing-info bot
+# (.github/workflows/needs-info.yml) rely on these names existing.
+#
+# Edit here, push to main, and the sync workflow reconciles colors/descriptions.
+
+# ── Type labels ───────────────────────────────────────────────────────────
+- name: feature
+  color: "0e8a16"
+  description: New functionality (conventional commit "feat")
+- name: enhancement
+  color: "a2eeef"
+  description: Improvement to existing functionality
+- name: bug
+  color: "d73a4a"
+  description: Something isn't working (conventional commit "fix")
+- name: documentation
+  color: "0075ca"
+  description: Docs-only change (conventional commit "docs")
+- name: refactor
+  color: "fbca04"
+  description: Code change that neither fixes a bug nor adds a feature
+- name: performance
+  color: "5319e7"
+  description: Performance improvement (conventional commit "perf")
+- name: test
+  color: "bfdadc"
+  description: Adding or fixing tests
+- name: build
+  color: "c5def5"
+  description: Build system or packaging change
+- name: ci
+  color: "c5def5"
+  description: CI configuration change
+- name: chore
+  color: "ededed"
+  description: Maintenance task with no production code change
+- name: dependencies
+  color: "0366d6"
+  description: Dependency update
+- name: question
+  color: "d876e3"
+  description: Further information is requested
+- name: breaking-change
+  color: "b60205"
+  description: Introduces a backwards-incompatible change
+
+# ── Priority labels ─────────────────────────────────────────────────────────
+- name: "priority: critical"
+  color: "b60205"
+  description: Drop everything — outage, data loss, or security issue
+- name: "priority: high"
+  color: "d93f0b"
+  description: Should be addressed soon
+- name: "priority: medium"
+  color: "fbca04"
+  description: Normal priority
+- name: "priority: low"
+  color: "0e8a16"
+  description: Nice to have
+
+# ── Workflow labels ──────────────────────────────────────────────────────────
+- name: needs-more-info
+  color: "e99695"
+  description: Required information is missing; waiting on the author
+- name: triage
+  color: "ffffff"
+  description: Awaiting initial triage

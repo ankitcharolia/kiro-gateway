@@ -1,0 +1,40 @@
+name: Sync Labels
+
+# Reconciles the repository's labels with .github/labels.yml so the auto-labeler
+# and missing-info bot always have the labels they reference. Runs when the
+# definitions change on main, and can be triggered manually.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/labels.yml
+      - .github/workflows/labels.yml
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Preview changes without applying them"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    name: Reconcile labels
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Sync labels from .github/labels.yml
+        uses: crazy-max/ghaction-github-labeler@v5.1.0
+        with:
+          yaml-file: .github/labels.yml
+          # Don't delete labels that aren't in the file (e.g. GitHub defaults
+          # or manually-added labels). Flip to false to make the file
+          # authoritative and prune everything else.
+          skip-delete: true
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || false }}

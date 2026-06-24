@@ -1,0 +1,136 @@
+name: Auto Label
+
+# Applies type + priority labels to issues and pull requests based on their
+# title (conventional-commit prefix) and body keywords. Re-runs on edits so a
+# corrected title gets the right labels. Labels themselves are defined in
+# .github/labels.yml and synced by .github/workflows/labels.yml.
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+# pull_request_target runs with a write token even for fork PRs. This workflow
+# never checks out or executes PR code — it only reads metadata and calls the
+# Issues API — so it is not exposed to the usual pull_request_target risks.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: auto-label-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: Apply type and priority labels
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute and apply labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const isPR = Boolean(context.payload.pull_request);
+            const target = isPR ? context.payload.pull_request : context.payload.issue;
+            if (!target) {
+              core.info("No issue or pull request in payload; nothing to do.");
+              return;
+            }
+
+            const number = target.number;
+            const title = (target.title || "").trim();
+            const body = (target.body || "");
+            const haystack = `${title}\n${body}`.toLowerCase();
+
+            // Conventional-commit prefix → labels. Matches "type:", "type(scope):"
+            // and breaking-change "type!:" forms, case-insensitively.
+            const typeMap = {
+              feat:     ["feature"],
+              feature:  ["feature"],
+              fix:      ["bug"],
+              bugfix:   ["bug"],
+              bug:      ["bug"],
+              docs:     ["documentation"],
+              doc:      ["documentation"],
+              perf:     ["performance"],
+              refactor: ["refactor"],
+              test:     ["test"],
+              tests:    ["test"],
+              build:    ["build"],
+              ci:       ["ci"],
+              chore:    ["chore"],
+              deps:     ["dependencies"],
+              dep:      ["dependencies"],
+            };
+
+            const toAdd = new Set();
+
+            // 1) Conventional-commit prefix on the title (primary signal).
+            const conv = title.match(/^(\w+)(\([^)]*\))?(!)?:/);
+            if (conv) {
+              const type = conv[1].toLowerCase();
+              if (typeMap[type]) {
+                typeMap[type].forEach((l) => toAdd.add(l));
+              }
+              if (conv[3] === "!") {
+                toAdd.add("breaking-change");
+              }
+              const scope = (conv[2] || "").toLowerCase();
+              if (scope.includes("deps")) {
+                toAdd.add("dependencies");
+              }
+            }
+
+            // 2) Keyword fallback (covers issues without a conventional title).
+            const keywordRules = [
+              { label: "bug",            re: /\b(bug|broken|crash|crashes|exception|traceback|stack ?trace|regression|does ?n'?t work|not working|error)\b/ },
+              { label: "feature",        re: /\b(feature request|new feature|please add|would be great to have|support for)\b/ },
+              { label: "enhancement",    re: /\b(enhanc|improve|improvement|optimi[sz]e)\b/ },
+              { label: "documentation",  re: /\b(docs?|documentation|readme|typo in (the )?docs)\b/ },
+              { label: "question",       re: /\b(question|how (do|can|to) i|is it possible|clarif)\b/ },
+              { label: "dependencies",   re: /\b(bump|upgrade|update) [`'"]?[a-z0-9._-]+[`'"]? (from|to) v?\d/ },
+            ];
+            for (const rule of keywordRules) {
+              if (rule.re.test(haystack)) {
+                toAdd.add(rule.label);
+              }
+            }
+
+            // "BUG:" issue-template title prefix.
+            if (/^bug\b[:\-]/i.test(title)) {
+              toAdd.add("bug");
+            }
+
+            // 3) Priority — explicit "priority: X" wins, else keyword heuristic.
+            const explicitPriority = haystack.match(/priority\s*[:=]\s*(critical|high|medium|low)/);
+            if (explicitPriority) {
+              toAdd.add(`priority: ${explicitPriority[1]}`);
+            } else if (/\b(security|vulnerability|cve|data ?loss|outage|production down|p0|urgent|critical)\b/.test(haystack)) {
+              toAdd.add("priority: critical");
+            } else if (/\b(p1|high priority|blocker|blocking|asap)\b/.test(haystack)) {
+              toAdd.add("priority: high");
+            }
+
+            if (toAdd.size === 0) {
+              core.info("No labels matched; leaving as-is.");
+              return;
+            }
+
+            // Only add labels that aren't already present, so we don't fight
+            // manual triage or re-notify on every edit.
+            const existing = new Set((target.labels || []).map((l) => (typeof l === "string" ? l : l.name)));
+            const labels = [...toAdd].filter((l) => !existing.has(l));
+            if (labels.length === 0) {
+              core.info("All computed labels already present.");
+              return;
+            }
+
+            core.info(`Adding labels to #${number}: ${labels.join(", ")}`);
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              labels,
+            });

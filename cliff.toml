@@ -1,0 +1,86 @@
+# git-cliff configuration for kiro-gateway.
+#
+# Produces a conventional-commit grouped changelog that matches the layout used
+# on the GitHub Releases page:
+#
+#   ## 0.27.0 (2026-06-22)
+#   ### Features
+#   * **proxy:** cc-switch reconciler ([#1030](…/pull/1030)) ([e8fc8a0](…/commit/…))
+#   ### Bug Fixes
+#   * **ccr:** accept 12-char hashes ([#1095](…/pull/1095)) ([9f7f3ad](…/commit/…))
+#
+# Used by .github/workflows/release.yml to (a) generate the GitHub Release body
+# for the pushed tag (`--latest`) and (b) regenerate the full CHANGELOG.md.
+#
+# Docs: https://git-cliff.org/docs/configuration
+
+[changelog]
+# Rendered once, at the top of CHANGELOG.md (stripped for the release body).
+header = """
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Conventional Commits](https://www.conventionalcommits.org); versions follow
+[Semantic Versioning](https://semver.org).\n
+"""
+
+# Rendered once per release (tag). Tera template.
+body = """
+{% if version %}\
+## {{ version | trim_start_matches(pat="v") }} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% else %}\
+## Unreleased
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+* {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | split(pat="\n") | first | trim }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/ankitcharolia/kiro-gateway/commit/{{ commit.id }}))
+{%- endfor %}
+{% endfor %}\n
+"""
+
+footer = ""
+trim = true
+
+[git]
+# Parse the conventional-commits spec so type/scope/description are available.
+conventional_commits = true
+# Drop commits that don't follow the spec (merge commits, ad-hoc messages) so
+# the changelog stays clean.
+filter_unconventional = true
+split_commits = false
+
+# Run on the raw commit message before parsing. Turn a trailing "(#123)" PR
+# reference into a markdown link so it renders as "(#123)" pointing at the PR.
+commit_preprocessors = [
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/ankitcharolia/kiro-gateway/pull/${1}))" },
+]
+
+# type → changelog section. The "<!-- N -->" prefix forces section ordering
+# (git-cliff sorts groups by key); `striptags` removes it in the template.
+# Anything matched by `skip = true` is omitted entirely.
+commit_parsers = [
+  { message = "^feat",                          group = "<!-- 0 -->Features" },
+  { message = "^fix",                           group = "<!-- 1 -->Bug Fixes" },
+  { message = "^perf",                          group = "<!-- 2 -->Performance" },
+  { message = "^refactor",                      group = "<!-- 3 -->Refactoring" },
+  { message = "^docs",                          group = "<!-- 4 -->Documentation" },
+  { message = "^test",                          group = "<!-- 5 -->Testing" },
+  { message = "^(ci|build)",                    group = "<!-- 6 -->CI/CD & Build" },
+  { message = "^chore\\(deps\\)",               group = "<!-- 7 -->Dependencies" },
+  { message = "^(deps|build\\(deps\\))",        group = "<!-- 7 -->Dependencies" },
+  { message = "^revert",                        group = "<!-- 8 -->Reverts" },
+  { message = "^chore",                         group = "<!-- 9 -->Chores" },
+  { message = "^style",                         group = "<!-- 9 -->Chores" },
+  # Catch-all for any other conventional type so nothing is silently lost.
+  { message = ".*",                             group = "<!-- 99 -->Other" },
+]
+
+protect_breaking_commits = true
+filter_commits = false
+# Only consider annotated/lightweight tags shaped like v1.2.3.
+tag_pattern = "v[0-9]*"
+skip_tags = ""
+ignore_tags = ""
+topo_order = false
+sort_commits = "oldest"

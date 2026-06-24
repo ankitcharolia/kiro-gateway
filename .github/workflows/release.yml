@@ -17,6 +17,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
+          # Full history + tags are required for git-cliff to build the
+          # changelog and for hatch-vcs to derive the version from the tag.
           fetch-depth: 0
 
       - name: Set up Python
@@ -31,33 +33,60 @@ jobs:
       - name: Build source distribution and wheel
         run: python -m build
 
-      - name: Extract changelog for this tag
-        id: changelog
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          if [ -f CHANGELOG.md ]; then
-            # Extract the section between this tag heading and the next heading
-            NOTES=$(awk "/^## \[?${TAG}\]?|^## ${TAG}/"'{found=1; next} found && /^## /{exit} found{print}' CHANGELOG.md)
-          fi
-          if [ -z "$NOTES" ]; then
-            NOTES="See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details."
-          fi
-          # Write multi-line output safely
-          {
-            echo 'notes<<EOF'
-            echo "$NOTES"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
+      # Release body: only the section for the tag just pushed, no file header.
+      - name: Generate release notes for this tag
+        id: release_notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body: ${{ steps.changelog.outputs.notes }}
+          body: ${{ steps.release_notes.outputs.content }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
           files: |
             dist/*.tar.gz
             dist/*.whl
-          generate_release_notes: true
+          # We supply our own grouped notes; don't let GitHub append its own.
+          generate_release_notes: false
+
+  changelog:
+    name: Update CHANGELOG.md on main
+    runs-on: ubuntu-latest
+    # Don't churn the committed changelog for pre-release tags.
+    if: ${{ !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      # Regenerate the full changelog from the complete tag history (the tag
+      # that triggered this run is already visible because we fetched it).
+      - name: Generate full CHANGELOG.md
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --output CHANGELOG.md
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG.md unchanged; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "docs(changelog): update for ${GITHUB_REF_NAME} [skip ci]"
+          git push origin HEAD:main
