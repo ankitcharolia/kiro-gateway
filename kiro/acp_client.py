@@ -413,13 +413,27 @@ class ACPClient:
                 "sessionId": session_id,
                 "prompt": prompt_blocks,
             }
+            # ACP reserves ``_meta`` for implementation-specific extension data,
+            # so forwarding sampling hints and client tool definitions there is
+            # schema-safe (a strict agent will not reject them).
+            meta: dict[str, Any] = {}
             gen_meta = self._generation_meta(params)
             if gen_meta:
-                # ACP reserves ``_meta`` for implementation-specific extension
-                # data, so forwarding sampling hints there is schema-safe (a
-                # strict agent will not reject them). kiro-cli 2.8.0 accepts the
-                # field but does not yet act on it — see _generation_meta.
-                prompt_params["_meta"] = {"generationConfig": gen_meta}
+                # kiro-cli 2.8.0 accepts but does not act on these — see
+                # _generation_meta.
+                meta["generationConfig"] = gen_meta
+            tool_meta = self._tool_meta(params)
+            if tool_meta:
+                # Client-declared tools. Verified against a live kiro-cli 2.8.0
+                # ACP probe: the agent does NOT honor client tools passed on
+                # session/prompt (it exposes only its own built-in tools and any
+                # MCP-server tools), so these are currently inert. They are
+                # forwarded under _meta so they reach kiro-cli and take effect
+                # automatically if a future version ingests them — see
+                # _tool_meta and the README "Tool execution" section.
+                meta["tools"] = tool_meta
+            if meta:
+                prompt_params["_meta"] = meta
             await self._send(JsonRpcRequest(
                 id=req_id,
                 method="session/prompt",
@@ -539,6 +553,54 @@ class ACPClient:
             "stopSequences": params.stop,
         }
         return {key: value for key, value in candidates.items() if value is not None}
+
+    @staticmethod
+    def _tool_meta(params: PromptParams) -> list[dict]:
+        """Translate client-declared tool definitions into an ACP ``_meta`` list.
+
+        Each tool is rendered as ``{"name", "description", "inputSchema"}`` —
+        the MCP/JSON-Schema tool shape — so the payload is ready for an agent
+        that ingests client tools.
+
+        Note:
+            Verified against a live ``kiro-cli`` 2.8.0 ACP probe: the agent does
+            **not** honor client-declared tools passed on ``session/prompt``
+            (neither a top-level ``tools`` field nor ``_meta.tools``). It exposes
+            only its own built-in tools plus any tools provided by **MCP servers**
+            registered at ``session/new`` (``mcpServers``; the agent advertises
+            ``mcpCapabilities.http: true``). In a probe the model replied that it
+            had no client tool available. These definitions are forwarded under
+            ``_meta`` anyway so they reach kiro-cli and take effect with no
+            gateway change if a future version ingests them — and so the wire
+            request faithfully carries the caller's intent. True client-side
+            function calling requires the MCP-bridge path (see the README
+            "Tool execution & permissions" section).
+
+        Args:
+            params: The prompt parameters carrying optional ``tools``.
+
+        Returns:
+            A list of tool dicts (``name``/``description``/``inputSchema``);
+            empty when the caller declared no tools.
+        """
+        tools = getattr(params, "tools", None)
+        if not tools:
+            return []
+        rendered: list[dict] = []
+        for tool in tools:
+            if hasattr(tool, "model_dump"):
+                tool = tool.model_dump()
+            if not isinstance(tool, dict):
+                continue
+            name = tool.get("name")
+            if not name:
+                continue
+            rendered.append({
+                "name": name,
+                "description": tool.get("description") or "",
+                "inputSchema": tool.get("input_schema") or tool.get("inputSchema") or {},
+            })
+        return rendered
 
     @staticmethod
     def _build_prompt_blocks(messages: list) -> list[dict]:

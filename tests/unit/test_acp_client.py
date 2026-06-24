@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 
 from kiro.acp_client import ACPClient
-from kiro.acp_models import PromptMessage, PromptParams
+from kiro.acp_models import PromptMessage, PromptParams, ACPToolDefinition
 
 # Capture the genuine new_session implementation at import time. The
 # session-scoped ``test_client`` fixture monkeypatches ``ACPClient.new_session``
@@ -553,6 +553,117 @@ class TestGenerationMeta:
         prompt_lines = [w for w in written if '"session/prompt"' in w]
         assert len(prompt_lines) == 1
         payload = json.loads(prompt_lines[0])
+        assert "_meta" not in payload["params"]
+
+
+class TestToolMeta:
+    """_tool_meta + prompt_stream _meta.tools payload (issue #31).
+
+    The live kiro-cli 2.8.0 probe proved the agent ignores client tools on
+    session/prompt; these tests assert the gateway still *forwards* them under
+    the schema-safe _meta extension (forward-compatible), not that kiro-cli
+    acts on them.
+    """
+
+    _TOOL = ACPToolDefinition(
+        name="get_weather",
+        description="Get current weather for a city.",
+        input_schema={"type": "object", "properties": {"city": {"type": "string"}},
+                      "required": ["city"]},
+    )
+
+    def test_tool_meta_renders_mcp_shape(self):
+        params = PromptParams(session_id="x", tools=[self._TOOL])
+        assert ACPClient._tool_meta(params) == [{
+            "name": "get_weather",
+            "description": "Get current weather for a city.",
+            "inputSchema": {"type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"]},
+        }]
+
+    def test_tool_meta_empty_when_no_tools(self):
+        assert ACPClient._tool_meta(PromptParams(session_id="x")) == []
+
+    @pytest.mark.asyncio
+    async def test_prompt_stream_forwards_tools_meta(self):
+        """session/prompt carries _meta.tools when the caller declares tools."""
+        client = ACPClient()
+        written: list[str] = []
+
+        async def fake_write_line(line: str) -> None:
+            written.append(line)
+
+        client._write_line = fake_write_line  # type: ignore[assignment]
+
+        params = PromptParams(
+            session_id="t1", messages=[PromptMessage(role="user", content="hi")],
+            tools=[self._TOOL],
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(
+            _drive_queue(client, "t1", [{"type": "done", "finish_reason": "stop", "usage": {}}])
+        )
+        _ = [event async for event in gen]
+        await feeder
+
+        payload = json.loads([w for w in written if '"session/prompt"' in w][0])
+        assert payload["params"]["_meta"]["tools"] == [{
+            "name": "get_weather",
+            "description": "Get current weather for a city.",
+            "inputSchema": {"type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"]},
+        }]
+
+    @pytest.mark.asyncio
+    async def test_prompt_stream_merges_tools_and_generation_meta(self):
+        """_meta carries both generationConfig and tools when both are set."""
+        client = ACPClient()
+        written: list[str] = []
+
+        async def fake_write_line(line: str) -> None:
+            written.append(line)
+
+        client._write_line = fake_write_line  # type: ignore[assignment]
+
+        params = PromptParams(
+            session_id="t2", messages=[PromptMessage(role="user", content="hi")],
+            temperature=0.3, tools=[self._TOOL],
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(
+            _drive_queue(client, "t2", [{"type": "done", "finish_reason": "stop", "usage": {}}])
+        )
+        _ = [event async for event in gen]
+        await feeder
+
+        meta = json.loads([w for w in written if '"session/prompt"' in w][0])["params"]["_meta"]
+        assert meta["generationConfig"] == {"temperature": 0.3}
+        assert meta["tools"][0]["name"] == "get_weather"
+
+    @pytest.mark.asyncio
+    async def test_prompt_stream_omits_tools_when_none(self):
+        """No tools → no _meta.tools key on the session/prompt payload."""
+        client = ACPClient()
+        written: list[str] = []
+
+        async def fake_write_line(line: str) -> None:
+            written.append(line)
+
+        client._write_line = fake_write_line  # type: ignore[assignment]
+
+        params = PromptParams(
+            session_id="t3", messages=[PromptMessage(role="user", content="hi")]
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(
+            _drive_queue(client, "t3", [{"type": "done", "finish_reason": "stop", "usage": {}}])
+        )
+        _ = [event async for event in gen]
+        await feeder
+
+        payload = json.loads([w for w in written if '"session/prompt"' in w][0])
         assert "_meta" not in payload["params"]
 
 
