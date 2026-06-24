@@ -445,3 +445,73 @@ class TestAnthropicShimAuth:
         """GET /anthropic/v1/models requires no key (discovery endpoint)."""
         response = sync_client.get("/anthropic/v1/models")
         assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Sampling-param forwarding (issue #32): the Anthropic shim forwards
+# temperature/max_tokens/top_p/top_k/stop_sequences in both modes.
+# ---------------------------------------------------------------------------
+
+class _RecordingShim:
+    """ShimService stand-in that records the kwargs each route passes."""
+
+    def __init__(self):
+        self.complete_kwargs: list[dict] = []
+        self.stream_kwargs: list[dict] = []
+
+    def available_models(self):
+        return []
+
+    async def complete(self, **kwargs):
+        self.complete_kwargs.append(kwargs)
+        return {
+            "content": "ok", "tool_calls": [],
+            "finish_reason": "stop",
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+
+    async def stream_tokens(self, **kwargs):
+        self.stream_kwargs.append(kwargs)
+        yield {"type": "text", "content": "ok"}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class TestAnthropicShimSamplingForwarding:
+    """temperature/max_tokens/top_p/top_k/stop_sequences reach ShimService."""
+
+    def test_messages_non_stream_forwards_params(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.6, "top_p": 0.9, "top_k": 40, "stop_sequences": ["\n\n"],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        kw = rec.complete_kwargs[0]
+        assert kw["temperature"] == 0.6
+        assert kw["max_tokens"] == 128
+        assert kw["top_p"] == 0.9
+        assert kw["top_k"] == 40
+        assert kw["stop"] == ["\n\n"]
+
+    def test_messages_stream_forwards_params(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.2, "top_p": 0.4, "top_k": 10, "stop_sequences": ["STOP"],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        kw = rec.stream_kwargs[0]
+        assert kw["temperature"] == 0.2
+        assert kw["max_tokens"] == 64
+        assert kw["top_p"] == 0.4
+        assert kw["top_k"] == 10
+        assert kw["stop"] == ["STOP"]

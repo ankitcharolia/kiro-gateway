@@ -167,6 +167,13 @@ class PromptParams(BaseModel):
     stream: bool = False
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
+    # Additional sampling params. kiro-cli (ACP) currently treats these as
+    # no-ops — see ACPClient._generation_meta — but they are plumbed through
+    # and forwarded so they reach kiro-cli and take effect automatically if a
+    # future version honors them.
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    stop: Optional[List[str]] = None
     tools: Optional[List[ACPToolDefinition]] = None
     tool_results: Optional[List[ACPToolResultBlock]] = None
 

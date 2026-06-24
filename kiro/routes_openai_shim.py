@@ -69,6 +69,9 @@ class OAIChatRequest(BaseModel):
     stream: bool = False
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    # stop may be a single string or a list of strings (OpenAI spec).
+    stop: Optional[Any] = None
     tools: Optional[list[OAITool]] = None
     # Gateway extensions (optional, ignored by standard clients)
     filesystem_roots: list[dict] = Field(default_factory=list)
@@ -131,6 +134,27 @@ def _get_shim(request: Request) -> ShimService:
     return request.app.state.shim_service
 
 
+def _normalize_stop(stop: Any) -> Optional[list[str]]:
+    """Normalise an OpenAI ``stop`` value to a list of strings or ``None``.
+
+    The OpenAI API accepts ``stop`` as a single string or a list of strings.
+
+    Args:
+        stop: The raw ``stop`` value (string, list, or ``None``).
+
+    Returns:
+        A list of non-empty stop strings, or ``None`` when nothing is set.
+    """
+    if stop is None:
+        return None
+    if isinstance(stop, str):
+        return [stop] if stop else None
+    if isinstance(stop, list):
+        cleaned = [str(s) for s in stop if s]
+        return cleaned or None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/models
 # ---------------------------------------------------------------------------
@@ -165,11 +189,12 @@ async def chat_completions(
     tools = [t.model_dump() for t in (body.tools or [])]
     fs_roots = [FilesystemRoot(**r) for r in body.filesystem_roots] if body.filesystem_roots else []
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
+    stop = _normalize_stop(body.stop)
 
     if body.stream:
         return StreamingResponse(
             _stream_response(shim, messages, body.model, body.max_tokens,
-                             body.temperature, tools, fs_roots, terminal),
+                             body.temperature, body.top_p, stop, tools, fs_roots, terminal),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -181,6 +206,8 @@ async def chat_completions(
             model=body.model,
             max_tokens=body.max_tokens,
             temperature=body.temperature,
+            top_p=body.top_p,
+            stop=stop,
             tools=tools,
             filesystem_roots=fs_roots,
             terminal=terminal,
@@ -220,6 +247,8 @@ async def _stream_response(
     model: str,
     max_tokens: Optional[int],
     temperature: Optional[float],
+    top_p: Optional[float],
+    stop: Optional[list[str]],
     tools: list[dict],
     fs_roots: list[FilesystemRoot],
     terminal: Optional[TerminalCapability],
@@ -262,6 +291,8 @@ async def _stream_response(
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
+            top_p=top_p,
+            stop=stop,
             tools=tools,
             filesystem_roots=fs_roots,
             terminal=terminal,
@@ -344,6 +375,7 @@ class OAIResponsesRequest(BaseModel):
     stream: bool = False
     max_output_tokens: Optional[int] = None
     temperature: Optional[float] = None
+    top_p: Optional[float] = None
     tools: Optional[list[dict]] = None
     # Gateway extensions (optional, ignored by standard clients)
     filesystem_roots: list[dict] = Field(default_factory=list)
@@ -460,7 +492,7 @@ async def create_response(
     if body.stream:
         return StreamingResponse(
             _responses_stream(shim, messages, body.model, body.max_output_tokens,
-                              body.temperature, tools, fs_roots, terminal),
+                              body.temperature, body.top_p, tools, fs_roots, terminal),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -471,6 +503,7 @@ async def create_response(
             model=body.model,
             max_tokens=body.max_output_tokens,
             temperature=body.temperature,
+            top_p=body.top_p,
             tools=tools,
             filesystem_roots=fs_roots,
             terminal=terminal,
@@ -496,6 +529,7 @@ async def _responses_stream(
     model: str,
     max_output_tokens: Optional[int],
     temperature: Optional[float],
+    top_p: Optional[float],
     tools: list[dict],
     fs_roots: list[FilesystemRoot],
     terminal: Optional[TerminalCapability],
@@ -545,6 +579,7 @@ async def _responses_stream(
             model=model,
             max_tokens=max_output_tokens,
             temperature=temperature,
+            top_p=top_p,
             tools=tools,
             filesystem_roots=fs_roots,
             terminal=terminal,

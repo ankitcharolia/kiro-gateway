@@ -345,6 +345,52 @@ http://localhost:8000/acp/chat/stream  # SSE streaming
 
 ---
 
+## Generation parameters
+
+Sampling parameters are accepted on both shims, validated, and **forwarded** to
+`kiro-cli` on every turn (streaming and non-streaming) inside the ACP
+`session/prompt` request, under the protocol's reserved `_meta` extension field:
+
+```jsonc
+"params": {
+  "sessionId": "…",
+  "prompt": [ … ],
+  "_meta": {
+    "generationConfig": {        // only the keys the caller set are included
+      "temperature": 0.2,
+      "maxTokens": 1024,
+      "topP": 0.9,
+      "topK": 40,
+      "stopSequences": ["\n\n"]
+    }
+  }
+}
+```
+
+| Client field | Forwarded as | OpenAI | Anthropic |
+|---|---|---|---|
+| `temperature` | `temperature` | ✓ | ✓ |
+| `max_tokens` / `max_output_tokens` | `maxTokens` | ✓ | ✓ |
+| `top_p` | `topP` | ✓ | ✓ |
+| `top_k` | `topK` | — | ✓ |
+| `stop` / `stop_sequences` | `stopSequences` | ✓ | ✓ |
+
+> [!IMPORTANT]
+> **kiro-cli currently treats these sampling parameters as no-ops.** Verified
+> against a live `kiro-cli` 2.8.0 ACP probe: the agent advertises no sampling
+> capability, accepts the values without error, and produces identical output
+> with or without them (`max_tokens` does not cap output, `stop` does not stop,
+> `temperature`/`top_p`/`top_k` have no effect). They are forwarded via `_meta`
+> (a schema-safe extension point) so they reach kiro-cli and take effect
+> automatically if a future version honors them — no gateway change required.
+>
+> The **one** per-request generation control kiro-cli honors today is the
+> **model** (`model` → `session/set_model`); see [Models](#modes). Other OpenAI
+> params (`seed`, `n`, `frequency_penalty`, `presence_penalty`, `logit_bias`)
+> are likewise not honored by ACP and are ignored.
+
+---
+
 ## Tool-call round-trips
 
 Both shims surface the tool activity that `kiro-cli` performs:

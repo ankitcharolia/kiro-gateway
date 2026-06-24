@@ -305,3 +305,89 @@ class TestOpenAIShimAuth:
         """GET /v1/models requires no key (discovery endpoint, per policy)."""
         response = sync_client.get("/v1/models")
         assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Sampling-param forwarding (issue #32): the OpenAI shim forwards
+# temperature/max_tokens/top_p/stop to ShimService in both modes.
+# ---------------------------------------------------------------------------
+
+class _RecordingShim:
+    """ShimService stand-in that records the kwargs each route passes."""
+
+    def __init__(self):
+        self.complete_kwargs: list[dict] = []
+        self.stream_kwargs: list[dict] = []
+
+    def available_models(self):
+        return []
+
+    async def complete(self, **kwargs):
+        self.complete_kwargs.append(kwargs)
+        return {
+            "content": "ok", "tool_calls": [],
+            "finish_reason": "stop",
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+
+    async def stream_tokens(self, **kwargs):
+        self.stream_kwargs.append(kwargs)
+        yield {"type": "text", "content": "ok"}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class TestOpenAIShimSamplingForwarding:
+    """temperature/max_tokens/top_p/stop reach ShimService for both modes."""
+
+    def test_chat_non_stream_forwards_params(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.3, "max_tokens": 64, "top_p": 0.8, "stop": "END",
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        kw = rec.complete_kwargs[0]
+        assert kw["temperature"] == 0.3
+        assert kw["max_tokens"] == 64
+        assert kw["top_p"] == 0.8
+        assert kw["stop"] == ["END"]  # string normalised to list
+
+    def test_chat_stream_forwards_params(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "temperature": 0.1, "max_tokens": 32, "top_p": 0.5, "stop": ["A", "B"],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        kw = rec.stream_kwargs[0]
+        assert kw["temperature"] == 0.1
+        assert kw["max_tokens"] == 32
+        assert kw["top_p"] == 0.5
+        assert kw["stop"] == ["A", "B"]
+
+    def test_responses_non_stream_forwards_top_p(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {"model": "claude-sonnet-4.6", "input": "hi",
+                   "temperature": 0.4, "max_output_tokens": 40, "top_p": 0.7}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        kw = rec.complete_kwargs[0]
+        assert kw["temperature"] == 0.4
+        assert kw["max_tokens"] == 40   # max_output_tokens → max_tokens
+        assert kw["top_p"] == 0.7
+
+    def test_responses_stream_forwards_top_p(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {"model": "claude-sonnet-4.6", "input": "hi", "stream": True, "top_p": 0.33}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        assert rec.stream_kwargs[0]["top_p"] == 0.33

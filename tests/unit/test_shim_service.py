@@ -339,3 +339,48 @@ async def test_stream_tokens_early_close_cancels_acp_session():
     cancels = [w for w in written if '"session/cancel"' in w]
     assert len(cancels) == 1
     assert '"sessionId": "svc-sess"' in cancels[0] or '"sessionId":"svc-sess"' in cancels[0]
+
+
+# ---------------------------------------------------------------------------
+# Sampling-param forwarding (issue #32): ShimService threads temperature,
+# max_tokens, top_p, top_k and stop into PromptParams for both modes.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_complete_forwards_sampling_params():
+    """complete() forwards every sampling param onto PromptParams."""
+    acp = StubACP([{"type": "text", "content": "hi"}, {"type": "done", "finish_reason": "stop"}])
+    svc = ShimService(acp)
+
+    await svc.complete(
+        [{"role": "user", "content": "hi"}],
+        model="m", max_tokens=10, temperature=0.3, top_p=0.8, top_k=5, stop=["X"],
+    )
+
+    p = acp.last_params
+    assert p.temperature == 0.3
+    assert p.max_tokens == 10
+    assert p.top_p == 0.8
+    assert p.top_k == 5
+    assert p.stop == ["X"]
+
+
+@pytest.mark.asyncio
+async def test_stream_tokens_forwards_sampling_params():
+    """stream_tokens() forwards every sampling param onto PromptParams."""
+    acp = StubACP([{"type": "text", "content": "hi"}, {"type": "done", "finish_reason": "stop"}])
+    svc = ShimService(acp)
+
+    _ = [
+        e async for e in svc.stream_tokens(
+            [{"role": "user", "content": "hi"}],
+            temperature=0.1, max_tokens=7, top_p=0.5, top_k=9, stop=["Z"],
+        )
+    ]
+
+    p = acp.last_params
+    assert p.temperature == 0.1
+    assert p.max_tokens == 7
+    assert p.top_p == 0.5
+    assert p.top_k == 9
+    assert p.stop == ["Z"]

@@ -456,3 +456,101 @@ class TestCancellation:
         client = ACPClient()
         client._schedule_cancel("")
         assert client._cancel_tasks == set()
+
+
+# ---------------------------------------------------------------------------
+# Generation-param forwarding (issue #32): prompt_stream attaches sampling
+# params under the ACP session/prompt _meta.generationConfig extension.
+# kiro-cli currently ignores them (verified via live probe) but they are
+# forwarded so a future version can honor them with no gateway change.
+# ---------------------------------------------------------------------------
+
+async def _drive_queue(client: ACPClient, session_id: str, events: list[dict]) -> None:
+    """Wait for prompt_stream to register its queue, then enqueue events."""
+    for _ in range(1000):
+        queue = client._event_queues.get(session_id)
+        if queue is not None:
+            for event in events:
+                queue.put_nowait(event)
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"queue for {session_id} never appeared")
+
+
+class TestGenerationMeta:
+    """_generation_meta + prompt_stream _meta payload."""
+
+    def test_generation_meta_only_includes_set_fields(self):
+        params = PromptParams(session_id="x", temperature=0.5, top_p=0.7)
+        meta = ACPClient._generation_meta(params)
+        assert meta == {"temperature": 0.5, "topP": 0.7}
+
+    def test_generation_meta_maps_all_fields(self):
+        params = PromptParams(
+            session_id="x", temperature=0.2, max_tokens=128, top_p=0.9, top_k=40, stop=["STOP"]
+        )
+        meta = ACPClient._generation_meta(params)
+        assert meta == {
+            "temperature": 0.2, "maxTokens": 128, "topP": 0.9, "topK": 40,
+            "stopSequences": ["STOP"],
+        }
+
+    def test_generation_meta_empty_when_unset(self):
+        params = PromptParams(session_id="x")
+        assert ACPClient._generation_meta(params) == {}
+
+    @pytest.mark.asyncio
+    async def test_prompt_stream_forwards_generation_meta(self):
+        """session/prompt carries _meta.generationConfig with the set params."""
+        client = ACPClient()
+        written: list[str] = []
+
+        async def fake_write_line(line: str) -> None:
+            written.append(line)
+
+        client._write_line = fake_write_line  # type: ignore[assignment]
+
+        params = PromptParams(
+            session_id="g1", messages=[PromptMessage(role="user", content="hi")],
+            temperature=0.2, max_tokens=128, top_p=0.9, top_k=40, stop=["STOP"],
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(
+            _drive_queue(client, "g1", [{"type": "done", "finish_reason": "stop", "usage": {}}])
+        )
+        _ = [event async for event in gen]
+        await feeder
+
+        prompt_lines = [w for w in written if '"session/prompt"' in w]
+        assert len(prompt_lines) == 1
+        payload = json.loads(prompt_lines[0])
+        assert payload["params"]["_meta"]["generationConfig"] == {
+            "temperature": 0.2, "maxTokens": 128, "topP": 0.9, "topK": 40,
+            "stopSequences": ["STOP"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_prompt_stream_omits_meta_when_no_params(self):
+        """No sampling params → no _meta key on the session/prompt payload."""
+        client = ACPClient()
+        written: list[str] = []
+
+        async def fake_write_line(line: str) -> None:
+            written.append(line)
+
+        client._write_line = fake_write_line  # type: ignore[assignment]
+
+        params = PromptParams(
+            session_id="g2", messages=[PromptMessage(role="user", content="hi")]
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(
+            _drive_queue(client, "g2", [{"type": "done", "finish_reason": "stop", "usage": {}}])
+        )
+        _ = [event async for event in gen]
+        await feeder
+
+        prompt_lines = [w for w in written if '"session/prompt"' in w]
+        assert len(prompt_lines) == 1
+        payload = json.loads(prompt_lines[0])
+        assert "_meta" not in payload["params"]

@@ -399,10 +399,21 @@ class ACPClient:
         prompt_sent = False
         completed = False
         try:
+            prompt_params: dict[str, Any] = {
+                "sessionId": session_id,
+                "prompt": prompt_blocks,
+            }
+            gen_meta = self._generation_meta(params)
+            if gen_meta:
+                # ACP reserves ``_meta`` for implementation-specific extension
+                # data, so forwarding sampling hints there is schema-safe (a
+                # strict agent will not reject them). kiro-cli 2.8.0 accepts the
+                # field but does not yet act on it — see _generation_meta.
+                prompt_params["_meta"] = {"generationConfig": gen_meta}
             await self._send(JsonRpcRequest(
                 id=req_id,
                 method="session/prompt",
-                params={"sessionId": session_id, "prompt": prompt_blocks},
+                params=prompt_params,
             ))
             prompt_sent = True
             while True:
@@ -485,6 +496,38 @@ class ACPClient:
         task = loop.create_task(self._cancel_quietly(session_id))
         self._cancel_tasks.add(task)
         task.add_done_callback(self._cancel_tasks.discard)
+
+    @staticmethod
+    def _generation_meta(params: PromptParams) -> dict[str, Any]:
+        """Translate sampling fields on ``PromptParams`` into an ACP ``_meta`` map.
+
+        Only fields the caller actually set are included, using ACP-style
+        camelCase keys.
+
+        Note:
+            Verified against a live ``kiro-cli`` 2.8.0 probe: the agent
+            advertises no sampling capability and ignores these values
+            (``maxTokens``, ``stopSequences``, ``temperature``, ``topP``,
+            ``topK``) — output is identical with or without them. They are
+            forwarded anyway so they reach kiro-cli and take effect with no
+            gateway change if a future version honors them. The only
+            per-request control kiro-cli currently honors is the model
+            (``session/set_model``).
+
+        Args:
+            params: The prompt parameters carrying optional sampling settings.
+
+        Returns:
+            A dict of the set sampling params (camelCase keys), possibly empty.
+        """
+        candidates = {
+            "temperature": params.temperature,
+            "maxTokens": params.max_tokens,
+            "topP": params.top_p,
+            "topK": params.top_k,
+            "stopSequences": params.stop,
+        }
+        return {key: value for key, value in candidates.items() if value is not None}
 
     @staticmethod
     def _build_prompt_blocks(messages: list) -> list[dict]:

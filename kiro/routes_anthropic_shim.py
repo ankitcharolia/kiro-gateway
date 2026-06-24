@@ -84,6 +84,9 @@ class AnthropicRequest(BaseModel):
     system: str | list | None = None
     max_tokens: int = 4096
     temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    stop_sequences: Optional[list[str]] = None
     tools: Optional[list[AnthropicTool]] = None
     stream: bool = False
     # Gateway extensions
@@ -226,11 +229,13 @@ async def create_message(
     tools = _anthropic_tools_to_acp(body.tools or [])
     fs_roots = [FilesystemRoot(**r) for r in body.filesystem_roots] if body.filesystem_roots else []
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
+    stop = body.stop_sequences or None
 
     if body.stream:
         return StreamingResponse(
             _stream_response(shim, messages, body.model, body.max_tokens,
-                             body.temperature, tools, fs_roots, terminal),
+                             body.temperature, body.top_p, body.top_k, stop,
+                             tools, fs_roots, terminal),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -241,6 +246,9 @@ async def create_message(
             model=body.model,
             max_tokens=body.max_tokens,
             temperature=body.temperature,
+            top_p=body.top_p,
+            top_k=body.top_k,
+            stop=stop,
             tools=tools,
             filesystem_roots=fs_roots,
             terminal=terminal,
@@ -283,6 +291,9 @@ async def _stream_response(
     model: str,
     max_tokens: int,
     temperature: Optional[float],
+    top_p: Optional[float],
+    top_k: Optional[int],
+    stop: Optional[list[str]],
     tools: list[dict],
     fs_roots: list[FilesystemRoot],
     terminal: Optional[TerminalCapability],
@@ -335,6 +346,9 @@ async def _stream_response(
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            stop=stop,
             tools=tools,
             filesystem_roots=fs_roots,
             terminal=terminal,
