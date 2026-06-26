@@ -23,6 +23,8 @@ _REAL_NEW_SESSION = ACPClient.new_session
 # exercise the real generator, not the session-scoped mock installed by the
 # ``test_client`` fixture.
 _REAL_PROMPT_STREAM = ACPClient.prompt_stream
+# Same reason — the fixture also patches ACPClient.prompt for the session.
+_REAL_PROMPT = ACPClient.prompt
 
 
 # ---------------------------------------------------------------------------
@@ -763,3 +765,38 @@ class TestACPUsageCapture:
         done = queue.get_nowait()
         # Result input_tokens overrides captured; captured output_tokens kept.
         assert done["usage"] == {"output_tokens": 1, "input_tokens": 99}
+
+
+# ---------------------------------------------------------------------------
+# Reasoning aggregation (issue #40): prompt() collects thinking deltas into a
+# `reasoning` field without affecting `content`.
+# ---------------------------------------------------------------------------
+
+class TestPromptReasoning:
+    """ACPClient.prompt() aggregates thinking events into result['reasoning']."""
+
+    @pytest.mark.asyncio
+    async def test_prompt_aggregates_reasoning(self):
+        client = ACPClient()
+
+        async def fake_stream(params):
+            yield {"type": "thinking", "content": "Let me "}
+            yield {"type": "thinking", "content": "think."}
+            yield {"type": "text", "content": "The answer is 42."}
+            yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+        client.prompt_stream = fake_stream  # type: ignore[assignment]
+        result = await _REAL_PROMPT(client, PromptParams(session_id="s"))
+        assert result["reasoning"] == "Let me think."
+        assert result["content"] == "The answer is 42."
+    @pytest.mark.asyncio
+    async def test_prompt_reasoning_empty_when_no_thinking(self):
+        client = ACPClient()
+
+        async def fake_stream(params):
+            yield {"type": "text", "content": "Hi."}
+            yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+        client.prompt_stream = fake_stream  # type: ignore[assignment]
+        result = await _REAL_PROMPT(client, PromptParams(session_id="s"))
+        assert result["reasoning"] == ""

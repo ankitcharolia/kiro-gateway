@@ -353,10 +353,11 @@ class ACPClient:
         and accumulates text / tool calls into a single response.
 
         Returns:
-            {"content": str, "tool_calls": list[dict],
+            {"content": str, "reasoning": str, "tool_calls": list[dict],
              "finish_reason": str, "usage": dict}
         """
         content_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_calls: list[dict] = []
         finish_reason = "stop"
         usage: dict[str, Any] = {}
@@ -365,6 +366,8 @@ class ACPClient:
             etype = event.get("type")
             if etype == "text":
                 content_parts.append(event.get("content", ""))
+            elif etype == "thinking":
+                thinking_parts.append(event.get("content", ""))
             elif etype == "tool_call":
                 tool_calls.append({
                     "id": event.get("id", ""),
@@ -383,6 +386,7 @@ class ACPClient:
 
         return {
             "content": "".join(content_parts),
+            "reasoning": "".join(thinking_parts),
             "tool_calls": tool_calls,
             "finish_reason": finish_reason,
             "usage": usage,

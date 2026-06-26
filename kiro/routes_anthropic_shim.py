@@ -310,6 +310,10 @@ async def create_message(
         return _anthropic_error_response(mapped)
 
     content_blocks: list[dict] = []
+    reasoning = result.get("reasoning") or ""
+    if settings.ACP_SURFACE_THINKING and reasoning:
+        # Anthropic extended-thinking block, emitted before the text block.
+        content_blocks.append({"type": "thinking", "thinking": reasoning})
     if result["content"]:
         content_blocks.append({"type": "text", "text": result["content"]})
     for tc in result.get("tool_calls", []):
@@ -383,6 +387,7 @@ async def _stream_response(
     )
     block_idx = 0
     in_text_block = False
+    in_thinking_block = False
     active_tool_blocks: dict[str, int] = {}  # tool_call_id -> block_index
     # Accumulators for the output-token estimate emitted at message_delta.
     text_acc: list[str] = []
@@ -429,6 +434,11 @@ async def _stream_response(
                 delta = event.get("content", "")
                 if not delta:
                     continue
+                if in_thinking_block:
+                    # Close the thinking block before the text block opens.
+                    yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
+                    block_idx += 1
+                    in_thinking_block = False
                 if not in_text_block:
                     yield sse("content_block_start", {
                         "type": "content_block_start",
@@ -444,7 +454,23 @@ async def _stream_response(
                 text_acc.append(delta)
 
             elif etype == "thinking":
-                # Reasoning is not surfaced on the Anthropic content stream.
+                # Surface reasoning as an Anthropic extended-thinking block
+                # (content_block_start[thinking] + thinking_delta), when enabled.
+                if settings.ACP_SURFACE_THINKING:
+                    delta = event.get("content", "")
+                    if delta:
+                        if not in_thinking_block:
+                            yield sse("content_block_start", {
+                                "type": "content_block_start",
+                                "index": block_idx,
+                                "content_block": {"type": "thinking", "thinking": ""},
+                            })
+                            in_thinking_block = True
+                        yield sse("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": block_idx,
+                            "delta": {"type": "thinking_delta", "thinking": delta},
+                        })
                 continue
 
             elif etype == "tool_call":
@@ -454,6 +480,11 @@ async def _stream_response(
                 collected_tool_calls[tc_id] = {"name": name, "arguments": arguments}
 
                 if tc_id not in active_tool_blocks:
+                    # Close the thinking block if open
+                    if in_thinking_block:
+                        yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
+                        block_idx += 1
+                        in_thinking_block = False
                     # Close the text block if open
                     if in_text_block:
                         yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
@@ -487,7 +518,9 @@ async def _stream_response(
                     block_idx += 1
 
             elif etype == "done":
-                # Close open text block
+                # Close open thinking or text block.
+                if in_thinking_block:
+                    yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
                 if in_text_block:
                     yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
 

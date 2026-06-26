@@ -198,8 +198,14 @@ translators emit OpenAI/Anthropic/ACP SSE.
   This is what the tests assert and the routes consume.
 - `stopReason` is normalised (`end_turn → stop`, `max_tokens → length`,
   `tool_use → tool_calls`); the Anthropic route maps `stop → end_turn` back.
-- `thinking` is **not** surfaced on the OpenAI/Anthropic content streams; it is
-  emitted as an event for native-ACP consumers.
+- `thinking` is surfaced in each API's **native reasoning shape** when
+  `ACP_SURFACE_THINKING` is true (default): OpenAI `reasoning_content` deltas /
+  `message.reasoning_content`; Responses `reasoning` output item +
+  `response.reasoning_summary_*` events; Anthropic `thinking` content block
+  (`content_block_start[thinking]` + `thinking_delta`). It is **additive** — the
+  final answer text is never changed — and `ACPClient.prompt` aggregates it into
+  `result["reasoning"]` for the non-streaming paths. The native `/acp/chat` route
+  always surfaces it as an `acp_thinking` event regardless of the flag.
 - `error` events carry the JSON-RPC `code`/`data` when available so
   `kiro.error_mapping` can classify them; non-streaming completions surface the
   same failure as an `ACPError(code, message, data)`.
@@ -301,6 +307,7 @@ take precedence over `.env`).
 | `KIRO_MODELS` | `auto,claude-opus-4.8,claude-sonnet-4.6` | Fallback `/v1/models` list before the live catalogue is discovered |
 | `ACP_TRUST_TOOLS` | `true` | Auto-approve (`true`) or reject (`false`) tool permission requests |
 | `ACP_SURFACE_TOOL_CALLS` | `false` | Expose kiro-cli's built-in tool calls to the OpenAI/Anthropic shims as `tool_calls`/`tool_use` (`true`) or suppress them so the shims return a clean completion (`false`, default). ACP-native route always surfaces. |
+| `ACP_SURFACE_THINKING` | `true` | Surface kiro-cli reasoning in each API's native shape (OpenAI `reasoning_content` / Responses reasoning items; Anthropic `thinking` blocks). Additive — final answer unchanged. `false` emits only the answer. |
 | `ACP_WORKSPACE_DIR` | process cwd | Default session `cwd` |
 | `ACP_TIMEOUT` | `120` | Seconds to await a JSON-RPC response |
 | `ACP_STDIO_MAX_BYTES` | `16777216` (16 MiB) | Max bytes per ACP stdout line; raise for very large tool outputs in long turns |

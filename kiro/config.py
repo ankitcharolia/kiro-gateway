@@ -104,6 +104,17 @@ ACP_SURFACE_TOOL_CALLS: bool = (
     os.environ.get("ACP_SURFACE_TOOL_CALLS", "false").lower() == "true"
 )
 
+# Whether to surface kiro-cli's reasoning/"thinking" output on the
+# OpenAI/Anthropic shims in each API's native reasoning shape (OpenAI
+# ``reasoning_content`` / Responses ``reasoning`` items; Anthropic ``thinking``
+# content blocks). Default true: reasoning is additive (it never changes the
+# final answer text) and lets reasoning-aware harnesses display it. Set false
+# to drop reasoning and emit only the final answer. The ACP-native route always
+# surfaces thinking as an ``acp_thinking`` event regardless.
+ACP_SURFACE_THINKING: bool = (
+    os.environ.get("ACP_SURFACE_THINKING", "true").lower() != "false"
+)
+
 # Default working directory for ACP sessions. Coding agents may override this
 # per-request via filesystem_roots; otherwise the gateway process cwd is used.
 ACP_WORKSPACE_DIR: str = os.environ.get("ACP_WORKSPACE_DIR", os.getcwd())
@@ -144,6 +155,7 @@ class _Settings:
     ACP_STDIO_MAX_BYTES: int = field(default_factory=lambda: ACP_STDIO_MAX_BYTES)
     ACP_TRUST_TOOLS: bool = field(default_factory=lambda: ACP_TRUST_TOOLS)
     ACP_SURFACE_TOOL_CALLS: bool = field(default_factory=lambda: ACP_SURFACE_TOOL_CALLS)
+    ACP_SURFACE_THINKING: bool = field(default_factory=lambda: ACP_SURFACE_THINKING)
     ACP_WORKSPACE_DIR: str = field(default_factory=lambda: ACP_WORKSPACE_DIR)
 
     # Feature flags (default enabled; override via env)

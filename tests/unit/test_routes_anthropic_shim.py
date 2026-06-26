@@ -913,3 +913,75 @@ class TestAnthropicShimToolSurfacingGate:
         resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
         assert '"tool_use"' in resp.text
         assert "Fetching web content" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Reasoning/thinking surfacing (issue #40): Anthropic thinking content blocks,
+# both modes, gated by ACP_SURFACE_THINKING (default true).
+# ---------------------------------------------------------------------------
+
+class _ThinkingACP:
+    """Stub ACP client whose turn includes reasoning then a final answer."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "The answer is 42.",
+            "reasoning": "Let me think about it.",
+            "tool_calls": [],
+            "finish_reason": "stop",
+            "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "thinking", "content": "Let me think "}
+        yield {"type": "thinking", "content": "about it."}
+        yield {"type": "text", "content": "The answer is 42."}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class TestAnthropicShimReasoning:
+    """thinking content blocks, non-streaming + streaming."""
+
+    _MSG = {
+        "model": "claude-sonnet-4.6", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "q"}],
+    }
+
+    def test_non_stream_surfaces_thinking_block(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _ShimService(_ThinkingACP())
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.status_code == 200
+        blocks = resp.json()["content"]
+        assert blocks[0]["type"] == "thinking"
+        assert blocks[0]["thinking"] == "Let me think about it."
+        # Text block follows and is unchanged.
+        assert any(b["type"] == "text" and b["text"] == "The answer is 42." for b in blocks)
+
+    def test_non_stream_suppressed_when_off(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_THINKING", False)
+        sync_client.app.state.shim_service = _ShimService(_ThinkingACP())
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        blocks = resp.json()["content"]
+        assert all(b["type"] != "thinking" for b in blocks)
+
+    def test_stream_surfaces_thinking_block(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _ShimService(_ThinkingACP())
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        body = resp.text
+        assert '"type": "thinking"' in body          # content_block_start[thinking]
+        assert '"type": "thinking_delta"' in body
+        assert '"type": "text_delta"' in body          # final text still streamed
+
+    def test_stream_suppressed_when_off(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_THINKING", False)
+        sync_client.app.state.shim_service = _ShimService(_ThinkingACP())
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert '"thinking_delta"' not in resp.text
+        assert '"type": "text_delta"' in resp.text

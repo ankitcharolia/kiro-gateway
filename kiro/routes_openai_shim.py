@@ -309,6 +309,17 @@ async def chat_completions(
         completion_tool_calls=result.get("tool_calls"),
     )
 
+    reasoning = result.get("reasoning") or ""
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": result["content"] if not tool_calls else None,
+        "tool_calls": tool_calls if tool_calls else None,
+    }
+    if settings.ACP_SURFACE_THINKING and reasoning:
+        # DeepSeek/OpenAI-compatible reasoning convention; final ``content`` is
+        # unchanged. Clients that don't read it simply ignore the field.
+        message["reasoning_content"] = reasoning
+
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
@@ -316,11 +327,7 @@ async def chat_completions(
         "model": body.model,
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": result["content"] if not tool_calls else None,
-                "tool_calls": tool_calls if tool_calls else None,
-            },
+            "message": message,
             # logprobs are unsupported by the ACP path; reported as null.
             "logprobs": None,
             "finish_reason": finish_reason,
@@ -403,8 +410,13 @@ async def _stream_response(
                     yield chunk({"content": delta})
 
             elif etype == "thinking":
-                # Reasoning is not emitted on the OpenAI surface to keep the
-                # assistant message clean; clients receive only final content.
+                # Reasoning is surfaced as a separate `reasoning_content` delta
+                # (DeepSeek/OpenAI-compatible convention) when enabled; the
+                # final `content` stream is unaffected.
+                if settings.ACP_SURFACE_THINKING:
+                    delta = event.get("content", "")
+                    if delta:
+                        yield chunk({"reasoning_content": delta})
                 continue
 
             elif etype == "tool_call":
@@ -578,9 +590,17 @@ def _build_response_object(
     tool_calls: list[dict],
     usage: dict,
     status: str = "completed",
+    reasoning: str = "",
 ) -> dict:
     """Assemble a Responses API ``response`` object from aggregated output."""
     output: list[dict] = []
+    if reasoning and settings.ACP_SURFACE_THINKING:
+        # Reasoning item comes first, mirroring the OpenAI Responses ordering.
+        output.append({
+            "type": "reasoning",
+            "id": f"rs_{uuid.uuid4().hex[:24]}",
+            "summary": [{"type": "summary_text", "text": reasoning}],
+        })
     if text:
         output.append({
             "type": "message",
@@ -668,6 +688,7 @@ async def create_response(
         text=text,
         tool_calls=result.get("tool_calls", []),
         usage=usage,
+        reasoning=result.get("reasoning") or "",
     )
 
 
@@ -699,6 +720,12 @@ async def _responses_stream(
     output_index = 0
     # tool_call_id -> output_index
     tool_output_index: dict[str, int] = {}
+    # Reasoning ("thinking") item state — emitted first, at output_index 0.
+    reasoning_item_id = f"rs_{uuid.uuid4().hex[:24]}"
+    reasoning_parts: list[str] = []
+    reasoning_item_open = False
+    reasoning_used = False
+    reasoning_oidx = 0
 
     def sse(event: str, data: dict) -> str:
         nonlocal seq
@@ -716,6 +743,27 @@ async def _responses_stream(
             "model": model,
             "output": [],
         }
+
+    async def close_reasoning():
+        """Emit the terminal reasoning-summary events if the item is open."""
+        nonlocal reasoning_item_open
+        if not reasoning_item_open:
+            return
+        full = "".join(reasoning_parts)
+        yield sse("response.reasoning_summary_text.done", {
+            "item_id": reasoning_item_id, "output_index": reasoning_oidx,
+            "summary_index": 0, "text": full,
+        })
+        yield sse("response.reasoning_summary_part.done", {
+            "item_id": reasoning_item_id, "output_index": reasoning_oidx,
+            "summary_index": 0, "part": {"type": "summary_text", "text": full},
+        })
+        yield sse("response.output_item.done", {
+            "output_index": reasoning_oidx,
+            "item": {"type": "reasoning", "id": reasoning_item_id,
+                     "summary": [{"type": "summary_text", "text": full}]},
+        })
+        reasoning_item_open = False
 
     # response.created + in_progress
     yield sse("response.created", {"response": base_response("in_progress")})
@@ -740,6 +788,12 @@ async def _responses_stream(
                 if not delta:
                     continue
                 if not text_item_open:
+                    async for _ev in close_reasoning():
+                        yield _ev
+                    if reasoning_used:
+                        # Reasoning occupied output_index 0; the message item
+                        # takes the next index.
+                        output_index += 1
                     yield sse("response.output_item.added", {
                         "output_index": output_index,
                         "item": {
@@ -760,10 +814,37 @@ async def _responses_stream(
                 })
 
             elif etype == "thinking":
-                # Reasoning is not surfaced on the Responses output stream.
+                # Surface reasoning as a Responses ``reasoning`` output item with
+                # streamed summary text, when enabled. Final output_text is
+                # unaffected.
+                if settings.ACP_SURFACE_THINKING:
+                    delta = event.get("content", "")
+                    if delta:
+                        if not reasoning_item_open:
+                            reasoning_oidx = output_index
+                            reasoning_used = True
+                            reasoning_item_open = True
+                            yield sse("response.output_item.added", {
+                                "output_index": reasoning_oidx,
+                                "item": {"type": "reasoning", "id": reasoning_item_id,
+                                         "summary": []},
+                            })
+                            yield sse("response.reasoning_summary_part.added", {
+                                "item_id": reasoning_item_id, "output_index": reasoning_oidx,
+                                "summary_index": 0,
+                                "part": {"type": "summary_text", "text": ""},
+                            })
+                        reasoning_parts.append(delta)
+                        yield sse("response.reasoning_summary_text.delta", {
+                            "item_id": reasoning_item_id, "output_index": reasoning_oidx,
+                            "summary_index": 0, "delta": delta,
+                        })
                 continue
 
             elif etype == "tool_call":
+                # Close any open reasoning item before tool output.
+                async for _ev in close_reasoning():
+                    yield _ev
                 # Close the text item first if it is open.
                 if text_item_open:
                     full_text = "".join(text_parts)
@@ -819,6 +900,9 @@ async def _responses_stream(
                     })
 
             elif etype == "done":
+                # Close any open reasoning item (e.g. a reasoning-only turn).
+                async for _ev in close_reasoning():
+                    yield _ev
                 # Close a still-open text item.
                 if text_item_open:
                     full_text = "".join(text_parts)
@@ -858,6 +942,7 @@ async def _responses_stream(
                     text=final_text,
                     tool_calls=final_tool_calls,
                     usage=usage,
+                    reasoning="".join(reasoning_parts),
                 )
                 yield sse("response.completed", {"response": final})
                 break

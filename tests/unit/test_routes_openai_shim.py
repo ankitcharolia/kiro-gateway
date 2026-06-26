@@ -850,3 +850,91 @@ class TestOpenAIShimToolSurfacingGate:
         resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
         assert '"tool_calls"' in resp.text
         assert "Fetching web content" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Reasoning/thinking surfacing (issue #40): reasoning is surfaced in each API's
+# native shape, gated by ACP_SURFACE_THINKING (default true); final content is
+# unchanged.
+# ---------------------------------------------------------------------------
+
+class _ThinkingACP:
+    """Stub ACP client whose turn includes reasoning then a final answer."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "The answer is 42.",
+            "reasoning": "Let me think about it.",
+            "tool_calls": [],
+            "finish_reason": "stop",
+            "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "thinking", "content": "Let me think "}
+        yield {"type": "thinking", "content": "about it."}
+        yield {"type": "text", "content": "The answer is 42."}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class TestOpenAIShimReasoning:
+    """reasoning_content (chat) and reasoning items (Responses), both modes."""
+
+    _CHAT = {"model": "claude-sonnet-4.6", "messages": [{"role": "user", "content": "q"}]}
+
+    def test_chat_non_stream_surfaces_reasoning_content(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_ThinkingACP())
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.status_code == 200
+        msg = resp.json()["choices"][0]["message"]
+        assert msg["reasoning_content"] == "Let me think about it."
+        assert msg["content"] == "The answer is 42."   # final text unchanged
+
+    def test_chat_non_stream_suppressed_when_off(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_THINKING", False)
+        sync_client.app.state.shim_service = _ShimService(_ThinkingACP())
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        msg = resp.json()["choices"][0]["message"]
+        assert "reasoning_content" not in msg
+        assert msg["content"] == "The answer is 42."
+
+    def test_chat_stream_surfaces_reasoning_content(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_ThinkingACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert '"reasoning_content"' in resp.text
+        assert "Let me think " in resp.text
+        assert "The answer is 42." in resp.text
+
+    def test_chat_stream_suppressed_when_off(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_THINKING", False)
+        sync_client.app.state.shim_service = _ShimService(_ThinkingACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert '"reasoning_content"' not in resp.text
+        assert "The answer is 42." in resp.text
+
+    def test_responses_non_stream_includes_reasoning_item(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_ThinkingACP())
+        resp = sync_client.post(
+            "/v1/responses", json={"model": "claude-sonnet-4.6", "input": "q"},
+            headers=openai_headers,
+        )
+        output = resp.json()["output"]
+        reasoning_items = [o for o in output if o["type"] == "reasoning"]
+        assert reasoning_items
+        assert reasoning_items[0]["summary"][0]["text"] == "Let me think about it."
+        assert resp.json()["output_text"] == "The answer is 42."
+
+    def test_responses_stream_emits_reasoning_summary(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_ThinkingACP())
+        payload = {"model": "claude-sonnet-4.6", "input": "q", "stream": True}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert "event: response.reasoning_summary_text.delta" in resp.text
+        assert "event: response.output_text.delta" in resp.text
+        assert "event: response.completed" in resp.text

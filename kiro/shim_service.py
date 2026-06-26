@@ -285,8 +285,9 @@ class ShimService:
         if isinstance(result, dict):
             return {
                 "content": result.get("content", ""),
+                "reasoning": result.get("reasoning", ""),
                 "tool_calls": result.get("tool_calls", []),
                 "finish_reason": result.get("finish_reason", "stop"),
                 "usage": result.get("usage", {}),
             }
-        return {"content": str(result), "tool_calls": [], "finish_reason": "stop", "usage": {}}
+        return {"content": str(result), "reasoning": "", "tool_calls": [], "finish_reason": "stop", "usage": {}}

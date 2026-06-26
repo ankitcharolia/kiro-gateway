@@ -266,6 +266,11 @@ ACP_TRUST_TOOLS=true
 # for ACP-aware UIs that just display tool activity (the native /acp/chat route
 # always surfaces it).
 ACP_SURFACE_TOOL_CALLS=false
+# Surface kiro-cli's reasoning/"thinking" in each API's native reasoning shape
+# (OpenAI reasoning_content / Responses reasoning items; Anthropic thinking
+# blocks). Default true — reasoning is additive and never changes the final
+# answer. Set false to emit only the final answer.
+ACP_SURFACE_THINKING=true
 ACP_WORKSPACE_DIR=               # Default session cwd (defaults to process cwd)
 ACP_TIMEOUT=120                  # Seconds to await a JSON-RPC response
 ACP_STDIO_MAX_BYTES=16777216     # Max bytes per ACP stdout line (16 MiB) — raise
@@ -347,7 +352,7 @@ http://localhost:8000/acp/chat/stream  # SSE streaming
 |---|---|---|
 | `text` | `delta.content` chunk | `content_block_delta[text_delta]` |
 | `tool_call` | `delta.tool_calls` chunk | `content_block_start[tool_use]` + `input_json_delta` |
-| `thinking` | `delta.content` chunk | `content_block_delta[text_delta]` |
+| `thinking` | `delta.reasoning_content` chunk (Responses: `response.reasoning_summary_text.delta`) | `content_block_start[thinking]` + `thinking_delta` |
 | `done` | `[DONE]` + `finish_reason` | `message_delta` + `message_stop` |
 | `error` | error chunk + `[DONE]` | `error` event |
 
@@ -403,6 +408,32 @@ system messages are kept distinct rather than merged.
 > kiro-cli treats the whole serialised prompt as one turn; these labels make
 > the system/developer instructions legible to the agent without inventing a
 > system channel the protocol does not expose.
+
+---
+
+## Reasoning / thinking
+
+kiro-cli emits reasoning ("thinking") while it works. The gateway surfaces it
+in **each API's native reasoning shape** so reasoning-aware harnesses (Kilo
+Code, Oh My Pi, Claude Code, …) can display it. Reasoning is **additive — the
+final answer text is never changed** — and is gated by `ACP_SURFACE_THINKING`
+(default `true`; set `false` to emit only the final answer).
+
+| API / mode | Reasoning surface |
+|---|---|
+| OpenAI `/v1/chat/completions` (stream) | `choices[].delta.reasoning_content` chunks (DeepSeek/OpenAI-compatible convention) |
+| OpenAI `/v1/chat/completions` (non-stream) | `choices[].message.reasoning_content` |
+| OpenAI `/v1/responses` (stream) | a `reasoning` output item + `response.reasoning_summary_part.added` / `response.reasoning_summary_text.delta` / `…done` events |
+| OpenAI `/v1/responses` (non-stream) | a `{"type": "reasoning", "summary": [{"type": "summary_text", …}]}` item in `output` |
+| Anthropic `/v1/messages` (stream) | `content_block_start[thinking]` + `content_block_delta[thinking_delta]` + `content_block_stop` (before the text block) |
+| Anthropic `/v1/messages` (non-stream) | a `{"type": "thinking", "thinking": …}` content block (before the text block) |
+
+- The Anthropic `thinking` blocks are emitted **without a cryptographic
+  `signature`** (kiro-cli does not provide one over ACP), so they are suitable
+  for **display**; they are not intended to be signed/replayed back on a
+  follow-up tool turn.
+- The native `/acp/chat` route always surfaces reasoning as an `acp_thinking`
+  event regardless of this flag.
 
 ---
 
