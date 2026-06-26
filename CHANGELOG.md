@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.1.3 (2026-06-26)
+
+### Features
+
+* **reasoning:** surface kiro-cli thinking in each API's native shape ([#40](https://github.com/ankitcharolia/kiro-gateway/pull/40)) ([4303ae0](https://github.com/ankitcharolia/kiro-gateway/commit/4303ae02fd55426efbf6ead9fdbcd5131107909d))
+* **plan:** surface kiro-cli's task list, gated by ACP_SURFACE_THINKING ([bc45e75](https://github.com/ankitcharolia/kiro-gateway/commit/bc45e7559af044313811baa9e9aa55f64f3281a4))
+* **tools:** surface built-in tool activity as inline reasoning (kiro-cli-like) ([f84d1b3](https://github.com/ankitcharolia/kiro-gateway/commit/f84d1b3bd856eeea077dc7f750ddf7605d2c32f4))
+* **tools:** surface file-edit diffs and shell command+output as activity ([487bfc9](https://github.com/ankitcharolia/kiro-gateway/commit/487bfc9ac1d01a0aa1e2cd7cf567f954878fcf9c))
+* **tools:** structured tool-activity rendering (bold label, args, search summaries) ([5f66a4f](https://github.com/ankitcharolia/kiro-gateway/commit/5f66a4f04680e55275a8c7a7c0845014086e64d4))
+
+### Documentation
+
+* **changelog:** update for v2.1.2 [skip ci] ([7dbfa90](https://github.com/ankitcharolia/kiro-gateway/commit/7dbfa90a2adae75c5cdd13525e5e0bd5d977a3c4))
+* **reasoning:** clarify that thinking display is model-dependent ([#40](https://github.com/ankitcharolia/kiro-gateway/pull/40)) ([3e97c31](https://github.com/ankitcharolia/kiro-gateway/commit/3e97c311eb87f152774fbe19016430be6b7e53d9))
+* **examples:** set opus default, fix hermes streaming, clean up configs ([5372a6e](https://github.com/ankitcharolia/kiro-gateway/commit/5372a6eee08bcfc1932215317f70b9fa110367b7))
+* **examples:** restore thinking variants in kilo/opencode configs with advisory note ([f9b0353](https://github.com/ankitcharolia/kiro-gateway/commit/f9b0353b25a5a7e8ab633af60334042623854846))
+
+
+### ❤️ Thanks to our contributors
+
+* @github-actions[bot]
+
 ## 2.1.2 (2026-06-24)
 
 ### Features
