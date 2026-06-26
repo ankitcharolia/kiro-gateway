@@ -993,3 +993,40 @@ class TestOpenAIShimPlan:
         resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
         assert "event: response.reasoning_summary_text.delta" in resp.text
         assert "Write the file" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Built-in tool ACTIVITY surfaced as inline reasoning (default behavior, kiro-cli
+# like) — interleaved, non-executable. Uses _ToolEmittingACP defined above.
+# ---------------------------------------------------------------------------
+
+class TestOpenAIShimToolActivityReasoning:
+    """With defaults, tool activity appears as reasoning_content, not tool_calls."""
+
+    _CHAT = {"model": "claude-sonnet-4.6", "messages": [{"role": "user", "content": "weather?"}]}
+
+    def test_chat_stream_activity_as_reasoning(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert '"reasoning_content"' in resp.text
+        assert "Fetching web content" in resp.text
+        assert '"tool_calls"' not in resp.text         # not executable
+        assert "Berlin is sunny." in resp.text          # answer still streamed
+
+    def test_chat_non_stream_activity_in_reasoning(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        msg = resp.json()["choices"][0]["message"]
+        assert "Fetching web content" in (msg.get("reasoning_content") or "")
+        assert msg.get("tool_calls") is None
+        assert msg["content"] == "Berlin is sunny."
+
+    def test_chat_stream_activity_dropped_when_thinking_off(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_THINKING", False)
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert "Fetching web content" not in resp.text
+        assert '"tool_calls"' not in resp.text
+        assert "Berlin is sunny." in resp.text

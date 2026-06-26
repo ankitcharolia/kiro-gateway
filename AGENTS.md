@@ -163,12 +163,17 @@ Two distinct cases — do not conflate them:
   produced a `tool_call` (`kind: execute`), one `session/request_permission`
   (auto-approved), and the marker in the response. Harnesses drive these and get
   the final answer. **By default the shims do NOT surface this activity as
-  `tool_calls`/`tool_use`** (`ACP_SURFACE_TOOL_CALLS=false`) — emitting kiro-cli's
-  own tools as client-executable calls breaks harnesses that validate tool names
-  ("unavailable tool") or loop on `finish_reason=tool_calls`. `ShimService`
-  filters `tool_call` events / empties `tool_calls` unless surfacing is on; the
-  native `/acp/chat` route always surfaces. Keep `ACP_TRUST_TOOLS=true` (run the
-  tools) independent of `ACP_SURFACE_TOOL_CALLS` (show the calls).
+  `tool_calls`/`tool_use`** (`ACP_SURFACE_TOOL_CALLS=false`) — instead each tool
+  run is folded into the reasoning channel as an inline, non-executable activity
+  label (`format_tool_activity`, interleaved with thinking, gated by
+  `ACP_SURFACE_THINKING`), mirroring kiro-cli's activity view, so harnesses that
+  validate tool names don't error ("unavailable tool") or loop on
+  `finish_reason=tool_calls`. `ShimService` converts `tool_call` events →
+  `thinking` (stream) / folds names into `reasoning` (non-stream) when
+  `surface_tool_calls` is off; passes them through when on. The native
+  `/acp/chat` route always surfaces a structured `acp_tool_call`. Keep
+  `ACP_TRUST_TOOLS=true` (run the tools) independent of `ACP_SURFACE_TOOL_CALLS`
+  (how the calls are shown).
 - **Client-declared tools (the harness's own functions): NOT honored by
   kiro-cli.** Tool defs on `session/prompt` (top-level `tools` **and**
   `_meta.tools`) are accepted but ignored — the probe model said it had no such
@@ -314,7 +319,7 @@ take precedence over `.env`).
 | `KIRO_CLI_PATH` | `kiro-cli` | Path/name of the Kiro CLI binary |
 | `KIRO_MODELS` | `auto,claude-opus-4.8,claude-sonnet-4.6` | Fallback `/v1/models` list before the live catalogue is discovered |
 | `ACP_TRUST_TOOLS` | `true` | Auto-approve (`true`) or reject (`false`) tool permission requests |
-| `ACP_SURFACE_TOOL_CALLS` | `false` | Expose kiro-cli's built-in tool calls to the OpenAI/Anthropic shims as `tool_calls`/`tool_use` (`true`) or suppress them so the shims return a clean completion (`false`, default). ACP-native route always surfaces. |
+| `ACP_SURFACE_TOOL_CALLS` | `false` | How the shims present kiro-cli's built-in tool activity: `false` (default) = inline non-executable reasoning text (interleaved, needs `ACP_SURFACE_THINKING`); `true` = executable `tool_calls`/`tool_use`. ACP-native route always emits a structured `acp_tool_call`. |
 | `ACP_SURFACE_THINKING` | `true` | Surface kiro-cli reasoning in each API's native shape (OpenAI `reasoning_content` / Responses reasoning items; Anthropic `thinking` blocks). Additive — final answer unchanged. `false` emits only the answer. |
 | `ACP_WORKSPACE_DIR` | process cwd | Default session `cwd` |
 | `ACP_TIMEOUT` | `120` | Seconds to await a JSON-RPC response |

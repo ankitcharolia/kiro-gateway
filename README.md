@@ -260,11 +260,11 @@ KIRO_MODELS=auto,claude-opus-4.8,claude-sonnet-4.6
 # asks the gateway for permission first. true = auto-approve each request,
 # false = reject (read/answer-only posture).
 ACP_TRUST_TOOLS=true
-# Expose kiro-cli's own built-in tool calls to the OpenAI/Anthropic shims as
-# executable tool_calls/tool_use? Default false — kiro-cli runs them itself and
-# returns the final answer, so the shims work with every harness. Enable only
-# for ACP-aware UIs that just display tool activity (the native /acp/chat route
-# always surfaces it).
+# How the shims present kiro-cli's own built-in tool activity. Default false =
+# inline, non-executable reasoning text (interleaved with thinking, like
+# kiro-cli; needs ACP_SURFACE_THINKING=true) — works with every harness. true =
+# executable tool_calls/tool_use (only for ACP-aware UIs that just display
+# activity). The native /acp/chat route always surfaces a structured tool call.
 ACP_SURFACE_TOOL_CALLS=false
 # Surface kiro-cli's reasoning/"thinking" in each API's native reasoning shape
 # (OpenAI reasoning_content / Responses reasoning items; Anthropic thinking
@@ -351,7 +351,7 @@ http://localhost:8000/acp/chat/stream  # SSE streaming
 | ACP event | OpenAI SSE | Anthropic SSE |
 |---|---|---|
 | `text` | `delta.content` chunk | `content_block_delta[text_delta]` |
-| `tool_call` | `delta.tool_calls` chunk | `content_block_start[tool_use]` + `input_json_delta` |
+| `tool_call` | folded into `reasoning_content` by default; `delta.tool_calls` chunk when `ACP_SURFACE_TOOL_CALLS=true` | folded into a `thinking` block by default; `content_block_start[tool_use]` + `input_json_delta` when surfacing |
 | `thinking` | `delta.reasoning_content` chunk (Responses: `response.reasoning_summary_text.delta`) | `content_block_start[thinking]` + `thinking_delta` |
 | `plan` (task list) | folded into `reasoning_content` (Responses reasoning item) | folded into a `thinking` block |
 | `done` | `[DONE]` + `finish_reason` | `message_delta` + `message_stop` |
@@ -572,10 +572,11 @@ feature.
 >    `echo <marker>` produced a `tool_call` (`kind: execute`), one
 >    `session/request_permission` (auto-approved `allow_once`), and the marker
 >    appeared in the streamed response. So harnesses **can** drive kiro-cli's
->    built-in agentic toolset through the gateway. By default the shims present
->    the result as a normal completion (the tool activity is **not** surfaced as
->    executable `tool_calls`/`tool_use` — see `ACP_SURFACE_TOOL_CALLS` below);
->    harnesses never execute these tools themselves.
+>    built-in agentic toolset through the gateway. By default the shims surface
+>    that activity as **inline, non-executable reasoning text** (interleaved with
+>    thinking, like kiro-cli's activity view — see `ACP_SURFACE_TOOL_CALLS`
+>    below), so harnesses see what the agent is doing but never receive a tool
+>    call they cannot execute.
 > 2. **Client-declared tools (the harness's own functions) — not honored by
 >    kiro-cli today.** Definitions sent on `session/prompt` (whether as a
 >    top-level `tools` field or under `_meta.tools`) are accepted without error
@@ -590,15 +591,20 @@ feature.
 >    client-side function calling does not round-trip through kiro-cli today.**
 >    See [issue #31](https://github.com/ankitcharolia/kiro-gateway/issues/31).
 
-**By default the shims do not surface kiro-cli's built-in tool activity as
-executable `tool_calls`/`tool_use`** (`ACP_SURFACE_TOOL_CALLS=false`). kiro-cli
-runs the tools itself and streams the finished answer, so a harness receives a
-normal completion (`finish_reason=stop` / `end_turn`) — never a tool call for a
-tool it didn't declare and can't run. This is what makes the gateway work with
-every harness out of the box.
+**By default (`ACP_SURFACE_TOOL_CALLS=false`) the shims surface kiro-cli's
+built-in tool activity as inline, non-executable reasoning** — each tool run
+(e.g. `⚙ Fetching web content`, `⚙ Reading config.py`, `⚙ Running: …`) is folded
+into the reasoning channel (`reasoning_content` / Responses reasoning item /
+Anthropic `thinking` block), **interleaved with the model's thinking and before
+the answer**, mirroring kiro-cli's activity view. The harness still receives a
+normal completion (`finish_reason=stop` / `end_turn`) — never an executable tool
+call it can't run — so this works with every harness. This surfacing rides the
+`ACP_SURFACE_THINKING` flag (set it `false` to drop activity + thinking and emit
+only the answer). Live interleaving requires **streaming**; a non-streaming
+response returns the activity/thinking and answer together at the end.
 
 When `ACP_SURFACE_TOOL_CALLS=true` (opt-in, for ACP-aware UIs that just display
-activity), the round-trip is:
+activity), the tool activity is instead emitted as executable-shaped events:
 
 1. `kiro-cli` decides to run one of its built-in tools and asks the gateway for
    permission via `session/request_permission`.
@@ -634,11 +640,12 @@ ACP_WORKSPACE_DIR=/path  # working directory kiro-cli operates in (default: proc
 ```
 
 > **Surfacing vs. execution.** `ACP_TRUST_TOOLS` controls whether kiro-cli is
-> *allowed to run* its built-in tools; `ACP_SURFACE_TOOL_CALLS` (default
-> `false`) controls whether that activity is *shown* to the OpenAI/Anthropic
-> shims as `tool_calls`/`tool_use`. Keep `ACP_TRUST_TOOLS=true` so the agent can
-> use its full toolset, and leave `ACP_SURFACE_TOOL_CALLS=false` so harnesses
-> receive a clean completion instead of a tool call they cannot execute.
+> *allowed to run* its built-in tools; `ACP_SURFACE_TOOL_CALLS` controls *how*
+> that activity is shown to the OpenAI/Anthropic shims. Keep
+> `ACP_TRUST_TOOLS=true` so the agent can use its full toolset. With
+> `ACP_SURFACE_TOOL_CALLS=false` (default) the activity is shown as inline
+> reasoning text (interleaved, non-executable) so every harness works; set it
+> `true` only for ACP-aware UIs that want executable `tool_calls`/`tool_use`.
 
 > **Security:** with `ACP_TRUST_TOOLS=true` the agent can write files and run
 > commands in `ACP_WORKSPACE_DIR` without human confirmation. Use `false` for a

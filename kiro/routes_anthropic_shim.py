@@ -302,6 +302,7 @@ async def create_message(
             filesystem_roots=fs_roots,
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
+            surface_thinking=settings.ACP_SURFACE_THINKING,
         )
     except Exception as exc:
         mapped = classify_exception(exc)
@@ -428,6 +429,7 @@ async def _stream_response(
             filesystem_roots=fs_roots,
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
+            surface_thinking=settings.ACP_SURFACE_THINKING,
         ):
             etype = event.get("type")
             if etype == "plan":

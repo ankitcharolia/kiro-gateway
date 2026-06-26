@@ -99,6 +99,29 @@ def format_plan_text(entries: list, description: str = "") -> str:
     return "\n".join(lines)
 
 
+def format_tool_activity(name: str) -> str:
+    """Render a built-in tool call as a one-line activity label for the reasoning
+    channel.
+
+    kiro-cli's tool ``name`` is already a human-readable title
+    (e.g. ``"Reading config.py"``, ``"Running: echo hi"``,
+    ``"Fetching web content"``). The OpenAI/Anthropic shims fold this into the
+    reasoning stream — interleaved with thinking — so harnesses see what the
+    agent is doing (like kiro-cli's activity view) without receiving a
+    client-executable tool call they cannot run.
+
+    Args:
+        name: The tool-call title/name.
+
+    Returns:
+        A labelled line (with surrounding newlines), or ``""`` when blank.
+    """
+    name = (name or "").strip()
+    if not name:
+        return ""
+    return f"\n⚙ {name}\n"
+
+
 class ACPError(Exception):
     """Raised when the agent returns a JSON-RPC error response."""
 

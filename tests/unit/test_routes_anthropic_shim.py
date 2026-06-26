@@ -890,7 +890,9 @@ class TestAnthropicShimToolSurfacingGate:
         body = resp.json()
         assert all(b["type"] != "tool_use" for b in body["content"])
         assert body["stop_reason"] == "end_turn"
-        assert body["content"][0]["text"] == "Berlin is sunny."
+        # Built-in tool activity is now folded into a thinking block (not a
+        # tool_use); the answer text is unchanged and still present.
+        assert any(b["type"] == "text" and b["text"] == "Berlin is sunny." for b in body["content"])
 
     def test_non_stream_optin_surfaces_tool_use(self, sync_client, anthropic_headers, monkeypatch):
         monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
@@ -1036,3 +1038,34 @@ class TestAnthropicShimPlan:
         assert '"thinking_delta"' not in resp.text
         assert "Write the file" not in resp.text
         assert '"type": "text_delta"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Built-in tool ACTIVITY surfaced as inline thinking (default, kiro-cli-like).
+# Uses _ToolEmittingACP defined above.
+# ---------------------------------------------------------------------------
+
+class TestAnthropicShimToolActivityReasoning:
+    """With defaults, tool activity appears as a thinking block, not tool_use."""
+
+    _MSG = {
+        "model": "claude-sonnet-4.6", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "weather?"}],
+    }
+
+    def test_stream_activity_as_thinking(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert '"type": "thinking_delta"' in resp.text
+        assert "Fetching web content" in resp.text
+        assert '"tool_use"' not in resp.text
+        assert '"type": "text_delta"' in resp.text
+
+    def test_non_stream_activity_in_thinking_block(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        blocks = resp.json()["content"]
+        assert any(b["type"] == "thinking" and "Fetching web content" in b["thinking"] for b in blocks)
+        assert all(b["type"] != "tool_use" for b in blocks)
+        assert any(b["type"] == "text" and b["text"] == "Berlin is sunny." for b in blocks)

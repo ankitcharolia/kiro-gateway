@@ -460,3 +460,66 @@ async def test_complete_keeps_tool_calls_when_on():
     svc = ShimService(acp)
     result = await svc.complete([{"role": "user", "content": "read"}], surface_tool_calls=True)
     assert result["tool_calls"] and result["tool_calls"][0]["name"] == "read_file"
+
+
+# ---------------------------------------------------------------------------
+# Tool activity surfaced as inline reasoning (interleaved, non-executable) when
+# tool calls aren't surfaced as executable — kiro-cli-like activity view.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stream_tool_call_becomes_reasoning_when_off():
+    """surface_tool_calls=False + surface_thinking=True → tool_call → thinking label."""
+    acp = StubACP([
+        {"type": "text", "content": "Looking… "},
+        {"type": "tool_call", "id": "c1", "name": "Fetching web content", "arguments": {}},
+        {"type": "text", "content": "Berlin is sunny."},
+        {"type": "done", "finish_reason": "stop"},
+    ])
+    svc = ShimService(acp)
+    events = await collect_stream(
+        svc.stream_tokens([{"role": "user", "content": "weather?"}],
+                          surface_tool_calls=False, surface_thinking=True)
+    )
+    assert not any(e.get("type") == "tool_call" for e in events)
+    thinking = [e for e in events if e.get("type") == "thinking"]
+    assert thinking and "Fetching web content" in thinking[0]["content"]
+    # Interleaved: text before and after the activity, in order.
+    types = [e["type"] for e in events if e["type"] in ("text", "thinking")]
+    assert types == ["text", "thinking", "text"]
+
+
+@pytest.mark.asyncio
+async def test_stream_tool_call_dropped_when_thinking_off():
+    """surface_tool_calls=False + surface_thinking=False → tool_call dropped entirely."""
+    acp = StubACP([
+        {"type": "tool_call", "id": "c1", "name": "Fetching web content", "arguments": {}},
+        {"type": "text", "content": "Answer."},
+        {"type": "done", "finish_reason": "stop"},
+    ])
+    svc = ShimService(acp)
+    events = await collect_stream(
+        svc.stream_tokens([{"role": "user", "content": "q"}],
+                          surface_tool_calls=False, surface_thinking=False)
+    )
+    assert not any(e.get("type") in ("tool_call", "thinking") for e in events)
+
+
+@pytest.mark.asyncio
+async def test_complete_folds_tool_activity_into_reasoning_when_off():
+    acp = StubACP(
+        [{"type": "done", "finish_reason": "stop"}],
+        prompt_result={
+            "content": "Berlin is sunny.",
+            "reasoning": "",
+            "finish_reason": "stop",
+            "tool_calls": [{"id": "c1", "name": "Fetching web content", "arguments": {}}],
+            "usage": {},
+        },
+    )
+    svc = ShimService(acp)
+    result = await svc.complete([{"role": "user", "content": "weather?"}],
+                                surface_tool_calls=False, surface_thinking=True)
+    assert result["tool_calls"] == []
+    assert "Fetching web content" in result["reasoning"]
+    assert result["content"] == "Berlin is sunny."

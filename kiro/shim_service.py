@@ -24,7 +24,7 @@ from typing import Any, AsyncIterator, Optional
 
 from loguru import logger
 
-from kiro.acp_client import ACPClient
+from kiro.acp_client import ACPClient, format_tool_activity
 from kiro.acp_models import (
     PromptParams, PromptMessage,
     ToolResult,
@@ -131,22 +131,25 @@ class ShimService:
         filesystem_roots: Optional[list[FilesystemRoot]] = None,
         terminal: Optional[TerminalCapability] = None,
         surface_tool_calls: bool = True,
+        surface_thinking: bool = True,
     ) -> dict[str, Any]:
         """
         Run a full non-streaming completion.
 
         Args:
-            surface_tool_calls: When ``False``, kiro-cli's own built-in tool
-                calls are not exposed in the result (``tool_calls`` is emptied).
-                kiro-cli still runs those tools internally and the final text is
-                unaffected — they are simply not presented as client-executable
-                tool calls. Used by the OpenAI/Anthropic shims (default off via
-                ``ACP_SURFACE_TOOL_CALLS``) so harnesses are not asked to execute
-                tools they never declared. The ACP-native route leaves this
-                ``True``.
+            surface_tool_calls: When ``True``, kiro-cli's built-in tool calls are
+                returned in ``tool_calls`` for the caller to present as
+                executable calls. When ``False`` (the shim default) they are not
+                returned as executable calls; instead, when ``surface_thinking``
+                is set, each is folded into ``reasoning`` as a one-line activity
+                label so the agent's tool activity is visible (like kiro-cli)
+                without a call the harness cannot run. kiro-cli executes the
+                tools internally regardless; the final ``content`` is unchanged.
+            surface_thinking: Whether the reasoning channel (thinking + folded
+                tool activity) is surfaced.
 
         Returns:
-            {"content": str, "tool_calls": list[dict],
+            {"content": str, "reasoning": str, "tool_calls": list[dict],
              "finish_reason": str, "usage": dict}
         """
         session_id = await self._new_session(filesystem_roots, terminal, model)
@@ -165,6 +168,13 @@ class ShimService:
         result = await self._acp.prompt(params)
         normalized = self._normalize_result(result)
         if not surface_tool_calls:
+            tool_calls = normalized.get("tool_calls") or []
+            if surface_thinking and tool_calls:
+                labels = "".join(
+                    format_tool_activity(tc.get("name", "")) for tc in tool_calls
+                )
+                if labels:
+                    normalized["reasoning"] = (normalized.get("reasoning") or "") + labels
             normalized["tool_calls"] = []
         return normalized
 
@@ -185,21 +195,27 @@ class ShimService:
         filesystem_roots: Optional[list[FilesystemRoot]] = None,
         terminal: Optional[TerminalCapability] = None,
         surface_tool_calls: bool = True,
+        surface_thinking: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
         """
         Stream normalised ACP events to the caller as they arrive.
 
         Each yielded item is a plain dict with a ``type`` of ``text``,
-        ``thinking``, ``tool_call``, ``done`` or ``error``.
+        ``thinking``, ``tool_call``, ``plan``, ``done`` or ``error``.
 
         Args:
-            surface_tool_calls: When ``False``, ``tool_call`` events (kiro-cli's
-                own built-in tool activity) are filtered out of the stream.
-                kiro-cli still executes those tools internally and the streamed
-                ``text``/``done`` events are unaffected. The OpenAI/Anthropic
-                shims pass ``False`` by default (``ACP_SURFACE_TOOL_CALLS``) so a
-                harness is never handed a tool call it cannot execute; the
-                ACP-native route leaves this ``True``.
+            surface_tool_calls: When ``True``, kiro-cli's built-in ``tool_call``
+                events pass through so the caller can present them as
+                executable ``tool_calls``/``tool_use`` (or, on the ACP route, a
+                structured ``acp_tool_call``). When ``False`` (the shim default),
+                they are **not** passed through as executable calls — instead,
+                when ``surface_thinking`` is set, each is converted into an inline
+                ``thinking`` event (a one-line activity label) so harnesses see
+                the agent's tool activity interleaved with its reasoning, like
+                kiro-cli, without a tool call they cannot execute. Dropped when
+                both are ``False``.
+            surface_thinking: Whether kiro-cli's reasoning channel (thinking +
+                folded tool activity) is surfaced.
         """
         session_id = await self._new_session(filesystem_roots, terminal, model)
         params = PromptParams(
@@ -215,7 +231,11 @@ class ShimService:
             stream=True,
         )
         async for event in self._acp.prompt_stream(params):
-            if not surface_tool_calls and event.get("type") == "tool_call":
+            if event.get("type") == "tool_call" and not surface_tool_calls:
+                if surface_thinking:
+                    label = format_tool_activity(event.get("name", ""))
+                    if label:
+                        yield {"type": "thinking", "content": label}
                 continue
             yield event
 
