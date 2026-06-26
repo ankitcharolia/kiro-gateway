@@ -5,8 +5,11 @@
 //     kiro-cli emits thinking for opus but NOT for claude-sonnet-4.6 (verified).
 //   - Kilo Code streams by default — no extra setting needed.
 //   - The gateway surfaces reasoning as Anthropic thinking blocks
-//     (ACP_SURFACE_THINKING=true, the gateway default). budgetTokens values
-//     below are advisory only — kiro-cli decides based on the model.
+//     (ACP_SURFACE_THINKING=true, the gateway default).
+//
+// NOTE: thinking.budgetTokens variants are forwarded to kiro-cli under _meta
+// but are advisory only — kiro-cli decides based on the model, not the budget.
+// They are kept for forward-compatibility and for Kilo Code's variant picker UI.
 {
   "$schema": "https://kilo.ai/config.json",
   "provider": {
@@ -21,7 +24,13 @@
         "claude-opus-4.8": {
           "name": "Claude Opus 4.8 (thinking)",
           "contextWindow": 1000000,
-          "maxTokens": 32000
+          "maxTokens": 32000,
+          "variants": {
+            "low":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 4000  } } },
+            "medium": { "options": { "thinking": { "type": "enabled", "budgetTokens": 8000  } } },
+            "high":   { "options": { "thinking": { "type": "enabled", "budgetTokens": 16000 } } },
+            "max":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 32000 } } }
+          }
         },
         "claude-sonnet-4.6": {
           "name": "Claude Sonnet 4.6",

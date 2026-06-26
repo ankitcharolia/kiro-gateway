@@ -2,6 +2,10 @@
 //
 // OpenCode streams by default — no extra config needed for live reasoning display.
 // Use claude-opus-4.8 to see thinking; kiro-cli does NOT emit thinking for sonnet.
+//
+// NOTE: thinking.budgetTokens / outputConfig.effort variants are forwarded to
+// kiro-cli under _meta but are advisory only — kiro-cli decides based on the
+// model. They are kept for forward-compatibility and the OpenCode variant picker.
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
@@ -15,7 +19,13 @@
       "models": {
         "claude-opus-4.8": {
           "name": "Claude Opus 4.8 (thinking)",
-          "limit": { "context": 1000000, "output": 32000 }
+          "limit": { "context": 1000000, "output": 32000 },
+          "variants": {
+            "low":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 4000  } } },
+            "medium": { "options": { "thinking": { "type": "enabled", "budgetTokens": 8000  } } },
+            "high":   { "options": { "thinking": { "type": "enabled", "budgetTokens": 16000 } } },
+            "max":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 32000 } } }
+          }
         },
         "claude-sonnet-4.6": {
           "name": "Claude Sonnet 4.6",
