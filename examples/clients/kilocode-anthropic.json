@@ -1,11 +1,12 @@
 // Put this configuration in ~/.config/kilo/kilo.jsonc
 //
-// Reasoning/"thinking" display is MODEL-DEPENDENT: kiro-cli emits thinking for
-// `claude-opus-4.8` but not for `claude-sonnet-4.6` (verified). Select the
-// opus model to see reasoning. The `thinking.budgetTokens` values below are
-// advisory — kiro-cli decides whether to think based on the model, not the
-// budget — and the gateway surfaces it as Anthropic `thinking` blocks
-// (requires ACP_SURFACE_THINKING=true, the gateway default).
+// IMPORTANT — for thinking/reasoning + tool-activity display:
+//   - Select "Claude Opus 4.8" in Kilo Code's model picker.
+//     kiro-cli emits thinking for opus but NOT for claude-sonnet-4.6 (verified).
+//   - Kilo Code streams by default — no extra setting needed.
+//   - The gateway surfaces reasoning as Anthropic thinking blocks
+//     (ACP_SURFACE_THINKING=true, the gateway default). budgetTokens values
+//     below are advisory only — kiro-cli decides based on the model.
 {
   "$schema": "https://kilo.ai/config.json",
   "provider": {
@@ -17,38 +18,20 @@
         "apiKey": "change-me"
       },
       "models": {
+        "claude-opus-4.8": {
+          "name": "Claude Opus 4.8 (thinking)",
+          "contextWindow": 1000000,
+          "maxTokens": 32000
+        },
         "claude-sonnet-4.6": {
           "name": "Claude Sonnet 4.6",
           "contextWindow": 1000000,
-          "maxTokens": 64000,
-          "variants": {
-            "low":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 4000  } } },
-            "medium": { "options": { "thinking": { "type": "enabled", "budgetTokens": 8000  } } },
-            "high":   { "options": { "thinking": { "type": "enabled", "budgetTokens": 16000 } } },
-            "max":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 32000 } } }
-          }
-        },
-        "claude-opus-4.8": {
-          "name": "Claude Opus 4.8",
-          "contextWindow": 1000000,
-          "maxTokens": 32000,
-          "variants": {
-            "low":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 4000  } } },
-            "medium": { "options": { "thinking": { "type": "enabled", "budgetTokens": 8000  } } },
-            "high":   { "options": { "thinking": { "type": "enabled", "budgetTokens": 16000 } } },
-            "max":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 32000 } } }
-          }
+          "maxTokens": 64000
         },
         "auto": {
           "name": "Auto",
           "contextWindow": 1000000,
-          "maxTokens": 64000,
-          "variants": {
-            "low":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 4000  } } },
-            "medium": { "options": { "thinking": { "type": "enabled", "budgetTokens": 8000  } } },
-            "high":   { "options": { "thinking": { "type": "enabled", "budgetTokens": 16000 } } },
-            "max":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 32000 } } }
-          }
+          "maxTokens": 64000
         }
       }
     }

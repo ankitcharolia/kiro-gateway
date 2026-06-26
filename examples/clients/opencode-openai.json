@@ -1,4 +1,7 @@
 // Put this configuration in ~/.config/opencode/opencode.json
+//
+// OpenCode streams by default — no extra config needed for live reasoning display.
+// Use claude-opus-4.8 to see thinking; kiro-cli does NOT emit thinking for sonnet.
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
@@ -10,26 +13,13 @@
         "apiKey": "change-me"
       },
       "models": {
+        "claude-opus-4.8": {
+          "name": "Claude Opus 4.8 (thinking)",
+          "limit": { "context": 1000000, "output": 32000 }
+        },
         "claude-sonnet-4.6": {
           "name": "Claude Sonnet 4.6",
-          "limit": { "context": 1000000, "output": 64000 },
-          "variants": {
-            "low":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 4000  } } },
-            "medium": { "options": { "thinking": { "type": "enabled", "budgetTokens": 8000  } } },
-            "high":   { "options": { "thinking": { "type": "enabled", "budgetTokens": 16000 } } },
-            "max":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 32000 } } }
-          }
-        },
-        "claude-opus-4.8": {
-          "name": "Claude Opus 4.8",
-          "limit": { "context": 1000000, "output": 32000 },
-          "variants": {
-            "low":    { "options": { "outputConfig": { "effort": "low"    } } },
-            "medium": { "options": { "outputConfig": { "effort": "medium" } } },
-            "high":   { "options": { "outputConfig": { "effort": "high"   } } },
-            "xhigh":  { "options": { "outputConfig": { "effort": "xhigh"  } } },
-            "max":    { "options": { "outputConfig": { "effort": "max"    } } }
-          }
+          "limit": { "context": 1000000, "output": 64000 }
         },
         "auto": {
           "name": "Auto",

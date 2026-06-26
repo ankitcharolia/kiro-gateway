@@ -7,9 +7,9 @@
         "apiKey": "change-me",
         "api": "anthropic-messages",
         "models": [
+          { "id": "claude-opus-4.8",   "name": "Claude Opus 4.8 (thinking)" },
           { "id": "claude-sonnet-4.6", "name": "Claude Sonnet 4.6" },
-          { "id": "claude-opus-4.8",   "name": "Claude Opus 4.8"   },
-          { "id": "auto",              "name": "Auto"               }
+          { "id": "auto",              "name": "Auto" }
         ]
       }
     }
@@ -17,12 +17,12 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "kiro/claude-sonnet-4.6",
-        "fallbacks": ["kiro/auto"]
+        "primary": "kiro/claude-opus-4.8",
+        "fallbacks": ["kiro/claude-sonnet-4.6", "kiro/auto"]
       },
       "models": {
-        "kiro/claude-sonnet-4.6": { "alias": "sonnet" },
         "kiro/claude-opus-4.8":   { "alias": "opus"   },
+        "kiro/claude-sonnet-4.6": { "alias": "sonnet" },
         "kiro/auto":              { "alias": "auto"   }
       }
     }
