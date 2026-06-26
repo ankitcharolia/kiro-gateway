@@ -436,6 +436,19 @@ final answer text is never changed** — and is gated by `ACP_SURFACE_THINKING`
 - The native `/acp/chat` route always surfaces reasoning as an `acp_thinking`
   event regardless of this flag.
 
+> [!IMPORTANT]
+> **Not seeing any reasoning?** Reasoning is only surfaced when `kiro-cli`
+> actually emits it, which is **model-dependent**. Verified against a live
+> `kiro-cli` 2.8.0 probe: **`claude-opus-4.8` emits thinking** (16
+> `reasoning_content` chunks on a reasoning prompt) while **`claude-sonnet-4.6`
+> emits none** (0 chunks on the same prompt). So select a thinking-capable model
+> (e.g. `claude-opus-4.8`) in your harness. Per-request "thinking budget" /
+> `reasoning_effort` fields are **advisory only** — `kiro-cli` decides whether
+> to think based on the model, not on those client params (the gateway forwards
+> them under `_meta`, but they are not honored today). Trivial prompts may also
+> produce no thinking even on a thinking-capable model. None of this affects the
+> final answer.
+
 ### Task list / plan
 
 kiro-cli expresses a multi-step **task list** through its built-in todo tool

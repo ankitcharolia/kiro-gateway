@@ -1,4 +1,11 @@
 // Put this configuration in ~/.config/kilo/kilo.jsonc
+//
+// Reasoning/"thinking" display is MODEL-DEPENDENT: kiro-cli emits thinking for
+// `claude-opus-4.8` but not for `claude-sonnet-4.6` (verified). Select the
+// opus model to see reasoning. The `thinking.budgetTokens` values below are
+// advisory — kiro-cli decides whether to think based on the model, not the
+// budget — and the gateway surfaces it as Anthropic `thinking` blocks
+// (requires ACP_SURFACE_THINKING=true, the gateway default).
 {
   "$schema": "https://kilo.ai/config.json",
   "provider": {

@@ -6,6 +6,11 @@
 # `apiKey` is read as an environment variable name first; if no such variable
 # exists the literal string is used as the token. Replace `change-me` with your
 # KIRO_GATEWAY_API_KEY value, or set it to the env var name `KIRO_GATEWAY_API_KEY`.
+#
+# Reasoning/"thinking" is MODEL-DEPENDENT: kiro-cli emits it for claude-opus-4.8
+# but not for claude-sonnet-4.6 (verified). Use the opus model to see reasoning
+# (the gateway surfaces it via reasoning_content when ACP_SURFACE_THINKING=true,
+# the default). `reasoning: true` below just tells Oh My Pi to display it.
 providers:
   kiro:
     baseUrl: http://127.0.0.1:8000/v1
