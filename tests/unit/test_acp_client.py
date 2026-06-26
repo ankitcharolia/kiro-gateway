@@ -914,3 +914,115 @@ class TestPlanDetection:
         assert "Plan — Job" in result["reasoning"]
         assert "[ ] Step 1" in result["reasoning"]
         assert result["content"] == "Done."
+
+
+# ---------------------------------------------------------------------------
+# File-edit diffs + shell command/output surfaced as reasoning activity.
+# ---------------------------------------------------------------------------
+
+from kiro.acp_client import render_tool_activity, render_tool_call_summary
+
+
+class TestToolActivityRendering:
+    """render_tool_activity / render_tool_call_summary + notification enrichment."""
+
+    def test_edit_tool_call_renders_diff(self):
+        ev = {"type": "tool_call", "name": "Editing x.txt", "kind": "edit",
+              "content": [{"type": "diff", "path": "/x.txt", "oldText": "banana", "newText": "blueberry"}]}
+        out = render_tool_activity(ev)
+        assert "⚙ Editing x.txt" in out
+        assert "```diff" in out
+        assert "-banana" in out
+        assert "+blueberry" in out
+
+    def test_create_tool_call_renders_added_lines(self):
+        ev = {"type": "tool_call", "name": "Creating x.txt", "kind": "edit",
+              "content": [{"type": "diff", "path": "/x.txt", "oldText": None, "newText": "a\nb\n"}]}
+        out = render_tool_activity(ev)
+        assert "+a" in out and "+b" in out
+        assert "-" not in out.replace("⚙", "").replace("diff", "")  # no removed lines
+
+    def test_shell_tool_call_shows_command(self):
+        out = render_tool_activity({"type": "tool_call", "name": "Running: echo hi", "kind": "execute", "content": []})
+        assert "⚙ Running: echo hi" in out
+
+    def test_shell_update_shows_output(self):
+        out = render_tool_activity({"type": "tool_call_update", "name": "Running: echo hi",
+                                    "kind": "execute", "output": "hi"})
+        assert "```" in out and "hi" in out
+
+    def test_read_update_output_suppressed(self):
+        # File reads must not dump their (potentially huge) content into reasoning.
+        out = render_tool_activity({"type": "tool_call_update", "name": "Reading big.txt",
+                                    "kind": "read", "output": "X" * 10000})
+        assert out == ""
+
+    def test_output_truncated(self):
+        out = render_tool_activity({"type": "tool_call_update", "name": "Running: cat big",
+                                    "kind": "execute", "output": "Y" * 9000})
+        assert "truncated" in out
+        assert len(out) < 5000
+
+    def test_summary_combines_label_diff_output(self):
+        out = render_tool_call_summary({
+            "name": "Running: ls", "kind": "execute", "output": "a\nb",
+            "content": [],
+        })
+        assert "⚙ Running: ls" in out and "a\nb" in out
+
+    def test_extract_tool_output(self):
+        assert ACPClient._extract_tool_output({"items": [{"Text": "l1"}, {"Text": "l2"}]}) == "l1\nl2"
+        assert ACPClient._extract_tool_output(None) == ""
+
+    def test_handle_notification_tool_call_carries_diff(self):
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["s"] = queue
+        client._handle_notification({
+            "method": "session/update",
+            "params": {"sessionId": "s", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "t1",
+                "title": "Editing x.txt", "kind": "edit",
+                "content": [{"type": "diff", "path": "/x.txt", "oldText": "a", "newText": "b"}],
+                "rawInput": {"command": "edit"},
+            }},
+        })
+        ev = queue.get_nowait()
+        assert ev["type"] == "tool_call"
+        assert ev["kind"] == "edit"
+        assert ev["content"][0]["newText"] == "b"
+
+    def test_handle_notification_emits_tool_call_update_with_output(self):
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["s"] = queue
+        client._handle_notification({
+            "method": "session/update",
+            "params": {"sessionId": "s", "update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "t2",
+                "title": "Running: echo hi", "kind": "execute", "status": "completed",
+                "rawOutput": {"items": [{"Text": "hi"}]},
+            }},
+        })
+        ev = queue.get_nowait()
+        assert ev["type"] == "tool_call_update"
+        assert ev["kind"] == "execute"
+        assert ev["output"] == "hi"
+
+    @pytest.mark.asyncio
+    async def test_prompt_aggregates_diff_and_output(self):
+        client = ACPClient()
+
+        async def fake_stream(params):
+            yield {"type": "tool_call", "id": "c1", "name": "Running: ls", "kind": "execute",
+                   "arguments": {}, "content": []}
+            yield {"type": "tool_call_update", "id": "c1", "name": "Running: ls", "kind": "execute",
+                   "output": "file1\nfile2", "content": []}
+            yield {"type": "text", "content": "Done."}
+            yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+        client.prompt_stream = fake_stream  # type: ignore[assignment]
+        result = await _REAL_PROMPT(client, PromptParams(session_id="s"))
+        tc = result["tool_calls"][0]
+        assert tc["kind"] == "execute"
+        assert tc["output"] == "file1\nfile2"

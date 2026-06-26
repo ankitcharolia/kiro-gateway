@@ -164,12 +164,14 @@ Two distinct cases — do not conflate them:
   (auto-approved), and the marker in the response. Harnesses drive these and get
   the final answer. **By default the shims do NOT surface this activity as
   `tool_calls`/`tool_use`** (`ACP_SURFACE_TOOL_CALLS=false`) — instead each tool
-  run is folded into the reasoning channel as an inline, non-executable activity
-  label (`format_tool_activity`, interleaved with thinking, gated by
-  `ACP_SURFACE_THINKING`), mirroring kiro-cli's activity view, so harnesses that
+  run is folded into the reasoning channel as inline, non-executable activity
+  (`render_tool_activity` / `render_tool_call_summary`, interleaved with thinking,
+  gated by `ACP_SURFACE_THINKING`), mirroring kiro-cli's activity view — including
+  a fenced ```diff block for file edits (added/removed lines) and a fenced output
+  block for shell/`execute` tools (file reads show only the label). Harnesses that
   validate tool names don't error ("unavailable tool") or loop on
-  `finish_reason=tool_calls`. `ShimService` converts `tool_call` events →
-  `thinking` (stream) / folds names into `reasoning` (non-stream) when
+  `finish_reason=tool_calls`. `ShimService` converts `tool_call`/`tool_call_update`
+  events → `thinking` (stream) / folds them into `reasoning` (non-stream) when
   `surface_tool_calls` is off; passes them through when on. The native
   `/acp/chat` route always surfaces a structured `acp_tool_call`. Keep
   `ACP_TRUST_TOOLS=true` (run the tools) independent of `ACP_SURFACE_TOOL_CALLS`
@@ -195,7 +197,8 @@ translators emit OpenAI/Anthropic/ACP SSE.
 |---|---|---|
 | `{"type": "text"}` | `content: str` | `agent_message_chunk` |
 | `{"type": "thinking"}` | `content: str` | `agent_thought_chunk` |
-| `{"type": "tool_call"}` | `id, name, arguments: dict` | `tool_call` |
+| `{"type": "tool_call"}` | `id, name, kind, arguments: dict, content: list` | `tool_call` |
+| `{"type": "tool_call_update"}` | `id, name, kind, status, output: str, content: list` | `tool_call_update` |
 | `{"type": "plan"}` | `entries: [{content, status}], description: str` | `tool_call` (kiro-cli's built-in todo/task-list tool) |
 | `{"type": "done"}` | `finish_reason: str, usage: dict` | prompt result `stopReason` |
 | `{"type": "error"}` | `message: str`, optional `code: int`, `data: Any` | JSON-RPC error / subprocess exit |

@@ -24,7 +24,7 @@ from typing import Any, AsyncIterator, Optional
 
 from loguru import logger
 
-from kiro.acp_client import ACPClient, format_tool_activity
+from kiro.acp_client import ACPClient, render_tool_activity, render_tool_call_summary
 from kiro.acp_models import (
     PromptParams, PromptMessage,
     ToolResult,
@@ -171,7 +171,7 @@ class ShimService:
             tool_calls = normalized.get("tool_calls") or []
             if surface_thinking and tool_calls:
                 labels = "".join(
-                    format_tool_activity(tc.get("name", "")) for tc in tool_calls
+                    render_tool_call_summary(tc) for tc in tool_calls
                 )
                 if labels:
                     normalized["reasoning"] = (normalized.get("reasoning") or "") + labels
@@ -231,9 +231,10 @@ class ShimService:
             stream=True,
         )
         async for event in self._acp.prompt_stream(params):
-            if event.get("type") == "tool_call" and not surface_tool_calls:
+            etype = event.get("type")
+            if etype in ("tool_call", "tool_call_update") and not surface_tool_calls:
                 if surface_thinking:
-                    label = format_tool_activity(event.get("name", ""))
+                    label = render_tool_activity(event)
                     if label:
                         yield {"type": "thinking", "content": label}
                 continue

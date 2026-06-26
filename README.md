@@ -448,6 +448,15 @@ final answer text is never changed** — and is gated by `ACP_SURFACE_THINKING`
 > them under `_meta`, but they are not honored today). Trivial prompts may also
 > produce no thinking even on a thinking-capable model. None of this affects the
 > final answer.
+>
+> **Thinking effort (`/effort`) is not controllable over ACP.** kiro-cli's
+> `/effort` is an interactive-TUI slash command; verified against a live probe
+> there is **no ACP method to discover the available efforts or to set one**
+> (`_kiro.dev/commands/effort/options` → *Method not found*; the command has no
+> `optionsMethod`, and no effort metadata is exposed on `session/new`'s model
+> list). A harness's `reasoning_effort` is therefore advisory only — it is
+> forwarded under `_meta` for forward-compatibility but kiro-cli does not act on
+> it today.
 
 ### Task list / plan
 
@@ -602,6 +611,14 @@ call it can't run — so this works with every harness. This surfacing rides the
 `ACP_SURFACE_THINKING` flag (set it `false` to drop activity + thinking and emit
 only the answer). Live interleaving requires **streaming**; a non-streaming
 response returns the activity/thinking and answer together at the end.
+
+That activity view includes the same detail kiro-cli shows:
+- **File edits** render the added/removed lines as a fenced ` ```diff ` block
+  (`-` removed / `+` added), so harness markdown colours them red/green.
+- **Shell/command execution** renders the command (`⚙ Running: …`) followed by a
+  fenced block of its output (truncated for very large output).
+- **File reads** show only the `⚙ Reading …` label — their (potentially huge)
+  contents are not dumped into the reasoning stream.
 
 When `ACP_SURFACE_TOOL_CALLS=true` (opt-in, for ACP-aware UIs that just display
 activity), the tool activity is instead emitted as executable-shaped events:

@@ -1030,3 +1030,69 @@ class TestOpenAIShimToolActivityReasoning:
         assert "Fetching web content" not in resp.text
         assert '"tool_calls"' not in resp.text
         assert "Berlin is sunny." in resp.text
+
+
+# ---------------------------------------------------------------------------
+# File-edit diffs + shell command/output surfaced into the reasoning channel
+# (default behavior), interleaved like kiro-cli's activity view.
+# ---------------------------------------------------------------------------
+
+class _ActivityACP:
+    """Stub emitting a file edit (diff) and a shell command+output, then text."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "Done.",
+            "reasoning": "",
+            "tool_calls": [
+                {"id": "e1", "name": "Editing app.py", "kind": "edit",
+                 "content": [{"type": "diff", "path": "/app.py", "oldText": "x = 1", "newText": "x = 2"}]},
+                {"id": "s1", "name": "Running: echo hi", "kind": "execute",
+                 "content": [], "output": "hi"},
+            ],
+            "finish_reason": "stop", "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "tool_call", "id": "e1", "name": "Editing app.py", "kind": "edit",
+               "arguments": {}, "content": [{"type": "diff", "path": "/app.py", "oldText": "x = 1", "newText": "x = 2"}]}
+        yield {"type": "tool_call", "id": "s1", "name": "Running: echo hi", "kind": "execute",
+               "arguments": {}, "content": []}
+        yield {"type": "tool_call_update", "id": "s1", "name": "Running: echo hi", "kind": "execute",
+               "output": "hi", "content": []}
+        yield {"type": "text", "content": "Done."}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class TestOpenAIShimDiffAndShell:
+    """Diffs (added/removed lines) and shell command+output appear in reasoning."""
+
+    _CHAT = {"model": "claude-opus-4.8", "messages": [{"role": "user", "content": "do it"}]}
+
+    def test_chat_stream_diff_and_shell(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_ActivityACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        body = resp.text
+        assert '"reasoning_content"' in body
+        assert "Editing app.py" in body
+        assert "diff" in body          # ```diff fence
+        assert "-x = 1" in body and "+x = 2" in body
+        assert "Running: echo hi" in body
+        assert "hi" in body            # shell output
+        assert "Done." in body
+
+    def test_chat_non_stream_diff_and_shell_in_reasoning(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_ActivityACP())
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        msg = resp.json()["choices"][0]["message"]
+        rc = msg.get("reasoning_content") or ""
+        assert "Editing app.py" in rc and "+x = 2" in rc
+        assert "Running: echo hi" in rc and "hi" in rc
+        assert msg["content"] == "Done."
+        assert msg.get("tool_calls") is None

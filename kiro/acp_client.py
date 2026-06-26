@@ -99,27 +99,108 @@ def format_plan_text(entries: list, description: str = "") -> str:
     return "\n".join(lines)
 
 
-def format_tool_activity(name: str) -> str:
-    """Render a built-in tool call as a one-line activity label for the reasoning
-    channel.
+def _render_diff(content: list) -> str:
+    """Render ACP ``diff`` content blocks as a unified +/- diff body.
 
-    kiro-cli's tool ``name`` is already a human-readable title
-    (e.g. ``"Reading config.py"``, ``"Running: echo hi"``,
-    ``"Fetching web content"``). The OpenAI/Anthropic shims fold this into the
-    reasoning stream — interleaved with thinking — so harnesses see what the
-    agent is doing (like kiro-cli's activity view) without receiving a
-    client-executable tool call they cannot run.
+    Each diff block is ``{"type": "diff", "path", "oldText", "newText"}``.
+    Removed lines are prefixed ``-``, added lines ``+`` — suitable for a
+    fenced ```diff block so harness markdown renderers colour them red/green.
 
     Args:
-        name: The tool-call title/name.
+        content: The ``content`` list from a tool call/update.
 
     Returns:
-        A labelled line (with surrounding newlines), or ``""`` when blank.
+        The diff body (no fences), or ``""`` when there is no diff.
     """
-    name = (name or "").strip()
-    if not name:
+    blocks: list[str] = []
+    for block in content or []:
+        if not isinstance(block, dict) or block.get("type") != "diff":
+            continue
+        old_text = block.get("oldText")
+        new_text = block.get("newText")
+        lines: list[str] = []
+        if old_text:
+            lines += [f"-{ln}" for ln in str(old_text).splitlines()]
+        if new_text:
+            lines += [f"+{ln}" for ln in str(new_text).splitlines()]
+        if lines:
+            blocks.append("\n".join(lines))
+    return "\n".join(blocks)
+
+
+_MAX_TOOL_OUTPUT = 4000
+
+
+def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT) -> str:
+    """Truncate long tool output for the reasoning channel."""
+    text = text.rstrip()
+    if len(text) > limit:
+        return text[:limit] + "\n… (truncated)"
+    return text
+
+
+def render_tool_activity(event: dict) -> str:
+    """Render a streamed tool_call / tool_call_update event as reasoning text.
+
+    Produces kiro-cli-style activity for the OpenAI/Anthropic reasoning channel:
+    a ``⚙ <title>`` label, a fenced ```diff block for file edits (added/removed
+    lines), and a fenced output block for shell/command execution. Large or
+    non-execute outputs (e.g. file reads) are not dumped.
+
+    Args:
+        event: A normalised ``tool_call`` or ``tool_call_update`` event.
+
+    Returns:
+        Reasoning text (with surrounding newlines), or ``""`` when nothing to show.
+    """
+    etype = event.get("type")
+    kind = event.get("kind") or ""
+    if etype == "tool_call":
+        parts: list[str] = []
+        name = (event.get("name") or "").strip()
+        if name:
+            parts.append(f"⚙ {name}")
+        diff = _render_diff(event.get("content") or [])
+        if diff:
+            parts.append("```diff\n" + diff + "\n```")
+        return ("\n" + "\n".join(parts) + "\n") if parts else ""
+    if etype == "tool_call_update":
+        # Only surface command output (shell/execute); skip file-read dumps and
+        # edit confirmations (the diff is already shown on the tool_call).
+        if kind == "execute":
+            output = _truncate(event.get("output") or "")
+            if output:
+                return "\n```\n" + output + "\n```\n"
         return ""
-    return f"\n⚙ {name}\n"
+    return ""
+
+
+def render_tool_call_summary(tool_call: dict) -> str:
+    """Render an aggregated (non-streaming) tool call as reasoning text.
+
+    Combines the label, file-edit diff, and (for shell/execute) the command
+    output into one block — the non-streaming equivalent of
+    :func:`render_tool_activity`.
+
+    Args:
+        tool_call: An aggregated tool call with ``name``/``kind``/``content``/
+            ``output``.
+
+    Returns:
+        Reasoning text (with surrounding newlines), or ``""`` when empty.
+    """
+    parts: list[str] = []
+    name = (tool_call.get("name") or "").strip()
+    if name:
+        parts.append(f"⚙ {name}")
+    diff = _render_diff(tool_call.get("content") or [])
+    if diff:
+        parts.append("```diff\n" + diff + "\n```")
+    if tool_call.get("kind") == "execute":
+        output = _truncate(tool_call.get("output") or "")
+        if output:
+            parts.append("```\n" + output + "\n```")
+    return ("\n" + "\n".join(parts) + "\n") if parts else ""
 
 
 class ACPError(Exception):
@@ -407,6 +488,7 @@ class ACPClient:
         content_parts: list[str] = []
         thinking_parts: list[str] = []
         tool_calls: list[dict] = []
+        tool_by_id: dict[str, dict] = {}
         finish_reason = "stop"
         usage: dict[str, Any] = {}
 
@@ -423,11 +505,25 @@ class ACPClient:
                 if rendered:
                     thinking_parts.append("\n" + rendered + "\n")
             elif etype == "tool_call":
-                tool_calls.append({
+                tool_call = {
                     "id": event.get("id", ""),
                     "name": event.get("name", ""),
+                    "kind": event.get("kind", ""),
                     "arguments": event.get("arguments", {}),
-                })
+                    "content": event.get("content") or [],
+                }
+                tool_calls.append(tool_call)
+                if tool_call["id"]:
+                    tool_by_id[tool_call["id"]] = tool_call
+            elif etype == "tool_call_update":
+                # Attach diff/output to the matching tool call (for the
+                # non-streaming activity summary).
+                target = tool_by_id.get(event.get("id", ""))
+                if target is not None:
+                    if event.get("output"):
+                        target["output"] = event["output"]
+                    if event.get("content") and not target.get("content"):
+                        target["content"] = event["content"]
             elif etype == "done":
                 finish_reason = event.get("finish_reason", "stop")
                 usage = event.get("usage", {}) or {}
@@ -990,10 +1086,24 @@ class ACPClient:
                     "type": "tool_call",
                     "id": update.get("toolCallId", str(uuid.uuid4())),
                     "name": update.get("title") or update.get("kind") or "tool",
+                    "kind": update.get("kind") or "",
                     "arguments": update.get("rawInput", {}) or {},
+                    "content": update.get("content") or [],
                 })
-        # tool_call_update / available_commands_update: status only, not
-        # surfaced as caller-visible content.
+        elif kind == "tool_call_update":
+            # Surface diffs (file edits) and command output (shell/execute) for
+            # the activity view. Plan-tool updates are handled at tool_call time.
+            if not self._is_plan_tool(update):
+                queue.put_nowait({
+                    "type": "tool_call_update",
+                    "id": update.get("toolCallId", str(uuid.uuid4())),
+                    "name": update.get("title") or update.get("kind") or "tool",
+                    "kind": update.get("kind") or "",
+                    "status": update.get("status") or "",
+                    "output": self._extract_tool_output(update.get("rawOutput")),
+                    "content": update.get("content") or [],
+                })
+        # available_commands_update and other kinds: not surfaced.
 
     @staticmethod
     def _extract_text(content: Any) -> str:
@@ -1056,6 +1166,38 @@ class ACPClient:
                     status = "completed" if task.get("completed") else "pending"
                     entries.append({"content": str(content), "status": status})
         return entries, description
+
+    @staticmethod
+    def _extract_tool_output(raw_output: Any) -> str:
+        """Extract printable text from a tool call's ``rawOutput``.
+
+        kiro-cli returns ``rawOutput`` as ``{"items": [{"Text": "..."}, {"Json": …}]}``.
+        This concatenates the text items (and JSON-encodes structured items) into
+        a plain string for the activity/reasoning view.
+
+        Args:
+            raw_output: The ``rawOutput`` object from a ``tool_call_update``.
+
+        Returns:
+            The concatenated output text, or ``""`` when there is none.
+        """
+        if not isinstance(raw_output, dict):
+            return ""
+        items = raw_output.get("items")
+        if not isinstance(items, list):
+            return ""
+        parts: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("Text") is not None:
+                parts.append(str(item["Text"]))
+            elif "Json" in item:
+                try:
+                    parts.append(json.dumps(item["Json"]))
+                except (TypeError, ValueError):
+                    continue
+        return "\n".join(parts)
 
     # ------------------------------------------------------------------
     # Agent -> gateway requests
