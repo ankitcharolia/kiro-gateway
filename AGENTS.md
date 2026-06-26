@@ -191,6 +191,7 @@ translators emit OpenAI/Anthropic/ACP SSE.
 | `{"type": "text"}` | `content: str` | `agent_message_chunk` |
 | `{"type": "thinking"}` | `content: str` | `agent_thought_chunk` |
 | `{"type": "tool_call"}` | `id, name, arguments: dict` | `tool_call` |
+| `{"type": "plan"}` | `entries: [{content, status}], description: str` | `tool_call` (kiro-cli's built-in todo/task-list tool) |
 | `{"type": "done"}` | `finish_reason: str, usage: dict` | prompt result `stopReason` |
 | `{"type": "error"}` | `message: str`, optional `code: int`, `data: Any` | JSON-RPC error / subprocess exit |
 
@@ -206,6 +207,13 @@ translators emit OpenAI/Anthropic/ACP SSE.
   final answer text is never changed — and `ACPClient.prompt` aggregates it into
   `result["reasoning"]` for the non-streaming paths. The native `/acp/chat` route
   always surfaces it as an `acp_thinking` event regardless of the flag.
+- `plan` (kiro-cli's built-in todo/task-list tool, detected via
+  `_is_plan_tool`/`_plan_entries`; there is **no** standard ACP `plan` update) is
+  gated by the same `ACP_SURFACE_THINKING` flag: the native `/acp/chat` route
+  emits a structured `acp_plan` event; the shims fold it into the reasoning
+  channel via `format_plan_text` (so existing reasoning rendering handles it).
+  kiro-cli emits the list at creation (entries `pending`) and does not re-emit a
+  full completion snapshot, so statuses reflect creation time.
 - `error` events carry the JSON-RPC `code`/`data` when available so
   `kiro.error_mapping` can classify them; non-streaming completions surface the
   same failure as an `ACPError(code, message, data)`.

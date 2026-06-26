@@ -29,6 +29,7 @@ from kiro.acp_models import (
     ToolResult,
 )
 from kiro.shim_service import ShimService
+from kiro.config import settings
 
 router = APIRouter(prefix="/acp", tags=["ACP"])
 
@@ -92,6 +93,7 @@ async def acp_chat_stream(
       event: acp_text       — delta text token
       event: acp_tool_call  — tool call from the model
       event: acp_thinking   — thinking/reasoning delta
+      event: acp_plan       — task list / plan (gated by ACP_SURFACE_THINKING)
       event: acp_done       — stream finished (includes usage)
       event: acp_error      — error
       event: acp_capability — capability request forwarded to caller
@@ -108,6 +110,8 @@ async def acp_chat_stream(
                 terminal=body.terminal,
             ):
                 etype = event.get("type", "text")
+                if etype == "plan" and not settings.ACP_SURFACE_THINKING:
+                    continue
                 yield f"event: acp_{etype}\ndata: {json.dumps(event)}\n\n"
                 if etype in ("done", "error"):
                     break

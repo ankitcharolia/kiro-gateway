@@ -985,3 +985,54 @@ class TestAnthropicShimReasoning:
         resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
         assert '"thinking_delta"' not in resp.text
         assert '"type": "text_delta"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Task list / plan folded into the reasoning channel (thinking blocks) on the
+# Anthropic shim, gated by ACP_SURFACE_THINKING.
+# ---------------------------------------------------------------------------
+
+class _PlanACP:
+    """Stub ACP client whose turn includes a task list (plan) then an answer."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {"content": "Done.", "reasoning": "", "tool_calls": [],
+                "finish_reason": "stop", "usage": {}}
+
+    async def prompt_stream(self, params):
+        yield {"type": "plan",
+               "entries": [{"content": "Write the file", "status": "pending"}],
+               "description": "Do stuff"}
+        yield {"type": "text", "content": "Done."}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class TestAnthropicShimPlan:
+    """Plan is surfaced as a thinking content block."""
+
+    _MSG = {
+        "model": "claude-sonnet-4.6", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "go"}],
+    }
+
+    def test_stream_plan_in_thinking(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _ShimService(_PlanACP())
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert '"type": "thinking_delta"' in resp.text
+        assert "Write the file" in resp.text
+        assert '"type": "text_delta"' in resp.text
+
+    def test_stream_plan_suppressed_when_off(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_THINKING", False)
+        sync_client.app.state.shim_service = _ShimService(_PlanACP())
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert '"thinking_delta"' not in resp.text
+        assert "Write the file" not in resp.text
+        assert '"type": "text_delta"' in resp.text

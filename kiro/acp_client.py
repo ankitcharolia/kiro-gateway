@@ -74,6 +74,31 @@ _STOP_REASON_MAP: dict[str, str] = {
 }
 
 
+def format_plan_text(entries: list, description: str = "") -> str:
+    """Render normalised plan entries into a human-readable checklist.
+
+    Used to fold a task list into the reasoning channel for the OpenAI/Anthropic
+    shims (the native ACP route surfaces the structured ``plan`` event instead).
+
+    Args:
+        entries: A list of ``{"content", "status"}`` dicts.
+        description: Optional task-list title.
+
+    Returns:
+        A markdown checklist string, or ``""`` when there are no entries.
+    """
+    if not entries:
+        return ""
+    header = f"Plan — {description}" if description else "Plan"
+    lines = [header]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        box = {"completed": "[x]", "in_progress": "[~]"}.get(entry.get("status"), "[ ]")
+        lines.append(f"- {box} {entry.get('content', '')}")
+    return "\n".join(lines)
+
+
 class ACPError(Exception):
     """Raised when the agent returns a JSON-RPC error response."""
 
@@ -368,6 +393,12 @@ class ACPClient:
                 content_parts.append(event.get("content", ""))
             elif etype == "thinking":
                 thinking_parts.append(event.get("content", ""))
+            elif etype == "plan":
+                rendered = format_plan_text(
+                    event.get("entries", []), event.get("description", "")
+                )
+                if rendered:
+                    thinking_parts.append("\n" + rendered + "\n")
             elif etype == "tool_call":
                 tool_calls.append({
                     "id": event.get("id", ""),
@@ -919,14 +950,27 @@ class ACPClient:
             if text:
                 queue.put_nowait({"type": "thinking", "content": text})
         elif kind == "tool_call":
-            queue.put_nowait({
-                "type": "tool_call",
-                "id": update.get("toolCallId", str(uuid.uuid4())),
-                "name": update.get("title") or update.get("kind") or "tool",
-                "arguments": update.get("rawInput", {}) or {},
-            })
-        # tool_call_update / plan / available_commands_update: status only,
-        # not surfaced as caller-visible content.
+            if self._is_plan_tool(update):
+                # kiro-cli's task list arrives as its built-in todo tool. Surface
+                # it as a dedicated `plan` event rather than a client-executable
+                # tool call. A bookkeeping call with no entries (e.g. "complete")
+                # is dropped.
+                entries, description = self._plan_entries(update)
+                if entries:
+                    queue.put_nowait({
+                        "type": "plan",
+                        "entries": entries,
+                        "description": description,
+                    })
+            else:
+                queue.put_nowait({
+                    "type": "tool_call",
+                    "id": update.get("toolCallId", str(uuid.uuid4())),
+                    "name": update.get("title") or update.get("kind") or "tool",
+                    "arguments": update.get("rawInput", {}) or {},
+                })
+        # tool_call_update / available_commands_update: status only, not
+        # surfaced as caller-visible content.
 
     @staticmethod
     def _extract_text(content: Any) -> str:
@@ -936,6 +980,59 @@ class ACPClient:
         if isinstance(content, str):
             return content
         return ""
+
+    @staticmethod
+    def _is_plan_tool(update: dict) -> bool:
+        """Whether a tool_call update is kiro-cli's built-in task-list (todo) tool.
+
+        kiro-cli has no standard ACP ``plan`` update; its task list comes through
+        the ``todo_list`` tool, whose ``rawInput`` carries ``tasks`` /
+        ``task_list_description`` (create/add) or ``completed_task_ids``
+        (complete). These keys are todo-specific (the file-edit tool uses
+        ``path``/``content``), so they are a safe discriminator.
+
+        Args:
+            update: The ``session/update`` ``update`` object for a tool call.
+
+        Returns:
+            ``True`` when the call is the task-list tool.
+        """
+        raw_in = update.get("rawInput")
+        if isinstance(raw_in, dict) and any(
+            key in raw_in for key in ("tasks", "task_list_description", "completed_task_ids")
+        ):
+            return True
+        return "task list" in str(update.get("title") or "").lower()
+
+    @staticmethod
+    def _plan_entries(update: dict) -> tuple[list[dict], str]:
+        """Extract normalised plan entries + description from a todo tool call.
+
+        Args:
+            update: The ``session/update`` ``update`` object for a plan tool call.
+
+        Returns:
+            ``(entries, description)`` where each entry is
+            ``{"content": str, "status": "pending"|"in_progress"|"completed"}``.
+            ``entries`` is empty for a bookkeeping call (e.g. "complete") that
+            carries no task list.
+        """
+        raw_in = update.get("rawInput")
+        entries: list[dict] = []
+        description = ""
+        if isinstance(raw_in, dict):
+            description = str(raw_in.get("task_list_description") or "")
+            tasks = raw_in.get("tasks")
+            if isinstance(tasks, list):
+                for task in tasks:
+                    if not isinstance(task, dict):
+                        continue
+                    content = task.get("task_description") or task.get("content") or ""
+                    if not content:
+                        continue
+                    status = "completed" if task.get("completed") else "pending"
+                    entries.append({"content": str(content), "status": status})
+        return entries, description
 
     # ------------------------------------------------------------------
     # Agent -> gateway requests

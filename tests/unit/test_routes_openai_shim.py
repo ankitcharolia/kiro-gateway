@@ -938,3 +938,58 @@ class TestOpenAIShimReasoning:
         assert "event: response.reasoning_summary_text.delta" in resp.text
         assert "event: response.output_text.delta" in resp.text
         assert "event: response.completed" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Task list / plan folded into the reasoning channel (gated by
+# ACP_SURFACE_THINKING) on the OpenAI shim.
+# ---------------------------------------------------------------------------
+
+class _PlanACP:
+    """Stub ACP client whose turn includes a task list (plan) then an answer."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {"content": "Done.", "reasoning": "", "tool_calls": [],
+                "finish_reason": "stop", "usage": {}}
+
+    async def prompt_stream(self, params):
+        yield {"type": "plan",
+               "entries": [{"content": "Write the file", "status": "pending"}],
+               "description": "Do stuff"}
+        yield {"type": "text", "content": "Done."}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class TestOpenAIShimPlan:
+    """Plan is surfaced via reasoning_content (chat) / reasoning items (Responses)."""
+
+    _CHAT = {"model": "claude-sonnet-4.6", "messages": [{"role": "user", "content": "go"}]}
+
+    def test_chat_stream_plan_in_reasoning(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_PlanACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert '"reasoning_content"' in resp.text
+        assert "Write the file" in resp.text
+        assert "Done." in resp.text
+
+    def test_chat_stream_plan_suppressed_when_off(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_THINKING", False)
+        sync_client.app.state.shim_service = _ShimService(_PlanACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert '"reasoning_content"' not in resp.text
+        assert "Write the file" not in resp.text
+        assert "Done." in resp.text
+
+    def test_responses_stream_plan_in_reasoning(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _ShimService(_PlanACP())
+        payload = {"model": "claude-sonnet-4.6", "input": "go", "stream": True}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert "event: response.reasoning_summary_text.delta" in resp.text
+        assert "Write the file" in resp.text

@@ -800,3 +800,117 @@ class TestPromptReasoning:
         client.prompt_stream = fake_stream  # type: ignore[assignment]
         result = await _REAL_PROMPT(client, PromptParams(session_id="s"))
         assert result["reasoning"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Task list / plan surfacing: kiro-cli's built-in todo tool is normalised into
+# a `plan` event (not a client-executable tool_call), folded into reasoning for
+# the non-streaming aggregation.
+# ---------------------------------------------------------------------------
+
+from kiro.acp_client import format_plan_text
+
+
+class TestPlanDetection:
+    """_is_plan_tool / _plan_entries / format_plan_text + _handle_notification."""
+
+    _CREATE = {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "t1",
+        "title": "Creating task list: do stuff",
+        "rawInput": {
+            "command": "create",
+            "task_list_description": "Do stuff",
+            "tasks": [
+                {"task_description": "Write the file"},
+                {"task_description": "Read it back"},
+            ],
+        },
+    }
+
+    def test_is_plan_tool_true_for_todo(self):
+        assert ACPClient._is_plan_tool(self._CREATE) is True
+
+    def test_is_plan_tool_false_for_file_edit(self):
+        # File-edit tool uses path/content, not tasks — must not be misdetected.
+        assert ACPClient._is_plan_tool(
+            {"rawInput": {"command": "create", "path": "/tmp/x", "content": "hi"}}
+        ) is False
+
+    def test_plan_entries_extracted(self):
+        entries, desc = ACPClient._plan_entries(self._CREATE)
+        assert desc == "Do stuff"
+        assert entries == [
+            {"content": "Write the file", "status": "pending"},
+            {"content": "Read it back", "status": "pending"},
+        ]
+
+    def test_format_plan_text_renders_checklist(self):
+        text = format_plan_text(
+            [{"content": "A", "status": "pending"}, {"content": "B", "status": "completed"}],
+            "Job",
+        )
+        assert text == "Plan — Job\n- [ ] A\n- [x] B"
+
+    def test_format_plan_text_empty(self):
+        assert format_plan_text([], "x") == ""
+
+    def test_handle_notification_emits_plan_event(self):
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["s"] = queue
+        client._handle_notification({
+            "method": "session/update",
+            "params": {"sessionId": "s", "update": self._CREATE},
+        })
+        ev = queue.get_nowait()
+        assert ev["type"] == "plan"
+        assert ev["description"] == "Do stuff"
+        assert [e["content"] for e in ev["entries"]] == ["Write the file", "Read it back"]
+
+    def test_handle_notification_drops_complete_bookkeeping(self):
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["s"] = queue
+        # A "complete" call has completed_task_ids but no tasks → nothing surfaced.
+        client._handle_notification({
+            "method": "session/update",
+            "params": {"sessionId": "s", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "t2",
+                "title": "Completing #1, #2",
+                "rawInput": {"command": "complete", "completed_task_ids": ["1", "2"]},
+            }},
+        })
+        assert queue.empty()
+
+    def test_regular_tool_call_still_emitted(self):
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["s"] = queue
+        client._handle_notification({
+            "method": "session/update",
+            "params": {"sessionId": "s", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "t3",
+                "title": "Fetching web content", "kind": "fetch",
+                "rawInput": {"url": "https://example.com"},
+            }},
+        })
+        ev = queue.get_nowait()
+        assert ev["type"] == "tool_call"
+        assert ev["name"] == "Fetching web content"
+
+    @pytest.mark.asyncio
+    async def test_prompt_folds_plan_into_reasoning(self):
+        client = ACPClient()
+
+        async def fake_stream(params):
+            yield {"type": "plan", "entries": [{"content": "Step 1", "status": "pending"}],
+                   "description": "Job"}
+            yield {"type": "text", "content": "Done."}
+            yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+        client.prompt_stream = fake_stream  # type: ignore[assignment]
+        result = await _REAL_PROMPT(client, PromptParams(session_id="s"))
+        assert "Plan — Job" in result["reasoning"]
+        assert "[ ] Step 1" in result["reasoning"]
+        assert result["content"] == "Done."

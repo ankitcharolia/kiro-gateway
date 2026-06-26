@@ -353,6 +353,7 @@ http://localhost:8000/acp/chat/stream  # SSE streaming
 | `text` | `delta.content` chunk | `content_block_delta[text_delta]` |
 | `tool_call` | `delta.tool_calls` chunk | `content_block_start[tool_use]` + `input_json_delta` |
 | `thinking` | `delta.reasoning_content` chunk (Responses: `response.reasoning_summary_text.delta`) | `content_block_start[thinking]` + `thinking_delta` |
+| `plan` (task list) | folded into `reasoning_content` (Responses reasoning item) | folded into a `thinking` block |
 | `done` | `[DONE]` + `finish_reason` | `message_delta` + `message_stop` |
 | `error` | error chunk + `[DONE]` | `error` event |
 
@@ -434,6 +435,22 @@ final answer text is never changed** — and is gated by `ACP_SURFACE_THINKING`
   follow-up tool turn.
 - The native `/acp/chat` route always surfaces reasoning as an `acp_thinking`
   event regardless of this flag.
+
+### Task list / plan
+
+kiro-cli expresses a multi-step **task list** through its built-in todo tool
+(it has no standard ACP `plan` update). The gateway normalizes that into a
+`plan` event and surfaces it under the **same `ACP_SURFACE_THINKING` flag**:
+
+- **Native `/acp/chat/stream`** → a structured `acp_plan` event
+  (`{entries: [{content, status}], description}`).
+- **OpenAI / Anthropic shims** → the task list is rendered as a checklist and
+  folded into the reasoning channel (`reasoning_content` / Responses reasoning
+  item / Anthropic `thinking` block), since those APIs have no task-list field.
+
+> kiro-cli emits the list when it's **created** (entries `pending`); it does not
+> re-emit a full snapshot as items complete, so surfaced statuses reflect
+> creation time. The final answer text is unaffected.
 
 ---
 

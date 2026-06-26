@@ -71,3 +71,57 @@ def test_acp_chat_stream_yields_events(sync_client):
             if line.startswith("data:"):
                 events.append(line)
     assert len(events) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Task list / plan surfacing on the native ACP route (acp_plan), gated by
+# ACP_SURFACE_THINKING.
+# ---------------------------------------------------------------------------
+
+from kiro.shim_service import ShimService as _ShimService
+from kiro.config import settings as _settings
+
+
+class _PlanACP:
+    """Stub ACP client whose turn includes a task list (plan) then an answer."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {"content": "Done.", "reasoning": "", "tool_calls": [],
+                "finish_reason": "stop", "usage": {}}
+
+    async def prompt_stream(self, params):
+        yield {"type": "plan",
+               "entries": [{"content": "Write the file", "status": "pending"},
+                           {"content": "Read it back", "status": "pending"}],
+               "description": "Do stuff"}
+        yield {"type": "text", "content": "Done."}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+def _collect_sse(sync_client, payload):
+    body = ""
+    with sync_client.stream("POST", "/acp/chat/stream", json=payload, headers=ACT_HEADERS) as r:
+        for line in r.iter_lines():
+            body += line + "\n"
+    return body
+
+
+def test_acp_stream_surfaces_plan(sync_client):
+    sync_client.app.state.shim_service = _ShimService(_PlanACP())
+    body = _collect_sse(sync_client, {"messages": [{"role": "user", "content": "go"}]})
+    assert "event: acp_plan" in body
+    assert "Write the file" in body
+    assert "event: acp_text" in body
+
+
+def test_acp_stream_plan_suppressed_when_off(sync_client, monkeypatch):
+    monkeypatch.setattr(_settings, "ACP_SURFACE_THINKING", False)
+    sync_client.app.state.shim_service = _ShimService(_PlanACP())
+    body = _collect_sse(sync_client, {"messages": [{"role": "user", "content": "go"}]})
+    assert "event: acp_plan" not in body
+    assert "event: acp_text" in body

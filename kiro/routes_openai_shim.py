@@ -33,6 +33,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalCapability
+from kiro.acp_client import format_plan_text
 from kiro.auth import verify_openai_key
 from kiro.config import DEFAULT_KIRO_MODELS, settings
 from kiro.error_mapping import MappedError, classify_event, classify_exception
@@ -402,6 +403,12 @@ async def _stream_response(
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
         ):
             etype = event.get("type")
+            if etype == "plan":
+                # Fold the task list into the reasoning channel.
+                event = {"type": "thinking",
+                         "content": format_plan_text(event.get("entries", []),
+                                                     event.get("description", ""))}
+                etype = "thinking"
 
             if etype == "text":
                 delta = event.get("content", "")
@@ -782,6 +789,11 @@ async def _responses_stream(
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
         ):
             etype = event.get("type")
+            if etype == "plan":
+                event = {"type": "thinking",
+                         "content": format_plan_text(event.get("entries", []),
+                                                     event.get("description", ""))}
+                etype = "thinking"
 
             if etype == "text":
                 delta = event.get("content", "")
