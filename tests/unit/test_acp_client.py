@@ -1026,3 +1026,66 @@ class TestToolActivityRendering:
         tc = result["tool_calls"][0]
         assert tc["kind"] == "execute"
         assert tc["output"] == "file1\nfile2"
+
+
+class TestStructuredToolRendering:
+    """Bold label, structured args (highlighted paths/commands), search summaries."""
+
+    def test_label_is_bold(self):
+        out = render_tool_activity({"type": "tool_call", "name": "use_aws", "kind": "other",
+                                    "arguments": {}, "content": []})
+        assert "**⚙ use_aws**" in out
+
+    def test_grep_args_highlight_path_and_pattern(self):
+        out = render_tool_activity({"type": "tool_call", "name": "Searching", "kind": "search",
+                                    "arguments": {"__tool_use_purpose": "x", "pattern": "Shim",
+                                                  "path": "kiro/", "include": "*.py"}, "content": []})
+        assert "pattern=`Shim`" in out
+        assert "path=`kiro/`" in out
+        assert "include=`*.py`" in out
+        assert "__tool_use_purpose" not in out   # internal key skipped
+
+    def test_use_aws_args_rendered(self):
+        out = render_tool_activity({"type": "tool_call", "name": "use_aws", "kind": "other",
+                                    "arguments": {"label": "Get policy", "operation_name": "get-policy",
+                                                  "service_name": "iam", "region": "eu-central-1"},
+                                    "content": []})
+        assert "operation_name=get-policy" in out
+        assert "service_name=iam" in out
+        assert "region=eu-central-1" in out
+
+    def test_read_path_from_operations(self):
+        out = render_tool_activity({"type": "tool_call", "name": "Reading x", "kind": "read",
+                                    "arguments": {"operations": [{"mode": "Line", "path": "/a/b.tf"}]},
+                                    "content": []})
+        assert "path=`/a/b.tf`" in out
+
+    def test_command_highlighted_inline_not_fenced(self):
+        out = render_tool_activity({"type": "tool_call", "name": "Running: ls", "kind": "execute",
+                                    "arguments": {"command": "ls -la"}, "content": []})
+        assert "command=`ls -la`" in out      # inline code (distinct from output fence)
+
+    def test_search_summary_grep(self):
+        out = ACPClient._extract_tool_output({"items": [{"Json": {"numMatches": 26, "numFiles": 5, "truncated": True}}]})
+        assert out == "26 match(es) in 5 file(s) (truncated)"
+        rendered = render_tool_activity({"type": "tool_call_update", "kind": "search", "output": out})
+        assert "↳ 26 match(es) in 5 file(s)" in rendered
+
+    def test_search_summary_glob_message(self):
+        out = ACPClient._extract_tool_output(
+            {"items": [{"Json": {"filePaths": [], "totalFiles": 0, "message": "No files found matching pattern: **/x"}}]}
+        )
+        assert "No files found" in out
+
+    def test_search_summary_glob_count(self):
+        out = ACPClient._extract_tool_output(
+            {"items": [{"Json": {"filePaths": ["/a.toml", "/b.toml"], "totalFiles": 2}}]}
+        )
+        assert out == "2 file(s) found"
+
+    def test_grep_raw_json_not_dumped(self):
+        # A grep result with huge `results` must collapse to a summary, not raw JSON.
+        out = ACPClient._extract_tool_output({"items": [{"Json": {
+            "numMatches": 2, "numFiles": 1, "results": [{"file": "x", "matches": ["a"] * 1000}]}}]})
+        assert out == "2 match(es) in 1 file(s)"
+        assert "matches" not in out

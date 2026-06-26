@@ -130,6 +130,16 @@ def _render_diff(content: list) -> str:
 
 _MAX_TOOL_OUTPUT = 4000
 
+# rawInput keys worth showing as structured activity args (in order), skipping
+# internal/huge fields (e.g. __tool_use_purpose, write `content`, todo `tasks`).
+_ARG_KEYS = (
+    "command", "pattern", "path", "include", "query", "url",
+    "label", "operation_name", "service_name", "region", "profile_name",
+)
+# Values for these keys (or any path-like value) are wrapped in inline code so
+# harness markdown renders them in a distinct colour from prose and output.
+_CODE_KEYS = {"command", "pattern", "path", "include", "url"}
+
 
 def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT) -> str:
     """Truncate long tool output for the reasoning channel."""
@@ -139,13 +149,76 @@ def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT) -> str:
     return text
 
 
+def _format_tool_args(arguments: dict) -> str:
+    """Render a tool call's ``rawInput`` as indented activity sub-lines.
+
+    Shows a curated set of meaningful keys; path/command/pattern values are
+    wrapped in inline code so a harness highlights them distinctly from output.
+
+    Args:
+        arguments: The tool ``rawInput`` dict.
+
+    Returns:
+        Newline-joined ``  key=value`` lines, or ``""`` when nothing useful.
+    """
+    if not isinstance(arguments, dict):
+        return ""
+    lines: list[str] = []
+    for key in _ARG_KEYS:
+        value = arguments.get(key)
+        if value in (None, "", {}, []):
+            continue
+        text = str(value)
+        if key in _CODE_KEYS or "/" in text:
+            text = f"`{text}`"
+        lines.append(f"  {key}={text}")
+    # File read/edit tools carry path(s) under `operations` rather than `path`.
+    operations = arguments.get("operations")
+    if isinstance(operations, list):
+        for op in operations:
+            if isinstance(op, dict) and op.get("path"):
+                lines.append(f"  path=`{op['path']}`")
+    return "\n".join(lines)
+
+
+def _summarize_json_output(payload: Any) -> str:
+    """Summarise a structured tool result (grep/glob) into a one-line string.
+
+    Args:
+        payload: The ``Json`` value from a tool ``rawOutput`` item.
+
+    Returns:
+        A concise summary, or ``""`` for shapes we don't summarise (avoids
+        dumping arbitrary JSON into the reasoning stream).
+    """
+    if not isinstance(payload, dict):
+        return ""
+    if "numMatches" in payload:  # grep
+        summary = (
+            f"{payload.get('numMatches', 0)} match(es) in "
+            f"{payload.get('numFiles', 0)} file(s)"
+        )
+        if payload.get("truncated"):
+            summary += " (truncated)"
+        return summary
+    if "filePaths" in payload or "totalFiles" in payload:  # glob
+        if payload.get("message"):
+            return str(payload["message"])
+        count = payload.get("totalFiles")
+        if count is None:
+            count = len(payload.get("filePaths") or [])
+        return f"{count} file(s) found"
+    return ""
+
+
 def render_tool_activity(event: dict) -> str:
     """Render a streamed tool_call / tool_call_update event as reasoning text.
 
     Produces kiro-cli-style activity for the OpenAI/Anthropic reasoning channel:
-    a ``⚙ <title>`` label, a fenced ```diff block for file edits (added/removed
-    lines), and a fenced output block for shell/command execution. Large or
-    non-execute outputs (e.g. file reads) are not dumped.
+    a bold ``⚙ <title>`` label, structured argument sub-lines (with paths/commands
+    in inline code), a fenced ```diff block for file edits (added/removed lines),
+    a result summary for searches (grep/glob), and a fenced output block for
+    shell/command execution. File-read contents are not dumped.
 
     Args:
         event: A normalised ``tool_call`` or ``tool_call_update`` event.
@@ -159,18 +232,22 @@ def render_tool_activity(event: dict) -> str:
         parts: list[str] = []
         name = (event.get("name") or "").strip()
         if name:
-            parts.append(f"⚙ {name}")
+            parts.append(f"**⚙ {name}**")
+        args = _format_tool_args(event.get("arguments") or {})
+        if args:
+            parts.append(args)
         diff = _render_diff(event.get("content") or [])
         if diff:
             parts.append("```diff\n" + diff + "\n```")
         return ("\n" + "\n".join(parts) + "\n") if parts else ""
     if etype == "tool_call_update":
-        # Only surface command output (shell/execute); skip file-read dumps and
-        # edit confirmations (the diff is already shown on the tool_call).
-        if kind == "execute":
-            output = _truncate(event.get("output") or "")
-            if output:
-                return "\n```\n" + output + "\n```\n"
+        output = (event.get("output") or "").strip()
+        if not output:
+            return ""
+        if kind == "execute":  # shell command output → fenced block
+            return "\n```\n" + _truncate(output) + "\n```\n"
+        if kind == "search":   # grep/glob result summary → inline sub-line
+            return f"\n  ↳ {_truncate(output, 500)}\n"
         return ""
     return ""
 
@@ -178,13 +255,12 @@ def render_tool_activity(event: dict) -> str:
 def render_tool_call_summary(tool_call: dict) -> str:
     """Render an aggregated (non-streaming) tool call as reasoning text.
 
-    Combines the label, file-edit diff, and (for shell/execute) the command
-    output into one block — the non-streaming equivalent of
-    :func:`render_tool_activity`.
+    Non-streaming equivalent of :func:`render_tool_activity`: label + args +
+    file-edit diff + (shell output / search summary).
 
     Args:
-        tool_call: An aggregated tool call with ``name``/``kind``/``content``/
-            ``output``.
+        tool_call: An aggregated tool call with ``name``/``kind``/``arguments``/
+            ``content``/``output``.
 
     Returns:
         Reasoning text (with surrounding newlines), or ``""`` when empty.
@@ -192,14 +268,19 @@ def render_tool_call_summary(tool_call: dict) -> str:
     parts: list[str] = []
     name = (tool_call.get("name") or "").strip()
     if name:
-        parts.append(f"⚙ {name}")
+        parts.append(f"**⚙ {name}**")
+    args = _format_tool_args(tool_call.get("arguments") or {})
+    if args:
+        parts.append(args)
     diff = _render_diff(tool_call.get("content") or [])
     if diff:
         parts.append("```diff\n" + diff + "\n```")
-    if tool_call.get("kind") == "execute":
-        output = _truncate(tool_call.get("output") or "")
-        if output:
-            parts.append("```\n" + output + "\n```")
+    output = (tool_call.get("output") or "").strip()
+    if output:
+        if tool_call.get("kind") == "execute":
+            parts.append("```\n" + _truncate(output) + "\n```")
+        elif tool_call.get("kind") == "search":
+            parts.append(f"  ↳ {_truncate(output, 500)}")
     return ("\n" + "\n".join(parts) + "\n") if parts else ""
 
 
@@ -1193,11 +1274,10 @@ class ACPClient:
             if item.get("Text") is not None:
                 parts.append(str(item["Text"]))
             elif "Json" in item:
-                try:
-                    parts.append(json.dumps(item["Json"]))
-                except (TypeError, ValueError):
-                    continue
-        return "\n".join(parts)
+                summary = _summarize_json_output(item["Json"])
+                if summary:
+                    parts.append(summary)
+        return "\n".join(p for p in parts if p)[:8000]
 
     # ------------------------------------------------------------------
     # Agent -> gateway requests
