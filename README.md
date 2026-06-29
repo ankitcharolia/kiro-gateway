@@ -390,6 +390,45 @@ on a non-streaming completion or as a streaming error event.
 
 ---
 
+## Embeddings (not supported — by design)
+
+`POST /v1/embeddings` returns **`501 Not Implemented`** in the OpenAI-native
+error envelope (`{"error": {"type": "invalid_request_error", "code":
+"embeddings_not_supported", "message": …}}`). kiro-cli over ACP exposes **no
+embeddings model** — it only generates text — so the gateway has no compliant
+way to produce embedding vectors. It deliberately neither 404s (clients read
+that as a misconfigured base URL) nor fabricates vectors (which would silently
+corrupt search results).
+
+**Harness features that depend on embeddings will not work through this
+gateway**, including:
+
+- **RAG / document indexing** (building a vector store over a codebase or docs).
+- **Semantic code search** (embedding-based "find similar code").
+- **Embedding-based long-term memory** (vector recall of past context).
+
+Chat/completion features are unaffected — only the embeddings step fails, with a
+clear, parseable `501`.
+
+### Decision: no built-in embeddings passthrough
+
+A built-in opt-in passthrough to a user-configured embeddings provider was
+**considered and declined**. It would require the gateway to **hold a
+third-party API credential** and **transmit request data to an endpoint outside
+kiro-cli** — both of which break the project's foundational compliance model
+(*only the official binary is invoked; no credential handling; no routing
+through other providers*). Embeddings are therefore kept entirely out of this
+gateway.
+
+**Recommended pattern:** point your harness's **embedding model** at a dedicated
+embeddings provider directly (e.g. an OpenAI/local-embeddings endpoint),
+configured separately from this gateway, while the **chat/completion model**
+points at the gateway. Most harnesses let you configure the embedding and chat
+providers independently. This keeps embeddings fully outside the single-account,
+credential-free compliance path.
+
+---
+
 ## System & developer roles
 
 Instruction provenance is preserved rather than flattened into anonymous user

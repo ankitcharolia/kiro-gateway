@@ -408,6 +408,17 @@ forwarding.
 Auth: OpenAI uses `Authorization: Bearer <KIRO_GATEWAY_API_KEY>`; Anthropic uses
 `x-api-key: <KIRO_GATEWAY_API_KEY>`.
 
+> **Embeddings are unsupported by design (issue #34).** `POST /v1/embeddings`
+> returns `501` in the **OpenAI-native error envelope** (`{"error": {"type":
+> "invalid_request_error", "code": "embeddings_not_supported", …}}`), not a bare
+> `{"detail": …}`. kiro-cli exposes no embeddings model and the gateway never
+> proxies to other providers. **Decision: no built-in passthrough** — it would
+> require holding a third-party credential and routing data outside kiro-cli,
+> breaking the compliance model (principle 1). Don't add one; point harness
+> embedding models at a separate provider. Breaks RAG/indexing, semantic code
+> search, and embedding-based memory (documented in the README "Embeddings"
+> section).
+
 > **Stateful Responses API is unsupported by design (issue #38).** The gateway
 > is stateless (principle 3) and stores no responses, so the Responses
 > server-side state features are not available: `OAIResponsesRequest` accepts

@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -1127,18 +1127,50 @@ async def _responses_stream(
 # model forbids routing through any other provider. Rather than 404 (which
 # clients read as a misconfigured base URL) or fabricate vectors (which would
 # silently corrupt semantic search / RAG), the endpoint exists and returns a
-# clear 501 Not Implemented.
+# clear 501 Not Implemented in the OpenAI-native error shape.
+#
+# Policy decision (issue #34): the 501 is intentional and a built-in passthrough
+# to a user-configured embeddings provider is **not** implemented. Doing so
+# would require the gateway to hold a third-party credential and transmit
+# request data to an endpoint outside the kiro-cli path — both of which break
+# the project's compliance-first, credential-free design (no credential
+# handling, only the official binary is invoked). Harnesses that need embeddings
+# (RAG/indexing, semantic code search, long-term memory) should point their
+# *embedding* model at a dedicated embeddings provider directly, keeping it
+# entirely separate from this gateway. See the README "Embeddings" section.
 # ===========================================================================
+
+# Affected harness features called out in the error message + docs so a failed
+# embeddings call is self-explanatory rather than an opaque 501.
+_EMBEDDINGS_NOT_SUPPORTED_MESSAGE = (
+    "Embeddings are not supported by this gateway. The compliant ACP path "
+    "(kiro-cli) provides only text generation and exposes no embeddings model, "
+    "and the gateway does not proxy to other providers (compliance: it never "
+    "handles third-party credentials or routes outside kiro-cli). This breaks "
+    "harness features that build embeddings — RAG/document indexing, semantic "
+    "code search, and embedding-based memory. Point your embedding model at a "
+    "dedicated embeddings provider instead (configured separately from this "
+    "gateway)."
+)
+
 
 @router.post("/embeddings", dependencies=[Depends(verify_openai_key)])
 async def create_embeddings():
-    """Embeddings are not supported: kiro-cli/ACP exposes no embeddings model."""
-    raise HTTPException(
+    """Embeddings are not supported: kiro-cli/ACP exposes no embeddings model.
+
+    Returns a ``501`` in the OpenAI-native error envelope (``{"error": {...}}``)
+    so a client's error parser/back-off behaves correctly instead of receiving
+    a bare ``{"detail": ...}``. See issue #34 for the policy decision (no
+    built-in passthrough — compliance).
+    """
+    return JSONResponse(
         status_code=501,
-        detail=(
-            "Embeddings are not supported by this gateway. The compliant ACP "
-            "path (kiro-cli) provides only text generation and exposes no "
-            "embeddings model. Use a dedicated embeddings provider for vector "
-            "generation."
-        ),
+        content={
+            "error": {
+                "message": _EMBEDDINGS_NOT_SUPPORTED_MESSAGE,
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "embeddings_not_supported",
+            }
+        },
     )

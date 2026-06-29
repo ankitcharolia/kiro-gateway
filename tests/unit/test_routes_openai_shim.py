@@ -185,11 +185,23 @@ def test_openai_responses_streaming(sync_client, openai_headers):
 # ---------------------------------------------------------------------------
 
 def test_openai_embeddings_returns_501(sync_client, openai_headers):
-    """POST /v1/embeddings returns 501 Not Implemented with a clear message."""
+    """POST /v1/embeddings returns 501 in the native OpenAI error envelope."""
     payload = {"model": "text-embedding-3-small", "input": "embed me"}
     response = sync_client.post("/v1/embeddings", json=payload, headers=openai_headers)
     assert response.status_code == 501
-    assert "embeddings" in response.json()["detail"].lower()
+    err = response.json()["error"]
+    assert err["type"] == "invalid_request_error"
+    assert err["code"] == "embeddings_not_supported"
+    assert "embeddings" in err["message"].lower()
+    # Names the affected harness features so the 501 is self-explanatory.
+    assert "rag" in err["message"].lower()
+
+
+def test_openai_embeddings_no_bare_detail(sync_client, openai_headers):
+    """The 501 body is the native {'error': {...}} shape, not a bare {'detail'}."""
+    payload = {"model": "text-embedding-3-small", "input": "x"}
+    body = sync_client.post("/v1/embeddings", json=payload, headers=openai_headers).json()
+    assert "error" in body and "detail" not in body
 
 
 # ---------------------------------------------------------------------------
