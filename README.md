@@ -539,26 +539,13 @@ final answer text is never changed** — and is gated by `ACP_SURFACE_THINKING`
   event regardless of this flag.
 
 > [!IMPORTANT]
-> **Not seeing any reasoning?** Reasoning is only surfaced when `kiro-cli`
-> actually emits it, which is **model-dependent**. Verified against a live
-> `kiro-cli` 2.8.0 probe: **`claude-opus-4.8` emits thinking** (16
-> `reasoning_content` chunks on a reasoning prompt) while **`claude-sonnet-4.6`
-> emits none** (0 chunks on the same prompt). So select a thinking-capable model
-> (e.g. `claude-opus-4.8`) in your harness. Per-request "thinking budget" /
-> `reasoning_effort` fields are **advisory only** — `kiro-cli` decides whether
-> to think based on the model, not on those client params (the gateway forwards
-> them under `_meta`, but they are not honored today). Trivial prompts may also
-> produce no thinking even on a thinking-capable model. None of this affects the
-> final answer.
->
-> **Thinking effort (`/effort`) is not controllable over ACP.** kiro-cli's
-> `/effort` is an interactive-TUI slash command; verified against a live probe
-> there is **no ACP method to discover the available efforts or to set one**
-> (`_kiro.dev/commands/effort/options` → *Method not found*; the command has no
-> `optionsMethod`, and no effort metadata is exposed on `session/new`'s model
-> list). A harness's `reasoning_effort` is therefore advisory only — it is
-> forwarded under `_meta` for forward-compatibility but kiro-cli does not act on
-> it today.
+> **Not seeing any reasoning? It's model-dependent.** kiro-cli only emits
+> thinking for some models (e.g. `claude-opus-4.8` does; `claude-sonnet-4.6`
+> doesn't) and may skip it on trivial prompts — none of which affects the final
+> answer. Per-request `reasoning_effort` / "thinking budget" is **advisory
+> only**: kiro-cli decides based on the model, not the client param (the gateway
+> forwards it under `_meta` but kiro-cli does not act on it today). `/effort` is
+> an interactive-TUI command with no ACP equivalent.
 
 ### Task list / plan
 
@@ -581,24 +568,9 @@ kiro-cli expresses a multi-step **task list** through its built-in todo tool
 ## Generation parameters
 
 Sampling parameters are accepted on both shims, validated, and **forwarded** to
-`kiro-cli` on every turn (streaming and non-streaming) inside the ACP
-`session/prompt` request, under the protocol's reserved `_meta` extension field:
-
-```jsonc
-"params": {
-  "sessionId": "…",
-  "prompt": [ … ],
-  "_meta": {
-    "generationConfig": {        // only the keys the caller set are included
-      "temperature": 0.2,
-      "maxTokens": 1024,
-      "topP": 0.9,
-      "topK": 40,
-      "stopSequences": ["\n\n"]
-    }
-  }
-}
-```
+`kiro-cli` on every turn (streaming and non-streaming) under the ACP
+`session/prompt` request's reserved `_meta.generationConfig` extension (only the
+keys the caller set are included).
 
 | Client field | Forwarded as | OpenAI | Anthropic |
 |---|---|---|---|
@@ -609,18 +581,14 @@ Sampling parameters are accepted on both shims, validated, and **forwarded** to
 | `stop` / `stop_sequences` | `stopSequences` | ✓ | ✓ |
 
 > [!IMPORTANT]
-> **kiro-cli currently treats these sampling parameters as no-ops.** Verified
-> against a live `kiro-cli` 2.8.0 ACP probe: the agent advertises no sampling
-> capability, accepts the values without error, and produces identical output
-> with or without them (`max_tokens` does not cap output, `stop` does not stop,
-> `temperature`/`top_p`/`top_k` have no effect). They are forwarded via `_meta`
-> (a schema-safe extension point) so they reach kiro-cli and take effect
-> automatically if a future version honors them — no gateway change required.
->
-> The **one** per-request generation control kiro-cli honors today is the
-> **model** (`model` → `session/set_model`); see [Models](#modes). Other OpenAI
+> **kiro-cli treats these sampling parameters as no-ops today** (it advertises
+> no sampling capability over ACP: `max_tokens` doesn't cap, `stop` doesn't
+> stop, `temperature`/`top_p`/`top_k` have no effect). They are forwarded under
+> the schema-safe `_meta` extension so they take effect automatically if a
+> future version honors them — no gateway change needed. The one per-request
+> control kiro-cli honors is the **model** (`session/set_model`). Other OpenAI
 > params (`seed`, `n`, `frequency_penalty`, `presence_penalty`, `logit_bias`)
-> are likewise not honored by ACP and are ignored.
+> are likewise ignored.
 
 ---
 
@@ -628,30 +596,11 @@ Sampling parameters are accepted on both shims, validated, and **forwarded** to
 
 JSON mode / structured outputs (`response_format`), strict tool schemas
 (`strict`) and tool-selection (`tool_choice`) are **accepted on both shims and
-forwarded to `kiro-cli`**, but they are **not honored over ACP today** — so a
-request that sets them validates and succeeds, returning free-form text (the
-model is not constrained to the requested schema). `kiro-cli` advertises no
-JSON-mode / `json_schema` / tool-choice capability on `initialize`, and ACP
-exposes no `session/prompt` field for them, so there is no structured-output
-enforcement to apply.
-
-The gateway handles them faithfully rather than rejecting the request or
-silently dropping the fields:
-
-- **Accepted, never a 422.** Requests carrying `response_format` (OpenAI chat
-  `json_object` / `json_schema`, or Responses `text.format`), `tool_choice`
-  (`auto` / `none` / `required` / `any` or a named-tool object),
-  `parallel_tool_calls`, or `strict` tool functions validate and complete
-  normally.
-- **Forwarded under `_meta`.** They are carried in the ACP `session/prompt`
-  request under the protocol's reserved `_meta` extension (schema-safe, the same
-  channel used for [generation parameters](#generation-parameters) and client
-  tool definitions): `response_format`/`tool_choice` under
-  `_meta.structuredOutput` (`{responseFormat, toolChoice}`) and `strict` on each
-  forwarded tool in `_meta.tools`.
-- **Forward-compatible.** Because the controls already reach `kiro-cli`, they
-  take effect automatically if a future `kiro-cli` honors them — **no gateway
-  change required.**
+forwarded to `kiro-cli` under the schema-safe `_meta` extension**, but they are
+**not honored over ACP today** — a request that sets them validates and
+succeeds, returning free-form text (the model isn't constrained to the schema).
+They are forwarded (not dropped) so they take effect automatically if a future
+`kiro-cli` honors them. Mapping:
 
 | Client field | API | Forwarded as |
 |---|---|---|
@@ -662,12 +611,10 @@ silently dropping the fields:
 | `strict` (per tool function) | OpenAI | `strict` on the tool in `_meta.tools` |
 
 > [!NOTE]
-> The Anthropic Messages API has **no `response_format` field** — structured
-> output there is expressed through tools — so only `tool_choice` is accepted on
-> the Anthropic shim. The Oh My Pi Anthropic example sets `disableStrictTools:
-> true` for this reason; with this forwarding in place the gateway no longer
-> needs that workaround to avoid errors (strict schemas are accepted either
-> way), though strict enforcement is still inert. See
+> The Anthropic Messages API has **no `response_format` field** (structured
+> output is expressed through tools), so only `tool_choice` is accepted there.
+> Strict schemas are accepted either way (the Oh My Pi `disableStrictTools`
+> workaround is no longer needed), though strict enforcement is still inert. See
 > [issue #35](https://github.com/ankitcharolia/kiro-gateway/issues/35).
 
 ---
@@ -689,131 +636,66 @@ usage field is never silently `0`.
 | Anthropic `/v1/messages` (stream) | `input_tokens` (+ cache fields) in `message_start`, `output_tokens` in `message_delta` |
 
 - **Real vs. estimated.** Each field is resolved independently: a reported,
-  positive count wins; otherwise that field is estimated. `kiro-cli` 2.x does
-  not report usage over ACP (its `/usage` view is an interactive REPL command,
-  not part of the `session/prompt` result), so today most counts are estimates.
-  The gateway already reads any usage `kiro-cli` emits — on the prompt result,
-  a `session/update`, or under the ACP `_meta` extension — so real counts are
-  surfaced automatically if a future `kiro-cli` provides them, with **no
-  gateway change required**.
-- **`/usage` is not a harness feature.** `/usage` is a slash command of the
-  interactive `kiro-cli` chat TUI; harnesses (OpenAI/Anthropic clients) never
-  issue it — they read the `usage` object on each completion response, which the
-  gateway always fills. Sending the literal text `/usage` as a prompt does not
-  return token counts either: over ACP it is treated as ordinary prompt text,
-  and the gateway opens a fresh, stateless session per request, so there is no
-  cumulative interactive session for `/usage` to report on.
-- **Estimates are approximate.** They are suitable for budgeting and cost
-  displays, not exact billing.
+  positive count wins; otherwise it's estimated. `kiro-cli` 2.x reports no usage
+  over ACP today (its `/usage` is an interactive REPL command, not part of the
+  `session/prompt` result), so most counts are estimates — but the gateway
+  already reads any usage `kiro-cli` emits (prompt result, `session/update`, or
+  `_meta`), so real counts surface automatically if a future version provides
+  them. `/usage` is not a harness feature (harnesses read the `usage` object,
+  not the slash command). Estimates are for budgeting, not exact billing.
 
 ### Prompt caching (no-op, but reported)
 
-Anthropic prompt caching (`cache_control: {"type": "ephemeral"}` markers on
-`system` / message content blocks) and OpenAI automatic prompt caching are
-**not available over ACP**. Verified against a live `kiro-cli` 2.8.0 probe,
-`kiro-cli` advertises **no caching capability** on `initialize` and exposes no
-ACP mechanism to mark, store, or reuse a cached prefix — so there is **no
-caching benefit and no real cache-token activity** to report today.
-
-The gateway handles this faithfully rather than failing or silently dropping
-data:
-
-- **`cache_control` markers are accepted (no-op).** Requests carrying
-  `cache_control` on `system` blocks or message content validate normally and
-  are processed; the markers are simply not acted upon (no error, no 422).
-- **Cache token fields are reported, not omitted.** Each completion's `usage`
-  object includes the native cache fields so the shape matches the real
-  Anthropic/OpenAI APIs:
-  - Anthropic `/v1/messages`: `usage.cache_creation_input_tokens` and
-    `usage.cache_read_input_tokens` (in `message_start` for the stream).
-  - OpenAI `/v1/chat/completions`: `usage.prompt_tokens_details.cached_tokens`.
-  - OpenAI `/v1/responses`: `usage.input_tokens_details.cached_tokens`.
-- **Forward-compatible.** These fields are `0` today, but the gateway already
-  surfaces any cache counts `kiro-cli` reports over ACP (on the prompt result,
-  a `session/update`, or under `_meta`), so **real cache usage appears
-  automatically if a future `kiro-cli` provides it — no gateway change
-  required.** Cache counts are never estimated (a cache hit/miss cannot be
-  guessed from text), so a `0` here means "not reported", not "estimated".
+Prompt caching is **not available over ACP** (kiro-cli advertises no caching
+capability). So Anthropic `cache_control` markers are **accepted as a no-op**
+(validated, never a 422), and the native cache-token fields are **reported (as
+`0`) rather than omitted**, keeping the `usage` shape faithful: Anthropic
+`usage.cache_creation_input_tokens` / `cache_read_input_tokens`, OpenAI chat
+`usage.prompt_tokens_details.cached_tokens`, OpenAI Responses
+`usage.input_tokens_details.cached_tokens`. They are never estimated and surface
+real counts verbatim if a future `kiro-cli` reports them.
 
 ### logprobs (unsupported)
 
-The ACP path exposes no token log-probabilities, so `logprobs` is **not
-supported**. The OpenAI shim accepts the `logprobs` / `top_logprobs` request
-fields for API compatibility and reports `"logprobs": null` on each choice;
-the value is never populated. The Anthropic Messages API has no logprobs
-feature.
+The ACP path exposes no token log-probabilities. The OpenAI shim accepts
+`logprobs` / `top_logprobs` for compatibility and reports `"logprobs": null` per
+choice; the Anthropic Messages API has no logprobs feature.
 
 ---
 
 ## Tool-call round-trips
 
-> [!IMPORTANT]
-> **How tools work with kiro-cli (verified against a live `kiro-cli` 2.8.0 ACP
-> probe).** `kiro-cli` over ACP is an **autonomous agent**, not a raw
-> function-calling model. There are two distinct cases:
->
-> 1. **kiro-cli's own built-in tools (code, file read/edit, shell/command
->    execution, AWS, web search) — fully supported through the gateway.** When a
->    harness sends a prompt, kiro-cli decides to run these itself, asks the
->    gateway for permission, executes them inside the session working directory,
->    and continues the turn. *Probe confirmation:* a prompt asking it to run
->    `echo <marker>` produced a `tool_call` (`kind: execute`), one
->    `session/request_permission` (auto-approved `allow_once`), and the marker
->    appeared in the streamed response. So harnesses **can** drive kiro-cli's
->    built-in agentic toolset through the gateway. By default the shims surface
->    that activity as **inline, non-executable reasoning text** (interleaved with
->    thinking, like kiro-cli's activity view — see `ACP_SURFACE_TOOL_CALLS`
->    below), so harnesses see what the agent is doing but never receive a tool
->    call they cannot execute.
-> 2. **Client-declared tools (the harness's own functions) — not honored by
->    kiro-cli today.** Definitions sent on `session/prompt` (whether as a
->    top-level `tools` field or under `_meta.tools`) are accepted without error
->    but ignored: in the probe the model replied that it had *no* such tool and
->    listed only its built-ins. ACP's only channel for *external* tools is **MCP
->    servers** registered at `session/new` (kiro-cli advertises
->    `mcpCapabilities.http: true`), where the **MCP server — not the harness —**
->    executes the tool. The gateway still **forwards** normalized client tool
->    definitions under the schema-safe `_meta.tools` extension (consistent with
->    the sampling-param forwarding) so they reach kiro-cli and take effect
->    automatically if a future version ingests them — but **OpenAI/Anthropic-style
->    client-side function calling does not round-trip through kiro-cli today.**
->    See [issue #31](https://github.com/ankitcharolia/kiro-gateway/issues/31).
+`kiro-cli` over ACP is an **autonomous agent**, not a raw function-calling
+model. Two distinct cases:
+
+1. **kiro-cli's own built-in tools** (code, file read/edit, shell, AWS, web
+   search) — **fully supported.** kiro-cli decides to run them, asks the gateway
+   for permission, executes them in the session directory, and continues the
+   turn. Harnesses drive these and get the final answer.
+2. **Client-declared tools** (the harness's own functions) — **not honored by
+   kiro-cli today.** Definitions on `session/prompt` (top-level `tools` or
+   `_meta.tools`) are accepted but ignored; ACP's only external-tool channel is
+   **MCP servers** registered at `session/new` (executed by the MCP server, not
+   the harness). The gateway still forwards client tool defs under `_meta.tools`
+   for forward-compatibility, but OpenAI/Anthropic-style client-side function
+   calling does **not** round-trip today. See
+   [issue #31](https://github.com/ankitcharolia/kiro-gateway/issues/31).
 
 **By default (`ACP_SURFACE_TOOL_CALLS=false`) the shims surface kiro-cli's
 built-in tool activity as inline, non-executable reasoning** — each tool run
-(e.g. `⚙ Fetching web content`, `⚙ Reading config.py`, `⚙ Running: …`) is folded
-into the reasoning channel (`reasoning_content` / Responses reasoning item /
-Anthropic `thinking` block), **interleaved with the model's thinking and before
-the answer**, mirroring kiro-cli's activity view. The harness still receives a
-normal completion (`finish_reason=stop` / `end_turn`) — never an executable tool
-call it can't run — so this works with every harness. This surfacing rides the
-`ACP_SURFACE_THINKING` flag (set it `false` to drop activity + thinking and emit
-only the answer). Live interleaving requires **streaming**; a non-streaming
-response returns the activity/thinking and answer together at the end.
+(`⚙ Reading config.py`, `⚙ Running: …`) is folded into the reasoning channel,
+interleaved with thinking and before the answer (rides `ACP_SURFACE_THINKING`;
+live interleaving needs streaming). The harness gets a normal completion
+(`finish_reason=stop`/`end_turn`), never a tool call it can't run — so this
+works with every harness. File edits render as a fenced ` ```diff ` block;
+shell commands render the command + a fenced output block; file reads show only
+the label.
 
-That activity view includes the same detail kiro-cli shows:
-- **File edits** render the added/removed lines as a fenced ` ```diff ` block
-  (`-` removed / `+` added), so harness markdown colours them red/green.
-- **Shell/command execution** renders the command (`⚙ Running: …`) followed by a
-  fenced block of its output (truncated for very large output).
-- **File reads** show only the `⚙ Reading …` label — their (potentially huge)
-  contents are not dumped into the reasoning stream.
-
-When `ACP_SURFACE_TOOL_CALLS=true` (opt-in, for ACP-aware UIs that just display
-activity), the tool activity is instead emitted as executable-shaped events:
-
-1. `kiro-cli` decides to run one of its built-in tools and asks the gateway for
-   permission via `session/request_permission`.
-2. The gateway approves or rejects based on `ACP_TRUST_TOOLS` (see below).
-3. The tool invocation is streamed to the caller as a `tool_call` event,
-   translated to the caller's format (`tool_calls` / `tool_use`).
-4. `kiro-cli` executes the tool itself and continues the same turn, streaming
-   the resulting assistant text.
-
-The native `/acp/chat` route always surfaces this activity (ACP clients display
-it and never execute it, per the protocol). Either way, tool execution and
-continuation happen entirely inside `kiro-cli` within a single turn — callers
-never execute tools themselves.
+When `ACP_SURFACE_TOOL_CALLS=true` (opt-in, for ACP-aware UIs), the activity is
+instead emitted as executable-shaped `tool_calls`/`tool_use` events. The native
+`/acp/chat` route always surfaces a structured tool call. Either way, tool
+execution happens entirely inside `kiro-cli` within one turn — callers never
+execute tools themselves.
 
 ---
 
@@ -850,108 +732,6 @@ ACP_WORKSPACE_DIR=/path  # working directory kiro-cli operates in (default: proc
 
 A request may also pass `filesystem_roots` to set the session's working
 directory; the first root's path is used as the `cwd` for `session/new`.
-
----
-
-## Architecture reference
-
-| Component | File | Purpose |
-|---|---|---|
-| ACP bridge | `kiro/acp_client.py` | Spawns `kiro-cli`; exchanges JSON-RPC 2.0 over stdio; routes events to per-session queues |
-| ACP models | `kiro/acp_models.py` | Pydantic models for all ACP types |
-| Permission handling | `kiro/acp_client.py` | Answers `session/request_permission` (auto-approve / reject via `ACP_TRUST_TOOLS`) |
-| Orchestration | `kiro/shim_service.py` | Per-request session creation, streaming passthrough, non-streaming aggregation |
-| ACP routes | `kiro/routes_acp.py` | `/acp/chat`, `/acp/chat/stream` |
-| OpenAI shim | `kiro/routes_openai_shim.py` | `/v1/chat/completions`, `/v1/models` |
-| Anthropic shim | `kiro/routes_anthropic_shim.py` | `/v1/messages`, `/v1/models` |
-| Compliance guard | `kiro/compliance.py` | Single-account enforcement at startup |
-
----
-
-## Running tests
-
-```bash
-# Install test dependencies
-pip install -e ".[dev]"
-
-# Run the full suite
-pytest tests/ -v
-
-# Run compliance checks only
-pytest tests/unit/test_acp_compliance.py tests/unit/test_compliance.py -v
-
-# Run with coverage
-pytest --cov=kiro --cov-report=term-missing
-```
-
-The test suite verifies:
-- All removed direct-API modules raise `ImportError`
-- `main.py` mounts only ACP-backed routers
-- `acp_client.py` uses subprocess stdio, not HTTP
-- No private Kiro API URLs appear in source files
-- Single-account `ComplianceError` is raised for 2+ sessions
-- OpenAI + Anthropic shim endpoints return spec-compliant responses
-- `session/request_permission` is auto-approved or rejected per `ACP_TRUST_TOOLS`
-
----
-
-## Docker image release process
-
-Images are built and pushed automatically by GitHub Actions on every `v*` tag.
-
-```bash
-# Create and push a release tag
-git tag vX.Y.Z
-git push origin vX.Y.Z
-# → CI builds linux/amd64 + linux/arm64 and pushes:
-#     ghcr.io/ankitcharolia/kiro-gateway:vX.Y.Z
-#     ghcr.io/ankitcharolia/kiro-gateway:latest
-```
-
-> The published image bundles the Kiro CLI binary; see
-> [Compliance & licensing](#compliance--licensing) before publishing it publicly.
-
----
-
-## Recommended practices
-
-- Prefer **ACP-native IDEs** whenever available — zero translation overhead.
-- Scope `ACP_WORKSPACE_DIR` to a single project directory.
-- Set `ACP_TRUST_TOOLS=false` for an answer-only deployment where the agent must not edit files or run commands.
-- Never share `KIRO_GATEWAY_API_KEY` — treat it like any API secret.
-- All Kiro authentication lives in `kiro-cli`. The gateway never touches credentials.
-
----
-
-## Performance & long-running sessions
-
-The gateway holds **one** persistent `kiro-cli acp` subprocess and opens a fresh
-ACP session per HTTP request, so concurrent and repeated requests stay isolated.
-A few notes for long-running agents that issue many large turns:
-
-- **Large tool outputs / long turns.** ACP streams tool results and assistant
-  text as single JSON-RPC lines on stdout. `ACP_STDIO_MAX_BYTES` (default 16 MiB)
-  sets the per-line read buffer; raise it if an agent produces very large diffs,
-  file dumps, or completions. (asyncio's built-in default is only 64 KiB, which
-  oversized lines would silently overrun — the gateway raises it for you.)
-- **Model selection is cheap.** The requested model is forwarded with one
-  `session/set_model` call, and the gateway **skips** it when the request already
-  asks for the session's default model — no extra round-trip in the common case.
-- **Concurrency.** All requests multiplex over the single subprocess (required by
-  the single-account compliance model); throughput is bounded by `kiro-cli`
-  itself, not by the gateway's translation layer.
-- **Statelessness.** Each request re-sends its full conversation (standard for the
-  OpenAI/Anthropic APIs) and runs in its own session, so there is no cross-request
-  state to leak or grow on the gateway side.
-- **Stateful Responses API is unsupported (by design).** Because the gateway is
-  stateless and stores no responses, the OpenAI Responses server-side state
-  features are not available:
-  - `previous_response_id` → rejected with a clear `400 invalid_request_error`
-    (the id can't be resolved; resend the full conversation in `input`). Applies
-    to streaming and non-streaming.
-  - `store` → accepted as a **no-op**: the request succeeds, but the response is
-    not persisted and there is no retrieval endpoint, so it can't later be
-    fetched or chained by id.
 
 ---
 
