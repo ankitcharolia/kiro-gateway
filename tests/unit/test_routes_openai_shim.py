@@ -532,6 +532,100 @@ class TestOpenAIShimStatefulResponses:
 
 
 # ---------------------------------------------------------------------------
+# Multimodal input (issue #33): image_url base64 parts are forwarded as ACP
+# image blocks; documents/audio become explicit placeholders. Both modes.
+# ---------------------------------------------------------------------------
+
+class TestOpenAIShimMultimodal:
+    """Images reach the shim as image blocks; documents/audio are placeholdered."""
+
+    _PNG = "data:image/png;base64,QUJD"  # base64("ABC")
+
+    def _image_blocks(self, content):
+        return [b for b in content if isinstance(b, dict) and b.get("type") == "image"]
+
+    def test_chat_image_forwarded_as_image_block(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": self._PNG}},
+            ]}],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        content = rec.complete_kwargs[0]["messages"][-1].content
+        assert isinstance(content, list)
+        imgs = self._image_blocks(content)
+        assert imgs and imgs[0]["data"] == "QUJD" and imgs[0]["mimeType"] == "image/png"
+
+    def test_chat_stream_image_forwarded(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "stream": True,
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": self._PNG}},
+            ]}],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        content = rec.stream_kwargs[0]["messages"][-1].content
+        assert self._image_blocks(content)
+
+    def test_chat_document_becomes_placeholder(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "summarise"},
+                {"type": "input_file", "filename": "r.pdf",
+                 "file_data": "data:application/pdf;base64,QUJD"},
+            ]}],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        content = rec.complete_kwargs[0]["messages"][-1].content
+        # No image → collapses to a string carrying the placeholder.
+        assert isinstance(content, str)
+        assert "[document: r.pdf omitted" in content
+
+    def test_chat_text_document_is_extracted(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": [
+                {"type": "input_file", "filename": "n.txt",
+                 "file_data": "data:text/plain;base64,aGVsbG8gd29ybGQ="},
+            ]}],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        content = rec.complete_kwargs[0]["messages"][-1].content
+        assert "hello world" in content
+
+    def test_responses_input_image_forwarded(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "input": [{"role": "user", "content": [
+                {"type": "input_text", "text": "describe"},
+                {"type": "input_image", "image_url": self._PNG},
+            ]}],
+        }
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        content = rec.complete_kwargs[0]["messages"][-1].content
+        assert self._image_blocks(content)
+
+
+# ---------------------------------------------------------------------------
 # Error mapping (issue #44): ACP/upstream failures surface with the right HTTP
 # status and the OpenAI native error shape, in both streaming and non-streaming
 # paths.

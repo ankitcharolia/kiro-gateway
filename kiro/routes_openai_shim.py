@@ -37,6 +37,9 @@ from kiro.acp_client import format_plan_text
 from kiro.auth import verify_openai_key
 from kiro.config import DEFAULT_KIRO_MODELS, settings
 from kiro.error_mapping import MappedError, classify_event, classify_exception
+from kiro.multimodal import (
+    append_text, collapse_blocks, openai_part_to_blocks, prepend_text,
+)
 from kiro.shim_service import ShimService
 from kiro.tokenizer import normalize_usage
 
@@ -126,6 +129,12 @@ def _oai_messages_to_acp(messages: list[OAIMessage]) -> list[PromptMessage]:
     * ``tool`` (and any other role) is rendered as ``user`` content; tool
       results additionally carry a ``[tool_result id=...]`` marker for context.
 
+    Multimodal parts (issue #33): ``image_url`` parts with a base64 data URL are
+    forwarded as ACP image content blocks (kiro-cli supports images); remote
+    image URLs, documents and audio are surfaced as text (documents are
+    extracted when text/PDF, else placeholdered) rather than silently dropped.
+    See :mod:`kiro.multimodal`.
+
     Args:
         messages: The OpenAI request messages.
 
@@ -143,24 +152,23 @@ def _oai_messages_to_acp(messages: list[OAIMessage]) -> list[PromptMessage]:
             # user, tool, function, or anything unexpected → user content.
             acp_role = "user"
 
-        # Flatten content
+        # Normalise content parts. Images are forwarded as ACP image blocks;
+        # documents are extracted to text (or placeholdered); audio/unsupported
+        # attachments become explicit placeholders — never silently dropped
+        # (issue #33). Text-only content collapses to a plain string (preserving
+        # the labelled-transcript serialisation); image-bearing content becomes
+        # a list of normalised blocks for ACPClient._build_prompt_blocks.
         if isinstance(m.content, list):
-            text_parts = []
+            blocks: list[dict] = []
             for part in m.content:
-                if isinstance(part, dict):
-                    if part.get("type") == "text":
-                        text_parts.append(part.get("text", ""))
-                    elif part.get("type") == "tool_result":
-                        text_parts.append(str(part.get("content", "")))
-                else:
-                    text_parts.append(str(part))
-            content = "\n".join(text_parts)
+                blocks.extend(openai_part_to_blocks(part))
+            content = collapse_blocks(blocks)
         else:
             content = m.content or ""
 
         # tool role: wrap with tool_call_id context
         if m.role == "tool" and m.tool_call_id:
-            content = f"[tool_result id={m.tool_call_id}]\n{content}"
+            content = prepend_text(content, f"[tool_result id={m.tool_call_id}]")
 
         # assistant tool calls: render each call faithfully so a prior
         # tool-calling turn is preserved in the serialised history. Without
@@ -182,10 +190,9 @@ def _oai_messages_to_acp(messages: list[OAIMessage]) -> list[PromptMessage]:
                     f"[tool_use id={tc.get('id', '')} name={name}]\n{args}"
                 )
             calls_text = "\n".join(call_markers)
-            if calls_text:
-                content = f"{content}\n{calls_text}".strip() if content else calls_text
+            content = append_text(content, calls_text)
 
-        result.append(PromptMessage(role=acp_role, content=str(content)))
+        result.append(PromptMessage(role=acp_role, content=content))
     return result
 
 
@@ -636,7 +643,10 @@ def _responses_input_to_acp(
     Args:
         input_value: Either a plain string prompt or a list of message items.
             Each item is ``{"role": str, "content": str | list[part]}`` where a
-            part is ``{"type": "input_text"|"output_text"|"text", "text": str}``.
+            part is a text part (``input_text``/``output_text``/``text``), an
+            ``input_image`` (forwarded as an image block), or an
+            ``input_file``/``input_audio`` (extracted or placeholdered — see
+            :mod:`kiro.multimodal`, issue #33).
         instructions: Optional system-style instructions prepended to the turn.
 
     Returns:
@@ -663,17 +673,14 @@ def _responses_input_to_acp(
                 role = "user"
             content = item.get("content", "")
             if isinstance(content, list):
-                text_parts: list[str] = []
+                # Normalise Responses content parts: input_image is forwarded as
+                # an ACP image block, input_file/document is extracted or
+                # placeholdered, input_audio is placeholdered (issue #33).
+                blocks: list[dict] = []
                 for part in content:
-                    if isinstance(part, dict):
-                        if part.get("type") in ("input_text", "output_text", "text"):
-                            text_parts.append(part.get("text", ""))
-                        else:
-                            text_parts.append(str(part.get("text", "")))
-                    else:
-                        text_parts.append(str(part))
-                content = "\n".join(p for p in text_parts if p)
-            messages.append(PromptMessage(role=role, content=str(content)))
+                    blocks.extend(openai_part_to_blocks(part))
+                content = collapse_blocks(blocks)
+            messages.append(PromptMessage(role=role, content=content if isinstance(content, list) else str(content)))
         return messages
 
     # Fallback: stringify anything else.

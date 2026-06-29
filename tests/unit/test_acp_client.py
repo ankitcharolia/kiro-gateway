@@ -1275,3 +1275,75 @@ class TestBuildPromptBlocks:
         ]
         text = ACPClient._build_prompt_blocks(msgs)[0]["text"]
         assert text == "User: a\n\nAssistant: b"
+
+
+# ---------------------------------------------------------------------------
+# Image forwarding in the prompt (issue #33): image content blocks travel as
+# their own ACP image blocks after the text transcript; documents/audio are
+# already text by the time they reach _build_prompt_blocks.
+# ---------------------------------------------------------------------------
+
+_IMG = {"type": "image", "mimeType": "image/png", "data": "QUJD"}
+
+
+class TestSplitContent:
+    """ACPClient._split_content separates text from image blocks."""
+
+    def test_plain_string_has_no_images(self):
+        assert ACPClient._split_content("hello") == ("hello", [])
+
+    def test_text_only_block_list(self):
+        text, imgs = ACPClient._split_content([{"type": "text", "text": "a"},
+                                               {"type": "text", "text": "b"}])
+        assert text == "a\nb"
+        assert imgs == []
+
+    def test_image_block_extracted(self):
+        text, imgs = ACPClient._split_content([{"type": "text", "text": "look"}, _IMG])
+        assert text == "look"
+        assert imgs == [{"type": "image", "mimeType": "image/png", "data": "QUJD"}]
+
+    def test_image_without_data_skipped(self):
+        text, imgs = ACPClient._split_content([{"type": "image", "mimeType": "image/png"}])
+        assert imgs == []
+
+    def test_none_content(self):
+        assert ACPClient._split_content(None) == ("", [])
+
+
+class TestBuildPromptBlocksImages:
+    """_build_prompt_blocks emits forwarded image blocks alongside text."""
+
+    def test_lone_user_text_plus_image(self):
+        msgs = [PromptMessage(role="user", content=[{"type": "text", "text": "what is this?"}, _IMG])]
+        blocks = ACPClient._build_prompt_blocks(msgs)
+        assert blocks[0]["type"] == "text"
+        assert "what is this?" in blocks[0]["text"]
+        assert "[image]" in blocks[0]["text"]  # inline marker
+        assert blocks[1] == {"type": "image", "mimeType": "image/png", "data": "QUJD"}
+
+    def test_image_only_user_message(self):
+        msgs = [PromptMessage(role="user", content=[_IMG])]
+        blocks = ACPClient._build_prompt_blocks(msgs)
+        # text block carries the [image] marker, image block follows
+        assert blocks[0] == {"type": "text", "text": "[image]"}
+        assert blocks[1]["type"] == "image"
+
+    def test_multi_turn_with_image_keeps_labels_and_appends_image(self):
+        msgs = [
+            PromptMessage(role="user", content=[{"type": "text", "text": "see this"}, _IMG]),
+            PromptMessage(role="assistant", content="ok"),
+        ]
+        blocks = ACPClient._build_prompt_blocks(msgs)
+        text = blocks[0]["text"]
+        assert "User: see this" in text
+        assert "Assistant: ok" in text
+        assert blocks[-1]["type"] == "image"
+
+    def test_multiple_images_all_forwarded(self):
+        img2 = {"type": "image", "mimeType": "image/jpeg", "data": "WFla"}
+        msgs = [PromptMessage(role="user", content=[{"type": "text", "text": "two"}, _IMG, img2])]
+        blocks = ACPClient._build_prompt_blocks(msgs)
+        image_blocks = [b for b in blocks if b["type"] == "image"]
+        assert len(image_blocks) == 2
+        assert blocks[0]["text"].count("[image]") == 2

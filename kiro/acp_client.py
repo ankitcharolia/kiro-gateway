@@ -915,6 +915,15 @@ class ACPClient:
         structural fidelity while risking ambiguous boundaries if an agent
         concatenates blocks without a separator. The labelled, blank-line-
         delimited single block keeps boundaries explicit and stable.
+
+        **Images (issue #33).** kiro-cli advertises ``promptCapabilities.image``
+        (verified against a live 2.10.0 probe), so image attachments — carried
+        as ``{"type": "image", …}`` entries inside a message's structured
+        content — are emitted as their own ACP image content blocks **after** the
+        text transcript, with an inline ``[image]`` marker left in the turn's
+        text to mark where each appeared. The result is a mixed prompt array
+        ``[{text transcript}, {image}, …]`` (documents/audio are already reduced
+        to text by the shims; only images travel as binary blocks).
         """
         label = {
             "user": "User",
@@ -923,35 +932,76 @@ class ACPClient:
             "developer": "Developer",
         }
         parts: list[tuple[str, str]] = []
+        image_blocks: list[dict] = []
         for m in messages:
             role = getattr(m, "role", None) if not isinstance(m, dict) else m.get("role")
             content = getattr(m, "content", None) if not isinstance(m, dict) else m.get("content")
-            text = ACPClient._flatten_content(content)
+            text, images = ACPClient._split_content(content)
+            # Leave an inline marker per image so the (role-less) transcript
+            # still references where each attachment occurred, then carry the
+            # image as a real ACP block appended after the text.
+            for img in images:
+                text = (text + "\n[image]") if text else "[image]"
+                image_blocks.append(img)
             parts.append((role or "user", text))
 
+        blocks: list[dict] = []
         if not parts:
-            return [{"type": "text", "text": ""}]
-        if len(parts) == 1 and parts[0][0] == "user":
-            return [{"type": "text", "text": parts[0][1]}]
-        rendered = "\n\n".join(f"{label.get(r, 'User')}: {c}" for r, c in parts)
-        return [{"type": "text", "text": rendered}]
+            text_block_text = ""
+        elif len(parts) == 1 and parts[0][0] == "user":
+            text_block_text = parts[0][1]
+        else:
+            text_block_text = "\n\n".join(
+                f"{label.get(r, 'User')}: {c}" for r, c in parts
+            )
+
+        if text_block_text or not image_blocks:
+            blocks.append({"type": "text", "text": text_block_text})
+        blocks.extend(image_blocks)
+        return blocks or [{"type": "text", "text": ""}]
+
+    @staticmethod
+    def _split_content(content: Any) -> tuple[str, list[dict]]:
+        """Split message content into (flattened text, image content blocks).
+
+        Text and any non-image parts are flattened to a single string (as
+        :meth:`_flatten_content`), while ``image`` parts are extracted as ACP
+        image wire blocks (``{"type": "image", "mimeType", "data"}``) so the
+        prompt builder can forward them. Plain-string content yields no images.
+
+        Args:
+            content: A message's content (``str`` or list of normalised blocks).
+
+        Returns:
+            A ``(text, images)`` tuple.
+        """
+        if content is None:
+            return "", []
+        if isinstance(content, str):
+            return content, []
+        if isinstance(content, list):
+            chunks: list[str] = []
+            images: list[dict] = []
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "image" and part.get("data"):
+                        images.append({
+                            "type": "image",
+                            "mimeType": part.get("mimeType") or part.get("mime_type") or "image/png",
+                            "data": part["data"],
+                        })
+                    else:
+                        chunks.append(str(part.get("text") or part.get("content") or ""))
+                else:
+                    chunks.append(str(part))
+            return "\n".join(c for c in chunks if c), images
+        return str(content), []
 
     @staticmethod
     def _flatten_content(content: Any) -> str:
-        """Flatten str | list[content_part] into plain text."""
-        if content is None:
-            return ""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            chunks: list[str] = []
-            for part in content:
-                if isinstance(part, dict):
-                    chunks.append(str(part.get("text") or part.get("content") or ""))
-                else:
-                    chunks.append(str(part))
-            return "\n".join(c for c in chunks if c)
-        return str(content)
+        """Flatten str | list[content_part] into plain text (images dropped)."""
+        text, _ = ACPClient._split_content(content)
+        return text
 
     # ------------------------------------------------------------------
     # Internal: JSON-RPC plumbing

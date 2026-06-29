@@ -443,6 +443,38 @@ separated by blank lines:
 
 ---
 
+## Image & document input
+
+The gateway forwards **image** attachments to kiro-cli and surfaces
+**documents/audio** as text instead of silently dropping them. Capability ground
+truth — verified against a **live kiro-cli 2.10.0 probe** (`initialize` →
+`agentCapabilities.promptCapabilities`): `{"image": true, "audio": false,
+"embeddedContext": false}`.
+
+| Input | Behaviour |
+|---|---|
+| OpenAI `image_url` / Responses `input_image` — **base64 data URL** | Forwarded to kiro-cli as an ACP image content block (`{"type":"image","mimeType":…,"data":…}`) |
+| Anthropic `image` — **base64 source** | Forwarded as an ACP image content block |
+| Image given as a **remote URL** | **Not fetched** (kiro-cli has no URL content-block capability; fetching untrusted URLs server-side is an SSRF risk). Surfaced as text: `[image: <url> (remote URL not fetched …)]` |
+| **Text-like document** (`text/*`, JSON, XML, CSV, …) | Decoded and injected as text: `[document: <name>]\n<content>` — the model reads it |
+| **PDF document** | Text extracted with `pypdf` (a standard dependency) — works out of the box; a scanned/image-only PDF that yields no text falls back to a placeholder |
+| **Other binary document** / **audio** | Explicit placeholder (`[document: … omitted — unsupported by kiro-cli]` / `[audio omitted …]`) — never a silent drop |
+
+- **Both shims, both modes.** Images are forwarded on OpenAI `/v1/chat/completions`,
+  OpenAI `/v1/responses`, and Anthropic `/v1/messages`, in streaming and
+  non-streaming paths. Verified end-to-end against the live probe: a forwarded
+  32×32 PNG made the model answer with the image's colour.
+- **Why documents aren't forwarded as binary.** kiro-cli advertises
+  `embeddedContext: false`, so it rejects embedded resources on the wire. The
+  gateway therefore reduces documents to text (extracted or placeholder) so the
+  model is always aware an attachment existed.
+- **Prompt shape.** Images travel as their own ACP content blocks appended after
+  the labelled text transcript, with an inline `[image]` marker left in the turn
+  text to mark where each appeared (ACP content blocks carry no role; see
+  [Multi-turn & tool history fidelity](#multi-turn--tool-history-fidelity)).
+
+---
+
 ## Reasoning / thinking
 
 kiro-cli emits reasoning ("thinking") while it works. The gateway surfaces it

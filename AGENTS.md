@@ -281,6 +281,36 @@ turn order stable; assert the representation in tests (`TestBuildPromptBlocks`,
 is about *carrying* prior tool turns in history — client-side function calling
 is still not honored by kiro-cli over ACP (issue #31).
 
+## Multimodal input (`kiro/multimodal.py`, issue #33)
+
+Capability ground truth — **live kiro-cli 2.10.0 probe**
+(`initialize.agentCapabilities.promptCapabilities`): `{"image": true, "audio":
+false, "embeddedContext": false}`. So:
+
+- **Images forwarded.** `openai_part_to_blocks` / `anthropic_block_to_blocks`
+  turn a base64 `image_url` / `input_image` / Anthropic `image` block into a
+  normalised `{"type": "image", "mimeType", "data"}` block. The shims keep
+  image-bearing content as a **block list** on `PromptMessage.content`
+  (text-only content still collapses to a `str` via `collapse_blocks`).
+  `ACPClient._split_content` separates text from images, and
+  `_build_prompt_blocks` appends each image as its own ACP content block after
+  the labelled text transcript (with an inline `[image]` marker). The wire shape
+  `{"type":"image","mimeType":…,"data":…}` is confirmed accepted end-to-end by
+  the live probe (a forwarded PNG changed the model's answer).
+- **Remote image URLs are NOT fetched** (no URL content-block capability;
+  SSRF/egress risk) — surfaced as text.
+- **Documents reduced to text** (`embeddedContext: false` → binary rejected):
+  text-like mimes are decoded and injected; PDFs are extracted via `pypdf` (a
+  standard dependency — `_extract_pdf_text`, lazy import for graceful
+  degradation); a scanned/no-text PDF, other binary formats, and audio get an
+  explicit `[document: … omitted]` / `[audio omitted …]` placeholder — never a
+  silent drop.
+
+When extending: keep both shims routed through `kiro.multimodal`, keep the image
+wire shape, and assert image forwarding + the document/audio placeholder path in
+tests (`tests/unit/test_multimodal.py`, plus the route + `_build_prompt_blocks`
+image tests). Don't fetch remote URLs server-side.
+
 ## Usage & token accounting (`kiro/tokenizer.py`)
 
 `normalize_usage(reported, prompt_messages, prompt_tools, prompt_system,

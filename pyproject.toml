@@ -13,6 +13,8 @@ dependencies = [
     "httpx>=0.27",
     "pydantic>=2.7",
     "loguru>=0.7",
+    # PDF document text extraction for image/document inputs (issue #33).
+    "pypdf>=4",
 ]
 
 [project.optional-dependencies]

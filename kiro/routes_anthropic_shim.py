@@ -46,6 +46,7 @@ from kiro.acp_client import format_plan_text
 from kiro.auth import verify_anthropic_key
 from kiro.config import DEFAULT_KIRO_MODELS, settings
 from kiro.error_mapping import MappedError, classify_event, classify_exception
+from kiro.multimodal import anthropic_block_to_blocks, collapse_blocks
 from kiro.shim_service import ShimService
 from kiro.tokenizer import estimate_request_tokens, normalize_usage
 
@@ -156,6 +157,11 @@ def _anthropic_messages_to_acp(
     histories survive the serialisation (issue #43):
 
     * ``text`` blocks contribute their text.
+    * ``image`` blocks with a base64 source → forwarded as ACP image blocks
+      (kiro-cli supports images); ``url`` sources are surfaced as text.
+    * ``document`` blocks → extracted to text when text/PDF, else placeholdered
+      (kiro-cli has no embedded-document capability) — never silently dropped
+      (issue #33, see :mod:`kiro.multimodal`).
     * ``tool_use`` blocks → ``[tool_use id=… name=…]`` + the call input JSON.
     * ``tool_result`` blocks → ``[tool_result id=…]`` + the result content.
 
@@ -188,29 +194,17 @@ def _anthropic_messages_to_acp(
             continue
 
         if isinstance(m.content, list):
-            parts = []
+            # Normalise content blocks via the shared multimodal helper: text
+            # and tool_use/tool_result render to the same markers as the OpenAI
+            # shim; base64 ``image`` blocks are forwarded as ACP image blocks;
+            # ``document`` blocks are extracted to text (or placeholdered) and
+            # ``url`` sources surfaced as text — never silently dropped
+            # (issue #33). Image-bearing content stays a block list for
+            # ACPClient._build_prompt_blocks; otherwise it collapses to a string.
+            blocks: list[dict] = []
             for part in m.content:
-                if isinstance(part, dict):
-                    ptype = part.get("type", "")
-                    if ptype == "text":
-                        parts.append(part.get("text", ""))
-                    elif ptype == "tool_use":
-                        parts.append(
-                            f"[tool_use id={part.get('id')} name={part.get('name')}]\n"
-                            f"{json.dumps(part.get('input', {}))}"
-                        )
-                    elif ptype == "tool_result":
-                        content = part.get("content", "")
-                        if isinstance(content, list):
-                            content = "\n".join(
-                                p.get("text", "") for p in content if isinstance(p, dict)
-                            )
-                        parts.append(
-                            f"[tool_result id={part.get('tool_use_id')}]\n{content}"
-                        )
-                else:
-                    parts.append(str(part))
-            result.append(PromptMessage(role=role, content="\n".join(parts)))
+                blocks.extend(anthropic_block_to_blocks(part))
+            result.append(PromptMessage(role=role, content=collapse_blocks(blocks)))
 
     return result
 

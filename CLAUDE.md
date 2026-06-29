@@ -76,7 +76,11 @@ sending the wrong `initialize` params makes the agent exit immediately.
    {"sessionId": "...", "prompt": [{"type": "text", "text": "..."}]}
    ```
    Returns `{stopReason}` (`end_turn`, `max_tokens`, `tool_use`, …) when the
-   turn finishes.
+   turn finishes. The `prompt` array is a list of **role-less** content blocks;
+   the whole conversation is serialised into one labelled text block, and
+   **image** attachments are appended as `{"type":"image","mimeType","data"}`
+   blocks (kiro-cli advertises `promptCapabilities.image`; documents/audio are
+   reduced to text — see `kiro/multimodal.py`).
 
 4. **`session/update`** — notifications (no id) streamed during a prompt.
    Discriminated by `update.sessionUpdate`:
@@ -127,6 +131,7 @@ Rules:
 | `kiro/acp_client.py` | The subprocess + JSON-RPC bridge; protocol translation; permission handling |
 | `kiro/acp_models.py` | Pydantic models (JSON-RPC envelopes, prompt params, content blocks) |
 | `kiro/shim_service.py` | Per-request `session/new`, streaming passthrough, non-streaming aggregation |
+| `kiro/multimodal.py` | Multimodal input: forward base64 images as ACP image blocks; extract/placeholder documents & audio (issue #33) |
 | `kiro/routes_openai_shim.py` | `/v1/chat/completions`, `/v1/models` |
 | `kiro/routes_anthropic_shim.py` | `/v1/messages`, `/v1/models` |
 | `kiro/routes_acp.py` | `/acp/chat`, `/acp/chat/stream` |

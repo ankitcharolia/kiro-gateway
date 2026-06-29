@@ -6,6 +6,7 @@ loguru
 python-dotenv
 pydantic-settings
 tiktoken
+pypdf
 
 # Testing dependencies
 pytest

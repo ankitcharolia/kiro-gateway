@@ -621,6 +621,85 @@ class TestAnthropicShimToolChoiceForwarding:
 
 
 # ---------------------------------------------------------------------------
+# Multimodal input (issue #33): base64 image blocks are forwarded as ACP image
+# blocks; documents are extracted/placeholdered. Both modes.
+# ---------------------------------------------------------------------------
+
+class TestAnthropicShimMultimodal:
+    """Images reach the shim as image blocks; documents are surfaced as text."""
+
+    def _image_blocks(self, content):
+        return [b for b in content if isinstance(b, dict) and b.get("type") == "image"]
+
+    def test_messages_image_forwarded_as_image_block(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image", "source": {"type": "base64",
+                                             "media_type": "image/png", "data": "QUJD"}},
+            ]}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        content = rec.complete_kwargs[0]["messages"][-1].content
+        assert isinstance(content, list)
+        imgs = self._image_blocks(content)
+        assert imgs and imgs[0]["data"] == "QUJD" and imgs[0]["mimeType"] == "image/png"
+
+    def test_messages_stream_image_forwarded(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "stream": True,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                             "media_type": "image/jpeg", "data": "QUJD"}},
+            ]}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        assert self._image_blocks(rec.stream_kwargs[0]["messages"][-1].content)
+
+    def test_messages_text_document_extracted(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": [
+                {"type": "document", "title": "spec.md",
+                 "source": {"type": "text", "media_type": "text/markdown", "data": "# Spec\nbody"}},
+            ]}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        content = rec.complete_kwargs[0]["messages"][-1].content
+        assert isinstance(content, str)
+        assert "[document: spec.md]" in content and "# Spec" in content
+
+    def test_messages_binary_document_placeholder(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": [
+                {"type": "document", "title": "scan.pdf",
+                 "source": {"type": "base64", "media_type": "application/pdf", "data": "QUJD"}},
+            ]}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        assert "[document: scan.pdf omitted" in rec.complete_kwargs[0]["messages"][-1].content
+
+
+# ---------------------------------------------------------------------------
 # Error mapping (issue #44): ACP/upstream failures surface with the right HTTP
 # status and the Anthropic native error shape, in both modes.
 # ---------------------------------------------------------------------------
