@@ -402,13 +402,44 @@ system messages are kept distinct rather than merged.
 |---|---|---|
 | OpenAI `system` message | `system` role | `System:` |
 | OpenAI `developer` message | `developer` role | `Developer:` |
+| OpenAI `assistant` `tool_calls` | `assistant` role (with `[tool_use id=… name=…]` markers) | `Assistant:` |
 | OpenAI `tool` message | `user` role (with `[tool_result id=…]` marker) | `User:` |
 | OpenAI Responses `instructions` | `system` role | `System:` |
 | Anthropic `system` field (string or block list) | `system` role | `System:` |
+| Anthropic `tool_use` block | `assistant` role (with `[tool_use id=… name=…]` marker) | `Assistant:` |
+| Anthropic `tool_result` block | `user` role (with `[tool_result id=…]` marker) | `User:` |
 
 > kiro-cli treats the whole serialised prompt as one turn; these labels make
 > the system/developer instructions legible to the agent without inventing a
 > system channel the protocol does not expose.
+
+### Multi-turn & tool history fidelity
+
+ACP's `session/prompt` carries a **single, role-less** list of content blocks
+(the protocol's content block has no per-message `role` field), and ACP keeps
+multi-turn state server-side across prompts within one session. The gateway is
+**stateless** — a fresh session per request — so it must serialise the whole
+conversation into one prompt. The faithful maximum ACP allows is therefore a
+single text block whose turns are delimited by stable `Role:` labels, in order,
+separated by blank lines:
+
+- **Turn boundaries** are explicit and ordered (`System:` / `Developer:` /
+  `User:` / `Assistant:`); multiple system messages stay distinct.
+- **Tool turns are preserved, not dropped.** A prior assistant tool call —
+  OpenAI `tool_calls` or Anthropic `tool_use` — is rendered as
+  `[tool_use id=… name=…]` followed by its arguments, and a tool result
+  (OpenAI `tool` role or Anthropic `tool_result`) as `[tool_result id=…]` with
+  its content. The two shims use the **same markers**, so the transcript
+  kiro-cli sees is consistent across both APIs.
+- **Limitation (documented).** Because ACP attaches no role to a content block,
+  the gateway does not — and cannot — send structured, role-tagged turns;
+  splitting the transcript into multiple blocks would add no structural
+  fidelity (kiro-cli concatenates them) while risking ambiguous boundaries. A
+  single labelled, blank-line-delimited block is the stable, faithful
+  representation. Client-side function calling itself is still not honored by
+  kiro-cli over ACP (see [Tool-call round-trips](#tool-call-round-trips) and
+  issue #31); this section is purely about how prior tool turns are **carried**
+  in the prompt history.
 
 ---
 

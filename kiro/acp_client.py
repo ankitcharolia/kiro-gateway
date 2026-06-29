@@ -893,12 +893,28 @@ class ACPClient:
     @staticmethod
     def _build_prompt_blocks(messages: list) -> list[dict]:
         """
-        Render a conversation into ACP prompt content blocks.
+        Render a conversation into ACP ``session/prompt`` content blocks.
 
-        A fresh session is created per gateway request, so the entire
-        conversation is serialised into a single text block. A lone user
-        message is sent verbatim; multi-turn histories are rendered with
-        ``Role:`` labels so the agent retains context.
+        **Why a labelled transcript (issue #43).** ACP's ``session/prompt.prompt``
+        is a list of **role-less** content blocks (the protocol's ContentBlock
+        has no per-message ``role`` field — only ``text``/``image``/… kinds), and
+        ACP keeps multi-turn state *server-side* across successive prompts within
+        one session. The gateway, however, is **stateless**: it opens a fresh
+        session per request and must carry the entire conversation in a single
+        ``session/prompt``. There is therefore no protocol channel for
+        structured, role-tagged turns — so the faithful maximum is a single text
+        block whose turns are delimited by stable ``Role:`` labels
+        (``System:`` / ``Developer:`` / ``User:`` / ``Assistant:``), in order,
+        separated by blank lines. Prior tool turns are preserved as
+        ``[tool_use id=… name=…]`` / ``[tool_result id=…]`` markers emitted by the
+        shims, so tool-heavy histories stay legible rather than being dropped.
+
+        A lone user message is sent verbatim (no label) — the common single-turn
+        case is unchanged. Multiple text blocks (one per turn) were considered
+        but rejected: ACP attaches no role to a block, so splitting gains no
+        structural fidelity while risking ambiguous boundaries if an agent
+        concatenates blocks without a separator. The labelled, blank-line-
+        delimited single block keeps boundaries explicit and stable.
         """
         label = {
             "user": "User",

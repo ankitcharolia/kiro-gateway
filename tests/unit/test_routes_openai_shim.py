@@ -691,6 +691,50 @@ class TestOpenAIShimSystemRole:
         assert msgs[-1].role == "user"
         assert "[tool_result id=abc]" in msgs[-1].content
 
+    def test_assistant_tool_calls_are_rendered_not_dropped(self, sync_client, openai_headers):
+        """A prior assistant tool-calling turn survives as a [tool_use ...] marker (issue #43)."""
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": None, "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\": \"Berlin\"}"},
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+                {"role": "user", "content": "thanks"},
+            ],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        msgs = rec.complete_kwargs[0]["messages"]
+        assistant = [m for m in msgs if m.role == "assistant"][0]
+        assert "[tool_use id=call_1 name=get_weather]" in assistant.content
+        assert '{"city": "Berlin"}' in assistant.content
+
+    def test_assistant_text_and_tool_calls_both_kept(self, sync_client, openai_headers):
+        """Assistant text and its tool_calls are both preserved, text first."""
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "Let me check.", "tool_calls": [{
+                    "id": "c2", "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }]},
+            ],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        assistant = [m for m in rec.complete_kwargs[0]["messages"] if m.role == "assistant"][0]
+        assert "Let me check." in assistant.content
+        assert "[tool_use id=c2 name=lookup]" in assistant.content
+        assert assistant.content.index("Let me check.") < assistant.content.index("[tool_use")
+
     def test_responses_instructions_map_to_system_role(self, sync_client, openai_headers):
         rec = _RecordingShim()
         sync_client.app.state.shim_service = rec

@@ -261,6 +261,26 @@ provenance is preserved instead of being flattened to anonymous user text:
   multiple system messages distinct. ACP exposes no system channel, so this
   labelled single-block serialisation is the faithful representation.
 
+### Multi-turn & tool history (issue #43)
+
+ACP's `session/prompt.prompt` is a **role-less** `ContentBlock[]` for a single
+turn (no per-message role field), and the gateway is stateless, so the whole
+conversation is serialised into one labelled text block (not multiple blocks —
+ACP would just concatenate them, adding no role fidelity). Tool turns are
+**carried, not dropped**:
+
+- `_oai_messages_to_acp` renders an assistant message's `tool_calls` as
+  `[tool_use id=… name=…]` + arguments (previously these were silently dropped),
+  and a `tool` role result as `[tool_result id=…]`.
+- `_anthropic_messages_to_acp` renders `tool_use` / `tool_result` content blocks
+  with the **same** markers, so the transcript is consistent across both shims.
+
+When touching prompt serialisation keep the two shims' markers identical and the
+turn order stable; assert the representation in tests (`TestBuildPromptBlocks`,
+`TestAnthropicMessagesToACP`, and the OpenAI assistant-tool_calls tests). This
+is about *carrying* prior tool turns in history — client-side function calling
+is still not honored by kiro-cli over ACP (issue #31).
+
 ## Usage & token accounting (`kiro/tokenizer.py`)
 
 `normalize_usage(reported, prompt_messages, prompt_tools, prompt_system,

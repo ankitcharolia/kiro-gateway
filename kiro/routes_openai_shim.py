@@ -119,7 +119,10 @@ def _oai_messages_to_acp(messages: list[OAIMessage]) -> list[PromptMessage]:
       (:func:`ACPClient._build_prompt_blocks`) renders them with explicit
       ``System:`` / ``Developer:`` labels, keeping each message separate and in
       order rather than merging them.
-    * ``assistant`` is preserved.
+    * ``assistant`` is preserved. Any ``tool_calls`` on an assistant turn are
+      rendered as ``[tool_use id=… name=…]`` markers (with the call arguments)
+      so a prior tool-calling turn survives in the serialised history instead
+      of being dropped.
     * ``tool`` (and any other role) is rendered as ``user`` content; tool
       results additionally carry a ``[tool_result id=...]`` marker for context.
 
@@ -158,6 +161,29 @@ def _oai_messages_to_acp(messages: list[OAIMessage]) -> list[PromptMessage]:
         # tool role: wrap with tool_call_id context
         if m.role == "tool" and m.tool_call_id:
             content = f"[tool_result id={m.tool_call_id}]\n{content}"
+
+        # assistant tool calls: render each call faithfully so a prior
+        # tool-calling turn is preserved in the serialised history. Without
+        # this the assistant's ``tool_calls`` are silently dropped (only its
+        # text survived), losing fidelity for multi-turn tool sessions. Uses
+        # the same ``[tool_use id=… name=…]`` marker as the Anthropic shim so
+        # the serialised transcript is consistent across both APIs (issue #43).
+        if m.role == "assistant" and m.tool_calls:
+            call_markers: list[str] = []
+            for tc in m.tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                name = fn.get("name", "")
+                args = fn.get("arguments", "")
+                if not isinstance(args, str):
+                    args = json.dumps(args)
+                call_markers.append(
+                    f"[tool_use id={tc.get('id', '')} name={name}]\n{args}"
+                )
+            calls_text = "\n".join(call_markers)
+            if calls_text:
+                content = f"{content}\n{calls_text}".strip() if content else calls_text
 
         result.append(PromptMessage(role=acp_role, content=str(content)))
     return result

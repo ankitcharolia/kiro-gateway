@@ -1199,3 +1199,79 @@ class TestStructuredToolRendering:
             "numMatches": 2, "numFiles": 1, "results": [{"file": "x", "matches": ["a"] * 1000}]}}]})
         assert out == "2 match(es) in 1 file(s)"
         assert "matches" not in out
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn prompt serialization (issue #43): the stateless gateway carries
+# the whole conversation in one role-less ACP session/prompt, so turns are
+# rendered as a single text block with stable Role: labels and order; tool
+# turns survive as [tool_use]/[tool_result] markers (added by the shims).
+# ---------------------------------------------------------------------------
+
+class TestBuildPromptBlocks:
+    """ACPClient._build_prompt_blocks representation."""
+
+    def test_empty_history_yields_empty_text_block(self):
+        assert ACPClient._build_prompt_blocks([]) == [{"type": "text", "text": ""}]
+
+    def test_lone_user_message_is_verbatim_unlabelled(self):
+        msgs = [PromptMessage(role="user", content="hello there")]
+        assert ACPClient._build_prompt_blocks(msgs) == [
+            {"type": "text", "text": "hello there"}
+        ]
+
+    def test_multi_turn_is_single_block_with_role_labels(self):
+        msgs = [
+            PromptMessage(role="system", content="Be terse."),
+            PromptMessage(role="user", content="hi"),
+            PromptMessage(role="assistant", content="hello"),
+            PromptMessage(role="user", content="bye"),
+        ]
+        blocks = ACPClient._build_prompt_blocks(msgs)
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "text"
+        assert blocks[0]["text"] == (
+            "System: Be terse.\n\n"
+            "User: hi\n\n"
+            "Assistant: hello\n\n"
+            "User: bye"
+        )
+
+    def test_developer_role_is_labelled(self):
+        msgs = [
+            PromptMessage(role="developer", content="Use Python."),
+            PromptMessage(role="user", content="hi"),
+        ]
+        text = ACPClient._build_prompt_blocks(msgs)[0]["text"]
+        assert text == "Developer: Use Python.\n\nUser: hi"
+
+    def test_order_is_preserved(self):
+        msgs = [
+            PromptMessage(role="user", content="one"),
+            PromptMessage(role="assistant", content="two"),
+            PromptMessage(role="user", content="three"),
+        ]
+        text = ACPClient._build_prompt_blocks(msgs)[0]["text"]
+        assert text.index("one") < text.index("two") < text.index("three")
+
+    def test_tool_markers_survive_in_transcript(self):
+        """[tool_use]/[tool_result] markers emitted by the shims are carried through."""
+        msgs = [
+            PromptMessage(role="user", content="weather in Berlin?"),
+            PromptMessage(role="assistant",
+                          content="[tool_use id=call_1 name=get_weather]\n{\"city\": \"Berlin\"}"),
+            PromptMessage(role="user", content="[tool_result id=call_1]\nsunny, 20C"),
+        ]
+        text = ACPClient._build_prompt_blocks(msgs)[0]["text"]
+        assert "Assistant: [tool_use id=call_1 name=get_weather]" in text
+        assert "User: [tool_result id=call_1]" in text
+        assert text.index("[tool_use") < text.index("[tool_result")
+
+    def test_accepts_dict_messages(self):
+        """Messages may also arrive as plain dicts (role/content)."""
+        msgs = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+        ]
+        text = ACPClient._build_prompt_blocks(msgs)[0]["text"]
+        assert text == "User: a\n\nAssistant: b"

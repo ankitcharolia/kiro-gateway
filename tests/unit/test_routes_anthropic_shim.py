@@ -338,6 +338,59 @@ class TestSystemToText:
         assert _system_to_text([{"type": "text"}]) is None  # no text key
 
 
+# ---------------------------------------------------------------------------
+# Multi-turn + tool-history conversion (issue #43): structured tool_use /
+# tool_result blocks are rendered as faithful [tool_use]/[tool_result] markers
+# (matching the OpenAI shim), and role provenance is preserved.
+# ---------------------------------------------------------------------------
+
+class TestAnthropicMessagesToACP:
+    """_anthropic_messages_to_acp tool-history fidelity."""
+
+    def test_system_becomes_distinct_system_role(self):
+        from kiro.routes_anthropic_shim import _anthropic_messages_to_acp, AnthropicMessage
+        msgs = _anthropic_messages_to_acp(
+            [AnthropicMessage(role="user", content="hi")], system="Be nice."
+        )
+        assert msgs[0].role == "system"
+        assert msgs[0].content == "Be nice."
+
+    def test_tool_use_block_rendered_as_marker(self):
+        from kiro.routes_anthropic_shim import _anthropic_messages_to_acp, AnthropicMessage
+        msgs = _anthropic_messages_to_acp([
+            AnthropicMessage(role="assistant", content=[
+                {"type": "text", "text": "let me check"},
+                {"type": "tool_use", "id": "tu_1", "name": "get_weather",
+                 "input": {"city": "Berlin"}},
+            ]),
+        ], system=None)
+        content = msgs[-1].content
+        assert "let me check" in content
+        assert "[tool_use id=tu_1 name=get_weather]" in content
+        assert '"city": "Berlin"' in content
+
+    def test_tool_result_block_rendered_as_marker(self):
+        from kiro.routes_anthropic_shim import _anthropic_messages_to_acp, AnthropicMessage
+        msgs = _anthropic_messages_to_acp([
+            AnthropicMessage(role="user", content=[
+                {"type": "tool_result", "tool_use_id": "tu_1",
+                 "content": [{"type": "text", "text": "sunny, 20C"}]},
+            ]),
+        ], system=None)
+        assert "[tool_result id=tu_1]" in msgs[-1].content
+        assert "sunny, 20C" in msgs[-1].content
+
+    def test_multi_turn_roles_and_order_preserved(self):
+        from kiro.routes_anthropic_shim import _anthropic_messages_to_acp, AnthropicMessage
+        msgs = _anthropic_messages_to_acp([
+            AnthropicMessage(role="user", content="q1"),
+            AnthropicMessage(role="assistant", content="a1"),
+            AnthropicMessage(role="user", content="q2"),
+        ], system="sys")
+        assert [m.role for m in msgs] == ["system", "user", "assistant", "user"]
+        assert [m.content for m in msgs] == ["sys", "q1", "a1", "q2"]
+
+
 
 # ---------------------------------------------------------------------------
 # Auth enforcement (issue #39): completion endpoints require the gateway key

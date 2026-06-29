@@ -147,6 +147,30 @@ def _anthropic_messages_to_acp(
     messages: list[AnthropicMessage],
     system: str | list | None,
 ) -> list[PromptMessage]:
+    """Convert an Anthropic message list (+ ``system``) to ACP messages.
+
+    Role provenance is preserved rather than flattened to anonymous user text:
+    the ``system`` field becomes a distinct ``system`` role, and each message
+    keeps its ``user``/``assistant`` role. Structured content blocks are
+    rendered faithfully into the per-turn text so multi-turn, tool-heavy
+    histories survive the serialisation (issue #43):
+
+    * ``text`` blocks contribute their text.
+    * ``tool_use`` blocks → ``[tool_use id=… name=…]`` + the call input JSON.
+    * ``tool_result`` blocks → ``[tool_result id=…]`` + the result content.
+
+    These markers match the OpenAI shim's, so the transcript ACP receives is
+    consistent across both APIs. The blocks are role-less at the protocol level
+    (see :func:`ACPClient._build_prompt_blocks`), so the labels/markers are the
+    faithful maximum ACP allows.
+
+    Args:
+        messages: The Anthropic request messages.
+        system: The raw ``system`` field (string, block list, or ``None``).
+
+    Returns:
+        A list of :class:`PromptMessage` preserving role and tool provenance.
+    """
     result = []
     system_text = _system_to_text(system)
     if system_text:
