@@ -841,6 +841,15 @@ A few notes for long-running agents that issue many large turns:
 - **Statelessness.** Each request re-sends its full conversation (standard for the
   OpenAI/Anthropic APIs) and runs in its own session, so there is no cross-request
   state to leak or grow on the gateway side.
+- **Stateful Responses API is unsupported (by design).** Because the gateway is
+  stateless and stores no responses, the OpenAI Responses server-side state
+  features are not available:
+  - `previous_response_id` → rejected with a clear `400 invalid_request_error`
+    (the id can't be resolved; resend the full conversation in `input`). Applies
+    to streaming and non-streaming.
+  - `store` → accepted as a **no-op**: the request succeeds, but the response is
+    not persisted and there is no retrieval endpoint, so it can't later be
+    fetched or chained by id.
 
 ---
 

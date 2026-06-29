@@ -551,9 +551,18 @@ async def _stream_response(
 # The Responses API is a text-generation endpoint, so it maps onto the same
 # ShimService → ACP path as /v1/chat/completions. This is a faithful subset:
 # it supports string or structured `input`, `instructions`, tools, streaming
-# and non-streaming. Stateful features (`previous_response_id`, server-side
-# storage) are not supported because each gateway request opens a fresh,
-# isolated ACP session.
+# and non-streaming.
+#
+# Stateful features (server-side response storage / chaining) are NOT supported
+# because the gateway is stateless by design: each request opens a fresh,
+# isolated ACP session and there is no cross-request store (see the compliance
+# model). Defined behavior (issue #38):
+#   * `previous_response_id` — rejected with a clear 400 invalid_request_error
+#     (the id cannot be resolved; the client should resend the full
+#     conversation in `input`). Applies to both streaming and non-streaming.
+#   * `store` — accepted as a no-op: responses are never persisted (there is no
+#     retrieval endpoint), so a request setting it validates and succeeds, but
+#     the response cannot later be fetched or chained by id.
 # ===========================================================================
 
 class OAIResponsesRequest(BaseModel):
@@ -567,6 +576,14 @@ class OAIResponsesRequest(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     tools: Optional[list[dict]] = None
+    # Stateful Responses controls (issue #38). The gateway is stateless — each
+    # request opens a fresh ACP session and nothing is stored server-side — so:
+    #   * previous_response_id: rejected with a 400 invalid_request_error
+    #     (handled in create_response); resend the full conversation in `input`.
+    #   * store: accepted as a no-op (responses are not persisted; there is no
+    #     retrieval endpoint). Accepting it avoids a spurious 422.
+    previous_response_id: Optional[str] = None
+    store: Optional[bool] = None
     # Structured-output / tool-selection controls (issue #35). The Responses API
     # expresses structured outputs via ``text.format`` (``{"format": {"type":
     # "json_schema", ...}}``); ``response_format`` is also accepted for lenient
@@ -704,6 +721,30 @@ async def create_response(
     shim: ShimService = Depends(_get_shim),
 ):
     """OpenAI Responses API endpoint, backed by ACP via ShimService."""
+    if body.previous_response_id:
+        # The gateway is stateless: each request opens a fresh, isolated ACP
+        # session and no response is stored server-side, so a prior response id
+        # can never be resolved. Reject with a clear, OpenAI-native
+        # invalid_request_error instead of silently ignoring it (which would
+        # drop the prior context the client expects to be carried). Covers both
+        # streaming and non-streaming (this runs before the stream branch).
+        # See issue #38.
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": (
+                        "Stateful Responses chaining is not supported: this "
+                        "gateway is stateless and does not store responses, so "
+                        "'previous_response_id' cannot be resolved. Resend the "
+                        "full conversation in 'input' instead."
+                    ),
+                    "type": "invalid_request_error",
+                    "param": "previous_response_id",
+                    "code": None,
+                }
+            },
+        )
     messages = _responses_input_to_acp(body.input, body.instructions)
     tools = list(body.tools or [])
     fs_roots = [FilesystemRoot(**r) for r in body.filesystem_roots] if body.filesystem_roots else []

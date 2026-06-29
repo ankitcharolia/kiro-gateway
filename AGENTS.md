@@ -358,6 +358,17 @@ forwarding.
 Auth: OpenAI uses `Authorization: Bearer <KIRO_GATEWAY_API_KEY>`; Anthropic uses
 `x-api-key: <KIRO_GATEWAY_API_KEY>`.
 
+> **Stateful Responses API is unsupported by design (issue #38).** The gateway
+> is stateless (principle 3) and stores no responses, so the Responses
+> server-side state features are not available: `OAIResponsesRequest` accepts
+> `previous_response_id` and `store`, and `create_response` **rejects a
+> non-empty `previous_response_id` with a `400 invalid_request_error`** (before
+> the stream branch, so it covers both modes) while **`store` is accepted as a
+> no-op** (nothing is persisted; there is no retrieval endpoint). Don't add a
+> cross-request store — it would violate the stateless design and grow
+> unbounded. When touching this, keep the 400 message OpenAI-native and assert
+> both modes in tests.
+
 ## Configuration
 
 Read from environment variables or `.env` (loaded by `main.py`; real env vars

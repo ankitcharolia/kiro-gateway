@@ -479,6 +479,59 @@ class TestOpenAIShimStructuredOutputs:
 
 
 # ---------------------------------------------------------------------------
+# Stateful Responses API (issue #38): the gateway is stateless, so
+# previous_response_id is rejected with a clear 400 invalid_request_error
+# (both modes) and store is accepted as a no-op.
+# ---------------------------------------------------------------------------
+
+class TestOpenAIShimStatefulResponses:
+    """previous_response_id rejected with a documented 400; store is a no-op."""
+
+    def test_previous_response_id_non_stream_returns_400(self, sync_client, openai_headers):
+        payload = {"model": "claude-sonnet-4.6", "input": "hi",
+                   "previous_response_id": "resp_abc123"}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 400
+        err = resp.json()["error"]
+        assert err["type"] == "invalid_request_error"
+        assert err["param"] == "previous_response_id"
+        assert "previous_response_id" in err["message"]
+
+    def test_previous_response_id_stream_returns_400(self, sync_client, openai_headers):
+        """The rejection happens before the stream begins (still a 400, not 200 SSE)."""
+        payload = {"model": "claude-sonnet-4.6", "input": "hi", "stream": True,
+                   "previous_response_id": "resp_abc123"}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 400
+        assert resp.json()["error"]["type"] == "invalid_request_error"
+
+    def test_null_previous_response_id_is_accepted(self, sync_client, openai_headers):
+        """An explicit null previous_response_id is not treated as chaining."""
+        payload = {"model": "claude-sonnet-4.6", "input": "hi",
+                   "previous_response_id": None}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        assert resp.json()["object"] == "response"
+
+    def test_store_true_is_accepted_noop(self, sync_client, openai_headers):
+        payload = {"model": "claude-sonnet-4.6", "input": "hi", "store": True}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        assert resp.json()["object"] == "response"
+
+    def test_store_false_is_accepted_noop(self, sync_client, openai_headers):
+        payload = {"model": "claude-sonnet-4.6", "input": "hi", "store": False}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+
+    def test_store_with_stream_is_accepted(self, sync_client, openai_headers):
+        payload = {"model": "claude-sonnet-4.6", "input": "hi",
+                   "store": True, "stream": True}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Error mapping (issue #44): ACP/upstream failures surface with the right HTTP
 # status and the OpenAI native error shape, in both streaming and non-streaming
 # paths.
