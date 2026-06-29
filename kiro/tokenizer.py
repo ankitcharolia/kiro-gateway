@@ -24,6 +24,37 @@ def _raw_tokens(text: str, enc: Optional[Any] = None) -> int:
     return max(1, len(text) // int(_CHARS_PER_TOKEN) + (1 if len(text) % int(_CHARS_PER_TOKEN) else 0))
 
 
+def truncate_to_tokens(text: str, max_tokens: int) -> tuple[str, bool]:
+    """Truncate *text* to at most *max_tokens* tokens.
+
+    Uses the tiktoken ``cl100k_base`` encoder (raw token boundaries, no Claude
+    correction factor) so the cut lands on a real token boundary; falls back to
+    a character estimate (~4 chars/token) when tiktoken is unavailable. Used by
+    the gateway to enforce ``max_tokens`` on the output stream, which kiro-cli
+    does not honor over ACP (issue #32).
+
+    Args:
+        text: The accumulated output text.
+        max_tokens: The maximum number of output tokens to keep (``<= 0`` and
+            ``None`` mean "no limit").
+
+    Returns:
+        ``(possibly_truncated_text, was_truncated)``.
+    """
+    if not text or not max_tokens or max_tokens <= 0:
+        return text, False
+    enc = _get_encoding()
+    if enc is None:
+        limit = max_tokens * int(_CHARS_PER_TOKEN)
+        if len(text) > limit:
+            return text[:limit], True
+        return text, False
+    tokens = enc.encode(text)
+    if len(tokens) <= max_tokens:
+        return text, False
+    return enc.decode(tokens[:max_tokens]), True
+
+
 def count_tokens(
     text: Optional[str],
     apply_claude_correction: bool = True,

@@ -46,7 +46,7 @@ from kiro.acp_client import format_plan_text
 from kiro.auth import verify_anthropic_key
 from kiro.config import DEFAULT_KIRO_MODELS, settings
 from kiro.error_mapping import MappedError, classify_event, classify_exception
-from kiro.model_validation import ModelNotAvailableError, validate_model
+from kiro.model_validation import ModelNotAvailableError, resolve_alias, validate_model
 from kiro.multimodal import anthropic_block_to_blocks, collapse_blocks
 from kiro.shim_service import ShimService
 from kiro.tokenizer import estimate_request_tokens, normalize_usage
@@ -315,8 +315,9 @@ async def create_message(
     body: AnthropicRequest,
     shim: ShimService = Depends(_get_shim),
 ):
-    # Validate the requested model up front (issue #42): clean 404 for both
-    # streaming and non-streaming; warn/off mode is a no-op (warn logs).
+    # Resolve any configured model alias, then validate up front (issues #42,
+    # #32): clean 404 for both streaming and non-streaming.
+    body.model = resolve_alias(body.model, settings.MODEL_ALIASES) or body.model
     try:
         validate_model(body.model, shim.available_models(), settings.MODEL_VALIDATION)
     except ModelNotAvailableError as exc:
@@ -374,7 +375,13 @@ async def create_message(
             "input": tc.get("arguments", {}),
         })
 
-    stop_reason = "tool_use" if result.get("tool_calls") else "end_turn"
+    if result.get("tool_calls"):
+        stop_reason = "tool_use"
+    else:
+        # Map the internal finish_reason to Anthropic vocabulary so gateway-side
+        # max_tokens/stop enforcement (issue #32) is reported faithfully.
+        _fr = result.get("finish_reason") or "end_turn"
+        stop_reason = {"length": "max_tokens", "stop": "end_turn"}.get(_fr, "end_turn")
 
     usage = normalize_usage(
         result.get("usage"),

@@ -59,3 +59,26 @@ class TestValidateModel:
     def test_message_handles_empty_available(self):
         err = ModelNotAvailableError("x", [])
         assert "none discovered" in str(err)
+
+
+class TestResolveAlias:
+    from kiro.model_validation import resolve_alias as _resolve  # type: ignore
+
+    _ALIASES = {"gpt-4o": "claude-sonnet-4.6", "claude-3-5-sonnet": "claude-sonnet-4.6"}
+
+    def test_alias_is_resolved(self):
+        from kiro.model_validation import resolve_alias
+        assert resolve_alias("gpt-4o", self._ALIASES) == "claude-sonnet-4.6"
+
+    def test_unaliased_model_unchanged(self):
+        from kiro.model_validation import resolve_alias
+        assert resolve_alias("claude-opus-4.8", self._ALIASES) == "claude-opus-4.8"
+
+    def test_empty_aliases_unchanged(self):
+        from kiro.model_validation import resolve_alias
+        assert resolve_alias("gpt-4o", {}) == "gpt-4o"
+
+    def test_none_model(self):
+        from kiro.model_validation import resolve_alias
+        assert resolve_alias(None, self._ALIASES) is None
+

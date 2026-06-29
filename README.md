@@ -260,6 +260,14 @@ KIRO_MODELS=auto,claude-opus-4.8,claude-sonnet-4.6
 #   off            = forward silently (legacy). Validation is skipped until the
 # live catalogue is discovered (first session).
 MODEL_VALIDATION=warn
+# Optional model-id aliases so a harness that hardcodes a foreign id can be
+# mapped to a real kiro-cli model (resolved before validation). Comma-separated
+# alias=target pairs.
+MODEL_ALIASES=
+# Enforce max_tokens by capping the output stream (kiro-cli doesn't honor it).
+# Default false (no cap). true = stop generation at the limit (finish_reason
+# length). stop sequences are always enforced when a client sends them.
+ENFORCE_MAX_TOKENS=false
 
 # ── Tool execution ────────────────────────────────────────────────────
 # kiro-cli runs its own built-in tools (file edits, command execution) and
@@ -587,14 +595,20 @@ keys the caller set are included).
 | `stop` / `stop_sequences` | `stopSequences` | ✓ | ✓ |
 
 > [!IMPORTANT]
-> **kiro-cli treats these sampling parameters as no-ops today** (it advertises
-> no sampling capability over ACP: `max_tokens` doesn't cap, `stop` doesn't
-> stop, `temperature`/`top_p`/`top_k` have no effect). They are forwarded under
-> the schema-safe `_meta` extension so they take effect automatically if a
-> future version honors them — no gateway change needed. The one per-request
-> control kiro-cli honors is the **model** (`session/set_model`). Other OpenAI
-> params (`seed`, `n`, `frequency_penalty`, `presence_penalty`, `logit_bias`)
-> are likewise ignored.
+> **kiro-cli itself honors none of these over ACP**, so the gateway enforces the
+> two it *can* apply to the output stream:
+> - **`stop` sequences are enforced by the gateway** — generation is cut at the
+>   first stop string (`finish_reason=stop`) and kiro-cli is cancelled. Always
+>   on when a client supplies `stop`.
+> - **`max_tokens` is enforced when `ENFORCE_MAX_TOKENS=true`** (default off) —
+>   the output is capped at the limit (`finish_reason=length`). Off by default
+>   to preserve the historical no-cap behaviour.
+> - **`temperature` / `top_p` / `top_k` remain inert** — they steer sampling
+>   during generation, which only kiro-cli can do; they are forwarded under
+>   `_meta` for forward-compatibility. Other OpenAI params (`seed`, `n`,
+>   `frequency_penalty`, `presence_penalty`, `logit_bias`) are likewise ignored.
+> The one model control kiro-cli honors natively is the **model**
+> (`session/set_model`).
 
 ---
 

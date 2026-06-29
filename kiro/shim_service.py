@@ -25,6 +25,7 @@ from typing import Any, AsyncIterator, Optional
 from loguru import logger
 
 from kiro.acp_client import ACPClient, render_tool_activity, render_tool_call_summary
+from kiro.config import settings
 from kiro.acp_models import (
     PromptParams, PromptMessage,
     ToolResult,
@@ -180,6 +181,7 @@ class ShimService:
             top_p=top_p,
             top_k=top_k,
             stop=stop,
+            enforce_max_tokens=settings.ENFORCE_MAX_TOKENS,
             tools=normalize_tool_definitions(tools),
             response_format=response_format,
             tool_choice=tool_choice,
@@ -254,6 +256,7 @@ class ShimService:
             top_p=top_p,
             top_k=top_k,
             stop=stop,
+            enforce_max_tokens=settings.ENFORCE_MAX_TOKENS,
             tools=normalize_tool_definitions(tools),
             response_format=response_format,
             tool_choice=tool_choice,
@@ -298,6 +301,7 @@ class ShimService:
             top_p=top_p,
             top_k=top_k,
             stop=stop,
+            enforce_max_tokens=settings.ENFORCE_MAX_TOKENS,
             tools=normalize_tool_definitions(tools),
             response_format=response_format,
             tool_choice=tool_choice,

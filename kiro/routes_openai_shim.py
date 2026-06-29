@@ -37,7 +37,7 @@ from kiro.acp_client import format_plan_text
 from kiro.auth import verify_openai_key
 from kiro.config import DEFAULT_KIRO_MODELS, settings
 from kiro.error_mapping import MappedError, classify_event, classify_exception
-from kiro.model_validation import ModelNotAvailableError, validate_model
+from kiro.model_validation import ModelNotAvailableError, resolve_alias, validate_model
 from kiro.multimodal import (
     append_text, collapse_blocks, openai_part_to_blocks, prepend_text,
 )
@@ -327,9 +327,10 @@ async def chat_completions(
     body: OAIChatRequest,
     shim: ShimService = Depends(_get_shim),
 ):
-    # Validate the requested model against the live catalogue before doing any
-    # work, so the check returns a clean 404 for both streaming and
-    # non-streaming (issue #42). In warn/off mode this is a no-op (warn logs).
+    # Resolve any configured model alias (e.g. gpt-4o -> claude-sonnet-4.6) and
+    # validate the resolved id against the live catalogue, before doing any work
+    # — clean 404 for both streaming and non-streaming (issues #42, #32).
+    body.model = resolve_alias(body.model, settings.MODEL_ALIASES) or body.model
     try:
         validate_model(body.model, shim.available_models(), settings.MODEL_VALIDATION)
     except ModelNotAvailableError as exc:
@@ -777,6 +778,7 @@ async def create_response(
     shim: ShimService = Depends(_get_shim),
 ):
     """OpenAI Responses API endpoint, backed by ACP via ShimService."""
+    body.model = resolve_alias(body.model, settings.MODEL_ALIASES) or body.model
     try:
         validate_model(body.model, shim.available_models(), settings.MODEL_VALIDATION)
     except ModelNotAvailableError as exc:

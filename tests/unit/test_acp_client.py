@@ -1347,3 +1347,91 @@ class TestBuildPromptBlocksImages:
         image_blocks = [b for b in blocks if b["type"] == "image"]
         assert len(image_blocks) == 2
         assert blocks[0]["text"].count("[image]") == 2
+
+
+# ---------------------------------------------------------------------------
+# Output-stream limiting (issue #32): prompt_stream enforces stop sequences
+# (always) and max_tokens (when params.enforce_max_tokens), since kiro-cli
+# honors neither over ACP.
+# ---------------------------------------------------------------------------
+
+class TestPromptStreamLimiting:
+    """prompt_stream applies the StreamLimiter to the text stream."""
+
+    @staticmethod
+    def _client_with_writer():
+        client = ACPClient()
+        client._write_line = lambda line: asyncio.sleep(0)  # type: ignore[assignment]
+        return client
+
+    @pytest.mark.asyncio
+    async def test_stop_sequence_truncates_and_finishes_stop(self):
+        client = self._client_with_writer()
+        params = PromptParams(
+            session_id="sl1", messages=[PromptMessage(role="user", content="hi")],
+            stop=["STOP"],
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(_drive_queue(client, "sl1", [
+            {"type": "text", "content": "hello STOP world"},
+            {"type": "done", "finish_reason": "end_turn", "usage": {}},
+        ]))
+        events = [e async for e in gen]
+        await feeder
+        texts = "".join(e["content"] for e in events if e["type"] == "text")
+        done = [e for e in events if e["type"] == "done"]
+        assert texts == "hello "
+        assert done and done[-1]["finish_reason"] == "stop"
+
+    @pytest.mark.asyncio
+    async def test_max_tokens_truncates_and_finishes_length(self):
+        client = self._client_with_writer()
+        params = PromptParams(
+            session_id="sl2", messages=[PromptMessage(role="user", content="hi")],
+            max_tokens=2, enforce_max_tokens=True,
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(_drive_queue(client, "sl2", [
+            {"type": "text", "content": "one two three four five six seven"},
+            {"type": "done", "finish_reason": "end_turn", "usage": {}},
+        ]))
+        events = [e async for e in gen]
+        await feeder
+        texts = "".join(e["content"] for e in events if e["type"] == "text")
+        done = [e for e in events if e["type"] == "done"]
+        assert len(texts) < len("one two three four five six seven")
+        assert done and done[-1]["finish_reason"] == "length"
+
+    @pytest.mark.asyncio
+    async def test_no_limits_passthrough(self):
+        client = self._client_with_writer()
+        params = PromptParams(
+            session_id="sl3", messages=[PromptMessage(role="user", content="hi")],
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(_drive_queue(client, "sl3", [
+            {"type": "text", "content": "abc"},
+            {"type": "done", "finish_reason": "end_turn", "usage": {}},
+        ]))
+        events = [e async for e in gen]
+        await feeder
+        texts = "".join(e["content"] for e in events if e["type"] == "text")
+        assert texts == "abc"
+        assert events[-1]["type"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_max_tokens_not_enforced_passthrough(self):
+        client = self._client_with_writer()
+        params = PromptParams(
+            session_id="sl4", messages=[PromptMessage(role="user", content="hi")],
+            max_tokens=1, enforce_max_tokens=False,
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(_drive_queue(client, "sl4", [
+            {"type": "text", "content": "one two three four five"},
+            {"type": "done", "finish_reason": "end_turn", "usage": {}},
+        ]))
+        events = [e async for e in gen]
+        await feeder
+        texts = "".join(e["content"] for e in events if e["type"] == "text")
+        assert texts == "one two three four five"

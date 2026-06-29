@@ -47,6 +47,29 @@ class ModelNotAvailableError(Exception):
         )
 
 
+def resolve_alias(model: Optional[str], aliases: dict) -> Optional[str]:
+    """Map a requested model id through the configured alias table.
+
+    Lets a harness that hardcodes a foreign id (e.g. ``gpt-4o``) be rewritten to
+    a real kiro-cli model before validation and ``session/set_model``. A model
+    with no alias entry is returned unchanged.
+
+    Args:
+        model: The requested model id (may be ``None``).
+        aliases: The ``{alias: target}`` map (``settings.MODEL_ALIASES``).
+
+    Returns:
+        The resolved model id (or the original when no alias applies).
+    """
+    if not model or not aliases:
+        return model
+    target = aliases.get(model)
+    if target and target != model:
+        logger.info(f"Model alias: '{model}' -> '{target}'")
+        return target
+    return model
+
+
 def validate_model(
     requested: Optional[str],
     available_models: Sequence[dict],

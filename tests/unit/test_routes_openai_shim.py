@@ -709,6 +709,18 @@ class TestOpenAIShimModelValidation:
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "model_not_found"
 
+    def test_alias_maps_foreign_id_to_real_model(self, sync_client, openai_headers, monkeypatch):
+        """A configured alias is resolved before validation (passes strict) and echoed."""
+        monkeypatch.setattr("kiro.routes_openai_shim.settings.MODEL_VALIDATION", "strict")
+        monkeypatch.setattr("kiro.routes_openai_shim.settings.MODEL_ALIASES",
+                            {"gpt-4o": "claude-opus-4.8"})
+        self._shim_with_catalogue(sync_client)
+        payload = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        # The response echoes the resolved kiro-cli model.
+        assert resp.json()["model"] == "claude-opus-4.8"
+
 
 # ---------------------------------------------------------------------------
 # Error mapping classification (kept below)

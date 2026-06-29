@@ -180,6 +180,11 @@ class PromptParams(BaseModel):
     top_p: Optional[float] = None
     top_k: Optional[int] = None
     stop: Optional[List[str]] = None
+    # Whether the gateway enforces ``max_tokens`` by capping the output stream
+    # (kiro-cli does not honor it over ACP — issue #32). Set by ShimService from
+    # ``settings.ENFORCE_MAX_TOKENS``. ``stop`` sequences are always enforced
+    # when present, independent of this flag.
+    enforce_max_tokens: bool = False
     # Structured-output controls (issue #35). kiro-cli (ACP) currently honors
     # none of these — see ACPClient._structured_output_meta — but they are
     # plumbed through and forwarded under the schema-safe _meta extension so

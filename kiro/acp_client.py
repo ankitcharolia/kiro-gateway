@@ -61,6 +61,7 @@ from kiro.acp_models import (
     GatewayCapabilities,
 )
 from kiro.config import ACP_STDIO_MAX_BYTES
+from kiro.output_limits import StreamLimiter
 
 
 # Map ACP stopReason values to the gateway's normalised finish_reason.
@@ -684,12 +685,41 @@ class ACPClient:
                 params=prompt_params,
             ))
             prompt_sent = True
+            # Gateway-side enforcement of stop sequences / max_tokens (kiro-cli
+            # honors neither over ACP — issue #32). No-op unless active.
+            limiter = StreamLimiter(
+                params.stop, params.max_tokens, params.enforce_max_tokens
+            )
             while True:
                 event = await queue.get()
-                yield event
-                if event.get("type") in ("done", "error"):
+                etype = event.get("type")
+
+                if limiter.active and etype == "text":
+                    emit, finish_reason = limiter.feed(event.get("content", ""))
+                    if emit:
+                        yield {"type": "text", "content": emit}
+                    if finish_reason:
+                        # A stop sequence or the token cap was hit: end the turn
+                        # ourselves and let the finally-block cancel kiro-cli so
+                        # it stops generating.
+                        usage = self._session_usage.pop(session_id, {})
+                        yield {"type": "done",
+                               "finish_reason": finish_reason, "usage": usage}
+                        break
+                    continue
+
+                if etype in ("done", "error"):
+                    # Release any text held back for stop-sequence matching
+                    # before the terminal event.
+                    if limiter.active and etype == "done":
+                        tail = limiter.flush()
+                        if tail:
+                            yield {"type": "text", "content": tail}
+                    yield event
                     completed = True
                     break
+
+                yield event
         finally:
             # If the turn was started but the consumer stopped before a
             # terminal event — e.g. the client disconnected and the streaming

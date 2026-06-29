@@ -66,6 +66,34 @@ MODEL_VALIDATION: str = (
     _model_validation_raw if _model_validation_raw in ("off", "warn", "strict") else "warn"
 )
 
+# Optional model-id aliases so a harness that hardcodes a foreign id (e.g.
+# ``gpt-4o``) can be mapped to a real kiro-cli model instead of falling back to
+# the session default. Format: comma-separated ``alias=target`` pairs, e.g.
+# ``MODEL_ALIASES="gpt-4o=claude-sonnet-4.6,claude-3-5-sonnet=claude-sonnet-4.6"``.
+# The alias is resolved before model validation and session/set_model. Empty by
+# default (no aliasing). See issue #42 follow-up.
+def _parse_model_aliases(raw: str) -> dict:
+    aliases: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair or "=" not in pair:
+            continue
+        alias, _, target = pair.partition("=")
+        alias, target = alias.strip(), target.strip()
+        if alias and target:
+            aliases[alias] = target
+    return aliases
+
+
+MODEL_ALIASES: dict = _parse_model_aliases(os.environ.get("MODEL_ALIASES", ""))
+
+# Whether the gateway enforces ``max_tokens`` itself by capping the output
+# stream (kiro-cli does not honor it over ACP). Default false to preserve the
+# historical "no cap" behaviour — set true to make max_tokens actually limit
+# output (stops generation early; finish_reason=length). ``stop`` sequences are
+# always enforced when a client supplies them (no flag needed). See issue #32.
+ENFORCE_MAX_TOKENS: bool = os.environ.get("ENFORCE_MAX_TOKENS", "false").lower() == "true"
+
 # ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
@@ -157,6 +185,8 @@ class _Settings:
     HIDDEN_MODELS: List[str] = field(default_factory=lambda: HIDDEN_MODELS)
     DEFAULT_KIRO_MODELS: List[str] = field(default_factory=lambda: DEFAULT_KIRO_MODELS)
     MODEL_VALIDATION: str = field(default_factory=lambda: MODEL_VALIDATION)
+    MODEL_ALIASES: dict = field(default_factory=lambda: dict(MODEL_ALIASES))
+    ENFORCE_MAX_TOKENS: bool = field(default_factory=lambda: ENFORCE_MAX_TOKENS)
 
     # Server
     HOST: str = field(default_factory=lambda: HOST)

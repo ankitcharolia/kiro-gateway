@@ -441,6 +441,8 @@ take precedence over `.env`).
 | `KIRO_CLI_PATH` | `kiro-cli` | Path/name of the Kiro CLI binary |
 | `KIRO_MODELS` | `auto,claude-opus-4.8,claude-sonnet-4.6` | Fallback `/v1/models` list before the live catalogue is discovered |
 | `MODEL_VALIDATION` | `warn` | How a requested model absent from the live catalogue is handled: `warn` (log + fall back), `strict` (404 native error), `off` (forward silently). Skipped until the catalogue is known (issue #42). |
+| `MODEL_ALIASES` | `` (none) | Comma-separated `alias=target` pairs rewriting a requested model id to a real kiro-cli model before validation/`set_model` (e.g. `gpt-4o=claude-sonnet-4.6`). |
+| `ENFORCE_MAX_TOKENS` | `false` | When `true`, the gateway caps output at `max_tokens` (`finish_reason=length`). `stop` sequences are always enforced when sent. kiro-cli honors neither over ACP (issue #32). |
 | `ACP_TRUST_TOOLS` | `true` | Auto-approve (`true`) or reject (`false`) tool permission requests |
 | `ACP_SURFACE_TOOL_CALLS` | `false` | How the shims present kiro-cli's built-in tool activity: `false` (default) = inline non-executable reasoning text (interleaved, needs `ACP_SURFACE_THINKING`); `true` = executable `tool_calls`/`tool_use`. ACP-native route always emits a structured `acp_tool_call`. |
 | `ACP_SURFACE_THINKING` | `true` | Surface kiro-cli reasoning in each API's native shape (OpenAI `reasoning_content` / Responses reasoning items; Anthropic `thinking` blocks). Additive — final answer unchanged. `false` emits only the answer. |
