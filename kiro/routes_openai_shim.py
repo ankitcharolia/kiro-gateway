@@ -37,6 +37,7 @@ from kiro.acp_client import format_plan_text
 from kiro.auth import verify_openai_key
 from kiro.config import DEFAULT_KIRO_MODELS, settings
 from kiro.error_mapping import MappedError, classify_event, classify_exception
+from kiro.model_validation import ModelNotAvailableError, validate_model
 from kiro.multimodal import (
     append_text, collapse_blocks, openai_part_to_blocks, prepend_text,
 )
@@ -233,6 +234,21 @@ def _openai_error_response(mapped: MappedError) -> JSONResponse:
     )
 
 
+def _openai_model_not_found(exc: ModelNotAvailableError) -> JSONResponse:
+    """Build a native OpenAI ``404 model_not_found`` response (issue #42)."""
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": {
+                "message": str(exc),
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "model_not_found",
+            }
+        },
+    )
+
+
 def _normalize_stop(stop: Any) -> Optional[list[str]]:
     """Normalise an OpenAI ``stop`` value to a list of strings or ``None``.
 
@@ -311,6 +327,13 @@ async def chat_completions(
     body: OAIChatRequest,
     shim: ShimService = Depends(_get_shim),
 ):
+    # Validate the requested model against the live catalogue before doing any
+    # work, so the check returns a clean 404 for both streaming and
+    # non-streaming (issue #42). In warn/off mode this is a no-op (warn logs).
+    try:
+        validate_model(body.model, shim.available_models(), settings.MODEL_VALIDATION)
+    except ModelNotAvailableError as exc:
+        return _openai_model_not_found(exc)
     messages = _oai_messages_to_acp(body.messages)
     tools = [t.model_dump() for t in (body.tools or [])]
     fs_roots = [FilesystemRoot(**r) for r in body.filesystem_roots] if body.filesystem_roots else []
@@ -754,6 +777,10 @@ async def create_response(
     shim: ShimService = Depends(_get_shim),
 ):
     """OpenAI Responses API endpoint, backed by ACP via ShimService."""
+    try:
+        validate_model(body.model, shim.available_models(), settings.MODEL_VALIDATION)
+    except ModelNotAvailableError as exc:
+        return _openai_model_not_found(exc)
     if body.previous_response_id:
         # The gateway is stateless: each request opens a fresh, isolated ACP
         # session and no response is stored server-side, so a prior response id

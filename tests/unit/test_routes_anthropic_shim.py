@@ -700,6 +700,68 @@ class TestAnthropicShimMultimodal:
 
 
 # ---------------------------------------------------------------------------
+# Model validation (issue #42): unknown models are rejected (strict) or warned.
+# ---------------------------------------------------------------------------
+
+class TestAnthropicShimModelValidation:
+    """Requested-model validation on /v1/messages."""
+
+    _CATALOGUE = [{"id": "claude-opus-4.8", "name": "Claude Opus 4.8"}]
+
+    def _shim(self, sync_client):
+        rec = _RecordingShim()
+        rec.available_models = lambda: self._CATALOGUE
+        sync_client.app.state.shim_service = rec
+        return rec
+
+    def test_strict_unknown_model_returns_404(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr("kiro.routes_anthropic_shim.settings.MODEL_VALIDATION", "strict")
+        self._shim(sync_client)
+        payload = {"model": "gpt-4o", "max_tokens": 16,
+                   "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "not_found_error"
+        assert "gpt-4o" in body["error"]["message"]
+
+    def test_strict_unknown_model_stream_returns_404(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr("kiro.routes_anthropic_shim.settings.MODEL_VALIDATION", "strict")
+        self._shim(sync_client)
+        payload = {"model": "gpt-4o", "max_tokens": 16, "stream": True,
+                   "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 404
+
+    def test_strict_known_model_passes(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr("kiro.routes_anthropic_shim.settings.MODEL_VALIDATION", "strict")
+        self._shim(sync_client)
+        payload = {"model": "claude-opus-4.8", "max_tokens": 16,
+                   "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+
+    def test_warn_unknown_model_falls_back_200(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr("kiro.routes_anthropic_shim.settings.MODEL_VALIDATION", "warn")
+        self._shim(sync_client)
+        payload = {"model": "gpt-4o", "max_tokens": 16,
+                   "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+
+    def test_empty_catalogue_skips_even_strict(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr("kiro.routes_anthropic_shim.settings.MODEL_VALIDATION", "strict")
+        rec = _RecordingShim()
+        rec.available_models = lambda: []
+        sync_client.app.state.shim_service = rec
+        payload = {"model": "gpt-4o", "max_tokens": 16,
+                   "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Error mapping (issue #44): ACP/upstream failures surface with the right HTTP
 # status and the Anthropic native error shape, in both modes.
 # ---------------------------------------------------------------------------

@@ -254,6 +254,12 @@ KIRO_CLI_PATH=kiro-cli           # Override if kiro-cli is not on $PATH
 # precedence at runtime. The model named in a request is forwarded to kiro-cli
 # via session/set_model, so clients can select any model kiro-cli supports.
 KIRO_MODELS=auto,claude-opus-4.8,claude-sonnet-4.6
+# How to handle a requested model that isn't in kiro-cli's live catalogue.
+#   warn (default) = log a warning and fall back to the session default;
+#   strict         = reject with a 404 (native error shape);
+#   off            = forward silently (legacy). Validation is skipped until the
+# live catalogue is discovered (first session).
+MODEL_VALIDATION=warn
 
 # ── Tool execution ────────────────────────────────────────────────────
 # kiro-cli runs its own built-in tools (file edits, command execution) and

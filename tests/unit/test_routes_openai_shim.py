@@ -643,6 +643,77 @@ class TestOpenAIShimMultimodal:
 # paths.
 # ---------------------------------------------------------------------------
 
+class TestOpenAIShimModelValidation:
+    """Requested-model validation against the live catalogue (issue #42)."""
+
+    _CATALOGUE = [
+        {"id": "auto", "name": "auto"},
+        {"id": "claude-opus-4.8", "name": "Claude Opus 4.8"},
+    ]
+
+    def _shim_with_catalogue(self, sync_client):
+        rec = _RecordingShim()
+        rec.available_models = lambda: self._CATALOGUE
+        sync_client.app.state.shim_service = rec
+        return rec
+
+    def test_strict_unknown_model_returns_404(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr("kiro.routes_openai_shim.settings.MODEL_VALIDATION", "strict")
+        self._shim_with_catalogue(sync_client)
+        payload = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 404
+        err = resp.json()["error"]
+        assert err["type"] == "invalid_request_error"
+        assert err["code"] == "model_not_found"
+        assert err["param"] == "model"
+        assert "gpt-4o" in err["message"]
+
+    def test_strict_known_model_passes(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr("kiro.routes_openai_shim.settings.MODEL_VALIDATION", "strict")
+        self._shim_with_catalogue(sync_client)
+        payload = {"model": "claude-opus-4.8", "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+
+    def test_strict_unknown_model_stream_returns_404(self, sync_client, openai_headers, monkeypatch):
+        """Validation runs before the stream branch → clean 404, not an SSE 200."""
+        monkeypatch.setattr("kiro.routes_openai_shim.settings.MODEL_VALIDATION", "strict")
+        self._shim_with_catalogue(sync_client)
+        payload = {"model": "gpt-4o", "stream": True,
+                   "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 404
+
+    def test_warn_unknown_model_falls_back_200(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr("kiro.routes_openai_shim.settings.MODEL_VALIDATION", "warn")
+        self._shim_with_catalogue(sync_client)
+        payload = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+
+    def test_empty_catalogue_skips_validation_even_strict(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr("kiro.routes_openai_shim.settings.MODEL_VALIDATION", "strict")
+        rec = _RecordingShim()
+        rec.available_models = lambda: []
+        sync_client.app.state.shim_service = rec
+        payload = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+
+    def test_strict_unknown_model_responses_returns_404(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr("kiro.routes_openai_shim.settings.MODEL_VALIDATION", "strict")
+        self._shim_with_catalogue(sync_client)
+        payload = {"model": "gpt-4o", "input": "hi"}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "model_not_found"
+
+
+# ---------------------------------------------------------------------------
+# Error mapping classification (kept below)
+# ---------------------------------------------------------------------------
+
 from kiro.acp_client import ACPError
 
 

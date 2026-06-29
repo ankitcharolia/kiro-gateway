@@ -46,6 +46,7 @@ from kiro.acp_client import format_plan_text
 from kiro.auth import verify_anthropic_key
 from kiro.config import DEFAULT_KIRO_MODELS, settings
 from kiro.error_mapping import MappedError, classify_event, classify_exception
+from kiro.model_validation import ModelNotAvailableError, validate_model
 from kiro.multimodal import anthropic_block_to_blocks, collapse_blocks
 from kiro.shim_service import ShimService
 from kiro.tokenizer import estimate_request_tokens, normalize_usage
@@ -243,6 +244,14 @@ def _anthropic_error_response(mapped: MappedError) -> JSONResponse:
     )
 
 
+def _anthropic_model_not_found(exc: ModelNotAvailableError) -> JSONResponse:
+    """Build a native Anthropic ``404 not_found_error`` response (issue #42)."""
+    return JSONResponse(
+        status_code=404,
+        content={"type": "error", "error": {"type": "not_found_error", "message": str(exc)}},
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/models
 # ---------------------------------------------------------------------------
@@ -306,6 +315,12 @@ async def create_message(
     body: AnthropicRequest,
     shim: ShimService = Depends(_get_shim),
 ):
+    # Validate the requested model up front (issue #42): clean 404 for both
+    # streaming and non-streaming; warn/off mode is a no-op (warn logs).
+    try:
+        validate_model(body.model, shim.available_models(), settings.MODEL_VALIDATION)
+    except ModelNotAvailableError as exc:
+        return _anthropic_model_not_found(exc)
     messages = _anthropic_messages_to_acp(body.messages, body.system)
     tools = _anthropic_tools_to_acp(body.tools or [])
     fs_roots = [FilesystemRoot(**r) for r in body.filesystem_roots] if body.filesystem_roots else []

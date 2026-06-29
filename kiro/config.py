@@ -48,6 +48,24 @@ _models_raw: str = os.environ.get(
 )
 DEFAULT_KIRO_MODELS: List[str] = [m.strip() for m in _models_raw.split(",") if m.strip()]
 
+# How to handle a requested model that is not in the live kiro-cli catalogue
+# (issue #42). kiro-cli does not validate the model id on session/set_model — an
+# unknown id silently leaves the session on its default model. To avoid silent
+# wrong-model execution the gateway validates the requested id against the live
+# ``availableModels`` catalogue:
+#   * ``warn``   (default) — log a WARNING and fall back to the session default
+#                (non-silent; never breaks an existing harness that sends a
+#                non-matching default like ``gpt-4o``).
+#   * ``strict`` — reject an unknown model with a 404 in the API's native error
+#                shape.
+#   * ``off``    — legacy behaviour: forward the id and stay silent.
+# Validation is skipped when the catalogue has not been discovered yet (before
+# the first session) since there is nothing to validate against.
+_model_validation_raw: str = os.environ.get("MODEL_VALIDATION", "warn").lower()
+MODEL_VALIDATION: str = (
+    _model_validation_raw if _model_validation_raw in ("off", "warn", "strict") else "warn"
+)
+
 # ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
@@ -138,6 +156,7 @@ class _Settings:
     DEFAULT_MAX_INPUT_TOKENS: int = field(default_factory=lambda: DEFAULT_MAX_INPUT_TOKENS)
     HIDDEN_MODELS: List[str] = field(default_factory=lambda: HIDDEN_MODELS)
     DEFAULT_KIRO_MODELS: List[str] = field(default_factory=lambda: DEFAULT_KIRO_MODELS)
+    MODEL_VALIDATION: str = field(default_factory=lambda: MODEL_VALIDATION)
 
     # Server
     HOST: str = field(default_factory=lambda: HOST)
