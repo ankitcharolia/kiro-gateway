@@ -522,6 +522,54 @@ Sampling parameters are accepted on both shims, validated, and **forwarded** to
 
 ---
 
+## Structured outputs (no-op, but accepted & forwarded)
+
+JSON mode / structured outputs (`response_format`), strict tool schemas
+(`strict`) and tool-selection (`tool_choice`) are **accepted on both shims and
+forwarded to `kiro-cli`**, but they are **not honored over ACP today** — so a
+request that sets them validates and succeeds, returning free-form text (the
+model is not constrained to the requested schema). `kiro-cli` advertises no
+JSON-mode / `json_schema` / tool-choice capability on `initialize`, and ACP
+exposes no `session/prompt` field for them, so there is no structured-output
+enforcement to apply.
+
+The gateway handles them faithfully rather than rejecting the request or
+silently dropping the fields:
+
+- **Accepted, never a 422.** Requests carrying `response_format` (OpenAI chat
+  `json_object` / `json_schema`, or Responses `text.format`), `tool_choice`
+  (`auto` / `none` / `required` / `any` or a named-tool object),
+  `parallel_tool_calls`, or `strict` tool functions validate and complete
+  normally.
+- **Forwarded under `_meta`.** They are carried in the ACP `session/prompt`
+  request under the protocol's reserved `_meta` extension (schema-safe, the same
+  channel used for [generation parameters](#generation-parameters) and client
+  tool definitions): `response_format`/`tool_choice` under
+  `_meta.structuredOutput` (`{responseFormat, toolChoice}`) and `strict` on each
+  forwarded tool in `_meta.tools`.
+- **Forward-compatible.** Because the controls already reach `kiro-cli`, they
+  take effect automatically if a future `kiro-cli` honors them — **no gateway
+  change required.**
+
+| Client field | API | Forwarded as |
+|---|---|---|
+| `response_format` | OpenAI chat (`json_object` / `json_schema`) | `_meta.structuredOutput.responseFormat` |
+| `text` / `response_format` | OpenAI Responses (`text.format`) | `_meta.structuredOutput.responseFormat` |
+| `tool_choice` | OpenAI + Anthropic | `_meta.structuredOutput.toolChoice` |
+| `parallel_tool_calls` | OpenAI | accepted (no-op) |
+| `strict` (per tool function) | OpenAI | `strict` on the tool in `_meta.tools` |
+
+> [!NOTE]
+> The Anthropic Messages API has **no `response_format` field** — structured
+> output there is expressed through tools — so only `tool_choice` is accepted on
+> the Anthropic shim. The Oh My Pi Anthropic example sets `disableStrictTools:
+> true` for this reason; with this forwarding in place the gateway no longer
+> needs that workaround to avoid errors (strict schemas are accepted either
+> way), though strict enforcement is still inert. See
+> [issue #35](https://github.com/ankitcharolia/kiro-gateway/issues/35).
+
+---
+
 ## Usage & token accounting
 
 Both shims return a `usage` object on every completion. The gateway **prefers
@@ -532,11 +580,11 @@ usage field is never silently `0`.
 
 | API / mode | Usage surface |
 |---|---|
-| OpenAI `/v1/chat/completions` (non-stream) | `usage.{prompt_tokens, completion_tokens, total_tokens}` |
+| OpenAI `/v1/chat/completions` (non-stream) | `usage.{prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details.cached_tokens}` |
 | OpenAI `/v1/chat/completions` (stream) | a final usage-only chunk (`choices: []`) **when** the request sets `stream_options: {"include_usage": true}` (OpenAI semantics) |
-| OpenAI `/v1/responses` (stream + non-stream) | `usage.{input_tokens, output_tokens, total_tokens}` |
-| Anthropic `/v1/messages` (non-stream) | `usage.{input_tokens, output_tokens}` |
-| Anthropic `/v1/messages` (stream) | `input_tokens` in `message_start`, `output_tokens` in `message_delta` |
+| OpenAI `/v1/responses` (stream + non-stream) | `usage.{input_tokens, output_tokens, total_tokens, input_tokens_details.cached_tokens}` |
+| Anthropic `/v1/messages` (non-stream) | `usage.{input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens}` |
+| Anthropic `/v1/messages` (stream) | `input_tokens` (+ cache fields) in `message_start`, `output_tokens` in `message_delta` |
 
 - **Real vs. estimated.** Each field is resolved independently: a reported,
   positive count wins; otherwise that field is estimated. `kiro-cli` 2.x does
@@ -555,6 +603,35 @@ usage field is never silently `0`.
   cumulative interactive session for `/usage` to report on.
 - **Estimates are approximate.** They are suitable for budgeting and cost
   displays, not exact billing.
+
+### Prompt caching (no-op, but reported)
+
+Anthropic prompt caching (`cache_control: {"type": "ephemeral"}` markers on
+`system` / message content blocks) and OpenAI automatic prompt caching are
+**not available over ACP**. Verified against a live `kiro-cli` 2.8.0 probe,
+`kiro-cli` advertises **no caching capability** on `initialize` and exposes no
+ACP mechanism to mark, store, or reuse a cached prefix — so there is **no
+caching benefit and no real cache-token activity** to report today.
+
+The gateway handles this faithfully rather than failing or silently dropping
+data:
+
+- **`cache_control` markers are accepted (no-op).** Requests carrying
+  `cache_control` on `system` blocks or message content validate normally and
+  are processed; the markers are simply not acted upon (no error, no 422).
+- **Cache token fields are reported, not omitted.** Each completion's `usage`
+  object includes the native cache fields so the shape matches the real
+  Anthropic/OpenAI APIs:
+  - Anthropic `/v1/messages`: `usage.cache_creation_input_tokens` and
+    `usage.cache_read_input_tokens` (in `message_start` for the stream).
+  - OpenAI `/v1/chat/completions`: `usage.prompt_tokens_details.cached_tokens`.
+  - OpenAI `/v1/responses`: `usage.input_tokens_details.cached_tokens`.
+- **Forward-compatible.** These fields are `0` today, but the gateway already
+  surfaces any cache counts `kiro-cli` reports over ACP (on the prompt result,
+  a `session/update`, or under `_meta`), so **real cache usage appears
+  automatically if a future `kiro-cli` provides it — no gateway change
+  required.** Cache counts are never estimated (a cache hit/miss cannot be
+  guessed from text), so a `0` here means "not reported", not "estimated".
 
 ### logprobs (unsupported)
 

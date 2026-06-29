@@ -98,6 +98,17 @@ def normalize_tool_definitions(tools: Optional[list[Any]]) -> list[dict]:
             "input_schema": input_schema,
         })
 
+        # Preserve an OpenAI "strict" tool-schema flag when present (structured
+        # tool outputs, issue #35). It is inert on kiro-cli today (client tools
+        # are not honored over ACP) but is forwarded under _meta.tools so the
+        # wire request carries the caller's intent and a future kiro-cli can act
+        # on it.
+        strict = source.get("strict")
+        if strict is None:
+            strict = tool.get("strict")
+        if strict is not None:
+            normalized[-1]["strict"] = strict
+
     return normalized
 
 
@@ -128,6 +139,8 @@ class ShimService:
         top_k: Optional[int] = None,
         stop: Optional[list[str]] = None,
         tools: Optional[list[dict]] = None,
+        response_format: Optional[dict] = None,
+        tool_choice: Optional[Any] = None,
         filesystem_roots: Optional[list[FilesystemRoot]] = None,
         terminal: Optional[TerminalCapability] = None,
         surface_tool_calls: bool = True,
@@ -137,6 +150,11 @@ class ShimService:
         Run a full non-streaming completion.
 
         Args:
+            response_format: Optional structured-output control (OpenAI JSON
+                mode / json_schema; inert on kiro-cli today, forwarded under
+                _meta — see issue #35).
+            tool_choice: Optional tool-selection control (inert on kiro-cli
+                today, forwarded under _meta — see issue #35).
             surface_tool_calls: When ``True``, kiro-cli's built-in tool calls are
                 returned in ``tool_calls`` for the caller to present as
                 executable calls. When ``False`` (the shim default) they are not
@@ -163,6 +181,8 @@ class ShimService:
             top_k=top_k,
             stop=stop,
             tools=normalize_tool_definitions(tools),
+            response_format=response_format,
+            tool_choice=tool_choice,
             stream=False,
         )
         result = await self._acp.prompt(params)
@@ -192,6 +212,8 @@ class ShimService:
         top_k: Optional[int] = None,
         stop: Optional[list[str]] = None,
         tools: Optional[list[dict]] = None,
+        response_format: Optional[dict] = None,
+        tool_choice: Optional[Any] = None,
         filesystem_roots: Optional[list[FilesystemRoot]] = None,
         terminal: Optional[TerminalCapability] = None,
         surface_tool_calls: bool = True,
@@ -204,6 +226,11 @@ class ShimService:
         ``thinking``, ``tool_call``, ``plan``, ``done`` or ``error``.
 
         Args:
+            response_format: Optional structured-output control (OpenAI JSON
+                mode / json_schema; inert on kiro-cli today, forwarded under
+                _meta — see issue #35).
+            tool_choice: Optional tool-selection control (inert on kiro-cli
+                today, forwarded under _meta — see issue #35).
             surface_tool_calls: When ``True``, kiro-cli's built-in ``tool_call``
                 events pass through so the caller can present them as
                 executable ``tool_calls``/``tool_use`` (or, on the ACP route, a
@@ -228,6 +255,8 @@ class ShimService:
             top_k=top_k,
             stop=stop,
             tools=normalize_tool_definitions(tools),
+            response_format=response_format,
+            tool_choice=tool_choice,
             stream=True,
         )
         async for event in self._acp.prompt_stream(params):
@@ -256,6 +285,8 @@ class ShimService:
         top_k: Optional[int] = None,
         stop: Optional[list[str]] = None,
         tools: Optional[list[dict]] = None,
+        response_format: Optional[dict] = None,
+        tool_choice: Optional[Any] = None,
     ) -> dict[str, Any]:
         """Submit tool results to an existing session and get the follow-up."""
         params = PromptParams(
@@ -268,6 +299,8 @@ class ShimService:
             top_k=top_k,
             stop=stop,
             tools=normalize_tool_definitions(tools),
+            response_format=response_format,
+            tool_choice=tool_choice,
             tool_results=tool_results,
             stream=False,
         )

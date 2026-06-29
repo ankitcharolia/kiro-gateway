@@ -166,7 +166,7 @@ def test_openai_responses_has_usage(sync_client, openai_headers):
     payload = {"model": "claude-sonnet-4.6", "input": "Hi"}
     response = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
     usage = response.json()["usage"]
-    assert set(usage.keys()) == {"input_tokens", "output_tokens", "total_tokens"}
+    assert set(usage.keys()) == {"input_tokens", "output_tokens", "total_tokens", "input_tokens_details"}
 
 
 def test_openai_responses_streaming(sync_client, openai_headers):
@@ -394,6 +394,91 @@ class TestOpenAIShimSamplingForwarding:
 
 
 # ---------------------------------------------------------------------------
+# Structured-output forwarding (issue #35): the OpenAI shim accepts
+# response_format / tool_choice / parallel_tool_calls / strict tool schemas and
+# forwards response_format / tool_choice to ShimService in both modes. kiro-cli
+# does not honor them today; these assert acceptance (no 422) + forwarding.
+# ---------------------------------------------------------------------------
+
+class TestOpenAIShimStructuredOutputs:
+    """response_format / tool_choice / strict are accepted and forwarded."""
+
+    _RF = {"type": "json_schema",
+           "json_schema": {"name": "S", "schema": {"type": "object"}}}
+
+    def test_chat_non_stream_accepts_and_forwards(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": self._RF,
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        kw = rec.complete_kwargs[0]
+        assert kw["response_format"] == self._RF
+        assert kw["tool_choice"] == "required"
+
+    def test_chat_stream_accepts_and_forwards(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "response_format": {"type": "json_object"},
+            "tool_choice": "auto",
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        kw = rec.stream_kwargs[0]
+        assert kw["response_format"] == {"type": "json_object"}
+        assert kw["tool_choice"] == "auto"
+
+    def test_chat_accepts_strict_tool_schema(self, sync_client, openai_headers):
+        """A ``strict`` function schema validates (no 422) and completes."""
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "f", "description": "d",
+                    "parameters": {"type": "object"}, "strict": True,
+                },
+            }],
+            "tool_choice": {"type": "function", "function": {"name": "f"}},
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+
+    def test_responses_non_stream_forwards_text_format(self, sync_client, openai_headers):
+        """The Responses ``text.format`` shape is forwarded as response_format."""
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        text = {"format": {"type": "json_schema", "name": "S", "schema": {"type": "object"}}}
+        payload = {"model": "claude-sonnet-4.6", "input": "hi",
+                   "text": text, "tool_choice": "required"}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        kw = rec.complete_kwargs[0]
+        assert kw["response_format"] == text
+        assert kw["tool_choice"] == "required"
+
+    def test_responses_stream_accepts_response_format(self, sync_client, openai_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {"model": "claude-sonnet-4.6", "input": "hi", "stream": True,
+                   "response_format": self._RF}
+        resp = sync_client.post("/v1/responses", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        assert rec.stream_kwargs[0]["response_format"] == self._RF
+
+
+# ---------------------------------------------------------------------------
 # Error mapping (issue #44): ACP/upstream failures surface with the right HTTP
 # status and the OpenAI native error shape, in both streaming and non-streaming
 # paths.
@@ -604,10 +689,14 @@ class TestOpenAIShimUsage:
         resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
         assert resp.status_code == 200
         usage = resp.json()["usage"]
-        assert set(usage) == {"prompt_tokens", "completion_tokens", "total_tokens"}
+        assert set(usage) == {
+            "prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details",
+        }
         assert usage["prompt_tokens"] > 0
         assert usage["completion_tokens"] > 0
         assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+        # Prompt caching is a no-op over ACP → cached_tokens reported as 0.
+        assert usage["prompt_tokens_details"] == {"cached_tokens": 0}
 
     def test_chat_usage_uses_reported_counts(self, sync_client, openai_headers):
         sync_client.app.state.shim_service = _usage_shim(
@@ -615,7 +704,12 @@ class TestOpenAIShimUsage:
         )
         resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
         usage = resp.json()["usage"]
-        assert usage == {"prompt_tokens": 111, "completion_tokens": 22, "total_tokens": 133}
+        assert usage == {
+            "prompt_tokens": 111,
+            "completion_tokens": 22,
+            "total_tokens": 133,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        }
 
     def test_chat_choice_logprobs_is_null(self, sync_client, openai_headers):
         sync_client.app.state.shim_service = _usage_shim()
@@ -653,9 +747,11 @@ class TestOpenAIShimUsage:
             headers=openai_headers,
         )
         usage = resp.json()["usage"]
-        assert set(usage) == {"input_tokens", "output_tokens", "total_tokens"}
+        assert set(usage) == {"input_tokens", "output_tokens", "total_tokens", "input_tokens_details"}
         assert usage["input_tokens"] > 0
         assert usage["output_tokens"] > 0
+        # Prompt caching is a no-op over ACP → cached_tokens reported as 0.
+        assert usage["input_tokens_details"] == {"cached_tokens": 0}
 
     def test_responses_stream_usage_non_zero(self, sync_client, openai_headers):
         sync_client.app.state.shim_service = _usage_shim(usage={})
@@ -671,6 +767,43 @@ class TestOpenAIShimUsage:
         usage = completed[-1]["response"]["usage"]
         assert usage["input_tokens"] > 0
         assert usage["output_tokens"] > 0
+
+
+class TestOpenAIShimCacheUsage:
+    """Prompt-caching is a no-op over ACP; cache tokens reported, never omitted."""
+
+    _CHAT = {"model": "claude-sonnet-4.6", "messages": [{"role": "user", "content": "Hi"}]}
+
+    def test_chat_reports_cached_tokens_zero(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim(usage={})
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.json()["usage"]["prompt_tokens_details"] == {"cached_tokens": 0}
+
+    def test_chat_surfaces_reported_cache_read(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim(
+            usage={"input_tokens": 50, "output_tokens": 5, "cache_read_input_tokens": 40}
+        )
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.json()["usage"]["prompt_tokens_details"] == {"cached_tokens": 40}
+
+    def test_chat_stream_reports_cached_tokens(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim(usage={})
+        payload = {**self._CHAT, "stream": True, "stream_options": {"include_usage": True}}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        usage_chunks = [
+            json.loads(line[len("data: "):])
+            for line in resp.text.splitlines()
+            if line.startswith("data: ") and '"usage"' in line
+        ]
+        assert usage_chunks[-1]["usage"]["prompt_tokens_details"] == {"cached_tokens": 0}
+
+    def test_responses_reports_cached_tokens_zero(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _usage_shim(usage={})
+        resp = sync_client.post(
+            "/v1/responses", json={"model": "claude-sonnet-4.6", "input": "Hi"},
+            headers=openai_headers,
+        )
+        assert resp.json()["usage"]["input_tokens_details"] == {"cached_tokens": 0}
 
 
 # ---------------------------------------------------------------------------

@@ -90,6 +90,14 @@ class AnthropicRequest(BaseModel):
     top_k: Optional[int] = None
     stop_sequences: Optional[list[str]] = None
     tools: Optional[list[AnthropicTool]] = None
+    # Tool-selection control (issue #35): ``{"type": "auto"|"any"|"tool",
+    # "name"?}``. The Anthropic Messages API has no ``response_format`` field
+    # (structured output is expressed through tools), so only ``tool_choice`` is
+    # accepted here. It is forwarded under the schema-safe ACP _meta extension
+    # but is inert on kiro-cli today (no tool-choice capability over ACP), so a
+    # request carrying it validates and succeeds; it takes effect automatically
+    # if a future kiro-cli honors it.
+    tool_choice: Optional[Any] = None
     stream: bool = False
     # Gateway extensions
     filesystem_roots: list[dict] = Field(default_factory=list)
@@ -107,6 +115,12 @@ def _system_to_text(system: str | list | None) -> Optional[str]:
     list of text content blocks, e.g. ``[{"type": "text", "text": "...",
     "cache_control": {"type": "ephemeral"}}]``. This collapses either shape to a
     single string.
+
+    Any ``cache_control`` markers are accepted but **not acted upon**: prompt
+    caching is not part of the ACP path (kiro-cli advertises no caching
+    capability), so the markers are a documented no-op rather than an error.
+    Cache-token fields are still reported (as 0) in the ``usage`` object — see
+    the "Prompt caching" docs.
 
     Args:
         system: The raw ``system`` value (string, list of blocks, or ``None``).
@@ -284,7 +298,7 @@ async def create_message(
         return StreamingResponse(
             _stream_response(shim, messages, body.model, body.max_tokens,
                              body.temperature, body.top_p, body.top_k, stop,
-                             tools, fs_roots, terminal),
+                             tools, fs_roots, terminal, body.tool_choice),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -299,6 +313,7 @@ async def create_message(
             top_k=body.top_k,
             stop=stop,
             tools=tools,
+            tool_choice=body.tool_choice,
             filesystem_roots=fs_roots,
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
@@ -348,6 +363,13 @@ async def create_message(
         "usage": {
             "input_tokens": usage["input_tokens"],
             "output_tokens": usage["output_tokens"],
+            # Prompt caching is a no-op over ACP (kiro-cli exposes no caching
+            # mechanism), so these are 0 today. They are reported — rather than
+            # omitted — to keep the usage object faithful to the native
+            # Anthropic shape, and surface real counts if a future kiro-cli
+            # reports them. See the "Prompt caching" docs.
+            "cache_creation_input_tokens": usage["cache_creation_input_tokens"],
+            "cache_read_input_tokens": usage["cache_read_input_tokens"],
         },
     }
 
@@ -364,6 +386,7 @@ async def _stream_response(
     tools: list[dict],
     fs_roots: list[FilesystemRoot],
     terminal: Optional[TerminalCapability],
+    tool_choice: Optional[Any] = None,
 ) -> AsyncIterator[str]:
     """
     Translate ACP progress events to Anthropic SSE event taxonomy.
@@ -409,7 +432,15 @@ async def _stream_response(
             "model": model,
             "stop_reason": None,
             "stop_sequence": None,
-            "usage": {"input_tokens": input_tokens, "output_tokens": 0},
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": 0,
+                # Prompt caching is a no-op over ACP, so cache tokens are 0;
+                # reported for shape-parity with the native Anthropic API
+                # (see the "Prompt caching" docs).
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            },
         },
     })
 
@@ -426,6 +457,7 @@ async def _stream_response(
             top_k=top_k,
             stop=stop,
             tools=tools,
+            tool_choice=tool_choice,
             filesystem_roots=fs_roots,
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,

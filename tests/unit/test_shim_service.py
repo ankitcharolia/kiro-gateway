@@ -255,6 +255,37 @@ class TestNormalizeToolDefinitions:
         params = PromptParams(session_id="s", messages=[], tools=normalize_tool_definitions(tools))
         assert params.tools[0].name == "f"
 
+    def test_strict_flag_preserved_openai_nested(self):
+        """A ``strict`` flag on an OpenAI nested function is preserved (issue #35)."""
+        tools = [{
+            "type": "function",
+            "function": {"name": "f", "parameters": {"type": "object"}, "strict": True},
+        }]
+        assert normalize_tool_definitions(tools) == [{
+            "name": "f", "description": "", "input_schema": {"type": "object"},
+            "strict": True,
+        }]
+
+    def test_strict_flag_preserved_flat(self):
+        """A ``strict`` flag on a flat (Responses/Anthropic) tool is preserved."""
+        tools = [{"name": "f", "input_schema": {"type": "object"}, "strict": False}]
+        assert normalize_tool_definitions(tools) == [{
+            "name": "f", "description": "", "input_schema": {"type": "object"},
+            "strict": False,
+        }]
+
+    def test_strict_absent_keeps_minimal_shape(self):
+        """No ``strict`` → no ``strict`` key (preserves the minimal shape)."""
+        tools = [{"name": "f", "input_schema": {"type": "object"}}]
+        assert "strict" not in normalize_tool_definitions(tools)[0]
+
+    def test_strict_output_validates_against_prompt_params(self):
+        """Normalised tools carrying ``strict`` validate against PromptParams."""
+        from kiro.acp_models import PromptParams
+        tools = [{"type": "function", "function": {"name": "f", "strict": True}}]
+        params = PromptParams(session_id="s", messages=[], tools=normalize_tool_definitions(tools))
+        assert params.tools[0].strict is True
+
 
 @pytest.mark.asyncio
 async def test_complete_accepts_openai_nested_tools():
@@ -282,6 +313,62 @@ async def test_stream_tokens_accepts_openai_nested_tools():
     tools = [{"type": "function", "function": {"name": "grep", "parameters": {"type": "object"}}}]
     await collect_stream(svc.stream_tokens([{"role": "user", "content": "hi"}], tools=tools))
     assert acp.last_params.tools[0].name == "grep"
+
+
+# ---------------------------------------------------------------------------
+# Structured-output forwarding (issue #35): response_format / tool_choice reach
+# PromptParams on both the non-streaming and streaming paths. kiro-cli does not
+# honor them today; these assert the gateway plumbs them through, not that the
+# output is constrained.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_complete_forwards_response_format_and_tool_choice():
+    """complete() sets response_format / tool_choice on PromptParams."""
+    acp = StubACP(
+        stream_events=[],
+        prompt_result={"content": "ok", "finish_reason": "stop", "tool_calls": [], "usage": {}},
+    )
+    svc = ShimService(acp)
+    rf = {"type": "json_schema", "json_schema": {"name": "S", "schema": {"type": "object"}}}
+    result = await svc.complete(
+        [{"role": "user", "content": "hi"}],
+        response_format=rf,
+        tool_choice="required",
+    )
+    assert result.get("content") == "ok"
+    assert acp.last_params.response_format == rf
+    assert acp.last_params.tool_choice == "required"
+
+
+@pytest.mark.asyncio
+async def test_stream_tokens_forwards_response_format_and_tool_choice():
+    """stream_tokens() sets response_format / tool_choice on PromptParams."""
+    acp = StubACP([
+        {"type": "text", "content": "hi"},
+        {"type": "done", "finish_reason": "stop"},
+    ])
+    svc = ShimService(acp)
+    await collect_stream(svc.stream_tokens(
+        [{"role": "user", "content": "hi"}],
+        response_format={"type": "json_object"},
+        tool_choice={"type": "function", "function": {"name": "f"}},
+    ))
+    assert acp.last_params.response_format == {"type": "json_object"}
+    assert acp.last_params.tool_choice == {"type": "function", "function": {"name": "f"}}
+
+
+@pytest.mark.asyncio
+async def test_complete_omits_structured_output_when_unset():
+    """No structured-output controls → PromptParams fields stay None."""
+    acp = StubACP(
+        stream_events=[],
+        prompt_result={"content": "ok", "finish_reason": "stop", "tool_calls": [], "usage": {}},
+    )
+    svc = ShimService(acp)
+    await svc.complete([{"role": "user", "content": "hi"}])
+    assert acp.last_params.response_format is None
+    assert acp.last_params.tool_choice is None
 
 
 # ---------------------------------------------------------------------------

@@ -84,6 +84,12 @@ class ACPToolDefinition(BaseModel):
     name: str
     description: Optional[str] = None
     input_schema: Dict[str, Any] = Field(default_factory=dict)
+    # OpenAI "strict" tool schemas (structured outputs for function calling).
+    # kiro-cli does not honor client-declared tools over ACP today (see
+    # ACPClient._tool_meta), so ``strict`` is inert — it is preserved and
+    # forwarded under _meta.tools for forward-compatibility, and so the wire
+    # request faithfully carries the caller's intent. See issue #35.
+    strict: Optional[bool] = None
 
 
 class ACPToolDef(BaseModel):
@@ -174,6 +180,17 @@ class PromptParams(BaseModel):
     top_p: Optional[float] = None
     top_k: Optional[int] = None
     stop: Optional[List[str]] = None
+    # Structured-output controls (issue #35). kiro-cli (ACP) currently honors
+    # none of these — see ACPClient._structured_output_meta — but they are
+    # plumbed through and forwarded under the schema-safe _meta extension so
+    # they reach kiro-cli and take effect automatically if a future version
+    # honors them, and so requests carrying them validate instead of erroring.
+    #   * response_format: OpenAI JSON mode / json_schema structured outputs
+    #     (also the Responses ``text.format`` shape).
+    #   * tool_choice: OpenAI/Anthropic tool-selection control
+    #     ("auto"/"none"/"required"/"any" or a named-tool object).
+    response_format: Optional[Dict[str, Any]] = None
+    tool_choice: Optional[Any] = None
     tools: Optional[List[ACPToolDefinition]] = None
     tool_results: Optional[List[ACPToolResultBlock]] = None
 

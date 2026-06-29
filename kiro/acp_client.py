@@ -667,6 +667,15 @@ class ACPClient:
                 # automatically if a future version ingests them — see
                 # _tool_meta and the README "Tool execution" section.
                 meta["tools"] = tool_meta
+            structured_meta = self._structured_output_meta(params)
+            if structured_meta:
+                # Structured-output controls (response_format / tool_choice).
+                # Verified inert on kiro-cli 2.8.0 (no structured-output or
+                # tool-choice capability advertised); forwarded under _meta so
+                # they reach kiro-cli and take effect automatically if a future
+                # version honors them — see _structured_output_meta and the
+                # README "Structured outputs" section (issue #35).
+                meta["structuredOutput"] = structured_meta
             if meta:
                 prompt_params["_meta"] = meta
             await self._send(JsonRpcRequest(
@@ -830,12 +839,56 @@ class ACPClient:
             name = tool.get("name")
             if not name:
                 continue
-            rendered.append({
+            rendered_tool = {
                 "name": name,
                 "description": tool.get("description") or "",
                 "inputSchema": tool.get("input_schema") or tool.get("inputSchema") or {},
-            })
+            }
+            # Preserve OpenAI "strict" tool schemas (structured tool outputs).
+            # Inert on kiro-cli today (client tools are not honored over ACP),
+            # but forwarded so the wire request faithfully carries the caller's
+            # intent and a future kiro-cli can act on it (issue #35).
+            strict = tool.get("strict")
+            if strict is not None:
+                rendered_tool["strict"] = strict
+            rendered.append(rendered_tool)
         return rendered
+
+    @staticmethod
+    def _structured_output_meta(params: PromptParams) -> dict[str, Any]:
+        """Translate structured-output controls into an ACP ``_meta`` map.
+
+        Collects the response-format / tool-choice controls a caller set into a
+        single camelCase map suitable for the ``_meta.structuredOutput``
+        extension. Only fields the caller actually set are included.
+
+        Note:
+            kiro-cli (ACP) does **not** honor structured-output controls today:
+            it advertises no JSON-mode / json-schema / tool-choice capability,
+            so ``response_format`` (OpenAI JSON mode or ``json_schema`` /
+            Responses ``text.format``) and ``tool_choice``
+            (``auto``/``none``/``required``/``any`` or a named-tool object) are
+            inert. They are forwarded under the schema-safe ``_meta`` extension
+            so they reach kiro-cli and take effect automatically if a future
+            version honors them, and so the wire request faithfully carries the
+            caller's intent. OpenAI strict tool schemas are carried per-tool by
+            :meth:`_tool_meta` (the ``strict`` flag). See issue #35 and the
+            README "Structured outputs" section.
+
+        Args:
+            params: The prompt parameters carrying optional ``response_format``
+                / ``tool_choice``.
+
+        Returns:
+            A dict with ``responseFormat`` and/or ``toolChoice`` for the fields
+            the caller set; empty when neither is present.
+        """
+        meta: dict[str, Any] = {}
+        if params.response_format is not None:
+            meta["responseFormat"] = params.response_format
+        if params.tool_choice is not None:
+            meta["toolChoice"] = params.tool_choice
+        return meta
 
     @staticmethod
     def _build_prompt_blocks(messages: list) -> list[dict]:
@@ -1039,14 +1092,18 @@ class ACPClient:
 
         Accepts both ``snake_case`` and ``camelCase`` variants (and the OpenAI
         ``prompt``/``completion`` spellings) so usage reported in any common
-        shape is surfaced verbatim.
+        shape is surfaced verbatim. Cache-token counts
+        (``cache_creation_input_tokens`` / ``cache_read_input_tokens``) are
+        surfaced too when present — prompt caching is not part of the ACP path
+        today, but this is forward-compatible if a future kiro-cli reports them.
 
         Args:
             usage: A candidate usage mapping (or anything; non-dicts yield ``{}``).
 
         Returns:
             A dict with any of ``input_tokens`` / ``output_tokens`` /
-            ``total_tokens`` that were present and parseable as ints.
+            ``total_tokens`` / ``cache_creation_input_tokens`` /
+            ``cache_read_input_tokens`` that were present and parseable as ints.
         """
         if not isinstance(usage, dict):
             return {}
@@ -1065,12 +1122,25 @@ class ACPClient:
         input_tokens = _pick("input_tokens", "inputTokens", "promptTokens", "prompt_tokens")
         output_tokens = _pick("output_tokens", "outputTokens", "completionTokens", "completion_tokens")
         total_tokens = _pick("total_tokens", "totalTokens")
+        cache_creation = _pick(
+            "cache_creation_input_tokens", "cacheCreationInputTokens",
+            "cache_creation_tokens", "cacheCreationTokens",
+        )
+        cache_read = _pick(
+            "cache_read_input_tokens", "cacheReadInputTokens",
+            "cache_read_tokens", "cacheReadTokens",
+            "cached_tokens", "cachedTokens",
+        )
         if input_tokens is not None:
             normalised["input_tokens"] = input_tokens
         if output_tokens is not None:
             normalised["output_tokens"] = output_tokens
         if total_tokens is not None:
             normalised["total_tokens"] = total_tokens
+        if cache_creation is not None:
+            normalised["cache_creation_input_tokens"] = cache_creation
+        if cache_read is not None:
+            normalised["cache_read_input_tokens"] = cache_read
         return normalised
 
     @staticmethod

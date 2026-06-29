@@ -265,10 +265,11 @@ provenance is preserved instead of being flattened to anonymous user text:
 
 `normalize_usage(reported, prompt_messages, prompt_tools, prompt_system,
 completion_text, completion_tool_calls)` returns
-`{input_tokens, output_tokens, total_tokens, estimated}`. It **prefers real
-counts** reported by kiro-cli and falls back per field to a tokenizer estimate
-(tiktoken `cl100k_base` + Claude correction), so a field is never silently `0`.
-All four completion surfaces use it:
+`{input_tokens, output_tokens, total_tokens, cache_creation_input_tokens,
+cache_read_input_tokens, estimated}`. It **prefers real counts** reported by
+kiro-cli and falls back per field to a tokenizer estimate (tiktoken
+`cl100k_base` + Claude correction), so a field is never silently `0`. All four
+completion surfaces use it:
 
 - OpenAI non-stream chat + Responses; Anthropic non-stream messages.
 - OpenAI chat **stream** emits a usage-only chunk (`choices: []`) only when the
@@ -291,6 +292,52 @@ reports them.
 `logprobs`/`top_logprobs` for compatibility and returns `"logprobs": null` per
 choice. When touching usage, keep all shims/modes consistent and assert the
 usage **shape** in tests.
+
+**Prompt caching is a no-op over ACP, but reported** (issue #37). kiro-cli
+advertises no caching capability on `initialize` and exposes no ACP mechanism to
+mark/store/reuse a cached prefix, so Anthropic `cache_control` markers are
+**accepted but not acted upon** (validated, no 422; `_system_to_text` flattens
+them away). To keep the usage object faithful to the native APIs instead of
+omitting cache tokens, every completion reports the cache fields: Anthropic
+`usage.cache_creation_input_tokens` / `cache_read_input_tokens` (in
+`message_start` for the stream), OpenAI chat `usage.prompt_tokens_details.cached_tokens`,
+OpenAI Responses `usage.input_tokens_details.cached_tokens`. They are `0` today
+and **never estimated** (a cache hit/miss can't be guessed from text) — but
+`normalize_usage` / `_normalize_usage_keys` surface real counts verbatim if a
+future kiro-cli reports them (no gateway change required). When adding cache
+behaviour, keep all shims/modes consistent.
+
+## Structured outputs / tool_choice / strict schemas (no-op, but forwarded)
+
+JSON mode / structured outputs (`response_format`), strict tool schemas
+(`strict`) and tool-selection (`tool_choice`) are **accepted on both shims and
+forwarded under the schema-safe ACP `_meta` extension** but are **inert on
+kiro-cli today** (issue #35). kiro-cli advertises no JSON-mode / `json_schema` /
+tool-choice capability on `initialize`, and ACP exposes no `session/prompt`
+field for them, so a request that sets them validates and succeeds with
+free-form text (the model is not constrained). They are forwarded — not dropped
+— so they reach kiro-cli and take effect automatically if a future version
+honors them (no gateway change required), mirroring the
+[generation-param](#generation-parameters-no-op-but-forwarded) and client-tool
+forwarding.
+
+- **Request models.** OpenAI chat `OAIChatRequest` carries `response_format` /
+  `tool_choice` / `parallel_tool_calls`, and `OAIToolFunction` carries `strict`;
+  OpenAI Responses `OAIResponsesRequest` carries `text` (the Responses
+  `text.format` shape) / `response_format` / `tool_choice`; Anthropic
+  `AnthropicRequest` carries `tool_choice` only (the Messages API has **no**
+  `response_format` field — structured output is expressed through tools).
+- **Plumbing.** `ShimService.complete` / `stream_tokens` / `complete_with_tools`
+  take `response_format` / `tool_choice` and set them on `PromptParams`;
+  `normalize_tool_definitions` preserves a per-tool `strict` flag.
+- **Wire.** `ACPClient._structured_output_meta` builds
+  `_meta.structuredOutput = {responseFormat?, toolChoice?}` and
+  `ACPClient._tool_meta` adds `strict` to each `_meta.tools` entry. Both are
+  merged into the same `_meta` as `generationConfig`/`tools`.
+- **Don't claim kiro-cli honors them.** Like sampling params and client tools,
+  they are forward-compatibility plumbing. When touching this, keep all
+  shims/modes consistent and assert requests with these fields still **succeed**
+  (the acceptance criteria), not that output is constrained.
 
 ## API Endpoints
 

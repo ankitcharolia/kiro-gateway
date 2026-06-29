@@ -517,6 +517,56 @@ class TestAnthropicShimSamplingForwarding:
         assert kw["stop"] == ["STOP"]
 
 
+class TestAnthropicShimToolChoiceForwarding:
+    """tool_choice is accepted and forwarded in both modes (issue #35).
+
+    The Anthropic Messages API has no ``response_format`` field, so only
+    ``tool_choice`` is accepted here. kiro-cli does not honor it today; these
+    assert acceptance (no 422) + forwarding to ShimService.
+    """
+
+    def test_messages_non_stream_forwards_tool_choice(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "tool", "name": "get_weather"},
+            "tools": [{"name": "get_weather", "description": "w",
+                       "input_schema": {"type": "object"}}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200, resp.text
+        assert rec.complete_kwargs[0]["tool_choice"] == {"type": "tool", "name": "get_weather"}
+
+    def test_messages_stream_forwards_tool_choice(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "any"},
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        assert rec.stream_kwargs[0]["tool_choice"] == {"type": "any"}
+
+    def test_messages_without_tool_choice_forwards_none(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        assert rec.complete_kwargs[0]["tool_choice"] is None
+
+
 # ---------------------------------------------------------------------------
 # Error mapping (issue #44): ACP/upstream failures surface with the right HTTP
 # status and the Anthropic native error shape, in both modes.
@@ -717,9 +767,15 @@ class TestAnthropicShimUsage:
         resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
         assert resp.status_code == 200
         usage = resp.json()["usage"]
-        assert set(usage) == {"input_tokens", "output_tokens"}
+        assert set(usage) == {
+            "input_tokens", "output_tokens",
+            "cache_creation_input_tokens", "cache_read_input_tokens",
+        }
         assert usage["input_tokens"] > 0
         assert usage["output_tokens"] > 0
+        # Prompt caching is a no-op over ACP → cache tokens reported as 0.
+        assert usage["cache_creation_input_tokens"] == 0
+        assert usage["cache_read_input_tokens"] == 0
 
     def test_non_stream_usage_uses_reported(self, sync_client, anthropic_headers):
         sync_client.app.state.shim_service = _anthropic_usage_shim(
@@ -727,7 +783,12 @@ class TestAnthropicShimUsage:
         )
         resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
         usage = resp.json()["usage"]
-        assert usage == {"input_tokens": 77, "output_tokens": 12}
+        assert usage == {
+            "input_tokens": 77,
+            "output_tokens": 12,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        }
 
     def test_non_stream_counts_system_in_input(self, sync_client, anthropic_headers):
         """A larger system prompt yields a larger input-token estimate."""
@@ -770,6 +831,61 @@ class TestAnthropicShimUsage:
         events = _parse_anthropic_sse(resp.text)
         deltas = [d for name, d in events if name == "message_delta"]
         assert deltas[-1]["usage"]["output_tokens"] == 999
+
+
+class TestAnthropicShimCacheUsage:
+    """Prompt-caching is a no-op over ACP; cache tokens reported, never omitted."""
+
+    _MSG = {
+        "model": "claude-sonnet-4.6",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "Hi"}],
+    }
+
+    def test_non_stream_reports_cache_tokens_zero(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_usage_shim(usage={})
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        usage = resp.json()["usage"]
+        assert usage["cache_creation_input_tokens"] == 0
+        assert usage["cache_read_input_tokens"] == 0
+
+    def test_non_stream_surfaces_reported_cache(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_usage_shim(
+            usage={
+                "input_tokens": 80,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 25,
+                "cache_read_input_tokens": 55,
+            }
+        )
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        usage = resp.json()["usage"]
+        assert usage["cache_creation_input_tokens"] == 25
+        assert usage["cache_read_input_tokens"] == 55
+
+    def test_stream_message_start_has_cache_fields(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_usage_shim(usage={})
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        events = _parse_anthropic_sse(resp.text)
+        starts = [d for name, d in events if name == "message_start"]
+        usage = starts[0]["message"]["usage"]
+        assert usage["cache_creation_input_tokens"] == 0
+        assert usage["cache_read_input_tokens"] == 0
+
+    def test_system_with_cache_control_does_not_error(self, sync_client, anthropic_headers):
+        """``cache_control`` markers on system blocks are accepted (no-op)."""
+        sync_client.app.state.shim_service = _anthropic_usage_shim(usage={})
+        payload = {
+            **self._MSG,
+            "system": [
+                {"type": "text", "text": "You are helpful.",
+                 "cache_control": {"type": "ephemeral"}},
+            ],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        assert "cache_read_input_tokens" in resp.json()["usage"]
 
 
 # ---------------------------------------------------------------------------

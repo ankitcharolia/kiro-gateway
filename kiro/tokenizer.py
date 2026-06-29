@@ -230,7 +230,9 @@ def normalize_usage(
 
     Args:
         reported: Usage counts reported by kiro-cli (may be ``None`` or empty),
-            with keys ``input_tokens`` / ``output_tokens`` / ``total_tokens``.
+            with keys ``input_tokens`` / ``output_tokens`` / ``total_tokens``
+            and optionally ``cache_creation_input_tokens`` /
+            ``cache_read_input_tokens``.
         prompt_messages: The request messages (token-view dicts) for the
             input-token estimate.
         prompt_tools: Tool definitions injected into the prompt.
@@ -239,9 +241,15 @@ def normalize_usage(
         completion_tool_calls: Generated tool calls for the output estimate.
 
     Returns:
-        A dict with ``input_tokens``, ``output_tokens``, ``total_tokens`` (ints)
+        A dict with ``input_tokens``, ``output_tokens``, ``total_tokens``,
+        ``cache_creation_input_tokens`` and ``cache_read_input_tokens`` (ints)
         and ``estimated`` (bool — ``True`` when any field was estimated rather
         than reported).
+
+        Cache-token fields are **never estimated** — prompt caching is not part
+        of the ACP path (kiro-cli exposes no caching mechanism), so they are
+        ``0`` unless a future kiro-cli reports real cache counts, in which case
+        the reported value is surfaced verbatim.
     """
     reported = reported or {}
     input_reported = _coerce_int(reported.get("input_tokens"))
@@ -264,9 +272,19 @@ def normalize_usage(
 
     total_tokens = total_reported or (input_tokens + output_tokens)
 
+    # Prompt caching is a no-op over ACP (no caching capability is advertised),
+    # so these are 0 today. They are surfaced verbatim if a future kiro-cli
+    # reports them, and are never estimated (a cache hit/miss cannot be guessed
+    # from text). Reporting them keeps the usage object's shape faithful to the
+    # native Anthropic/OpenAI APIs instead of omitting cache tokens entirely.
+    cache_creation_input_tokens = _coerce_int(reported.get("cache_creation_input_tokens"))
+    cache_read_input_tokens = _coerce_int(reported.get("cache_read_input_tokens"))
+
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
         "estimated": estimated,
     }

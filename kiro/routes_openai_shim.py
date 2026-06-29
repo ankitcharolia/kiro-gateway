@@ -51,6 +51,10 @@ class OAIToolFunction(BaseModel):
     name: str
     description: Optional[str] = None
     parameters: dict[str, Any] = Field(default_factory=dict)
+    # OpenAI structured-outputs "strict" function schema. Accepted for API
+    # compatibility and forwarded under _meta.tools (inert on kiro-cli today —
+    # client tools are not honored over ACP; see issue #35).
+    strict: Optional[bool] = None
 
 
 class OAITool(BaseModel):
@@ -76,6 +80,18 @@ class OAIChatRequest(BaseModel):
     # stop may be a single string or a list of strings (OpenAI spec).
     stop: Optional[Any] = None
     tools: Optional[list[OAITool]] = None
+    # Structured-output / tool-selection controls (issue #35). Accepted for API
+    # compatibility and forwarded under the schema-safe ACP _meta extension.
+    # kiro-cli does not honor them today (no JSON-mode / json_schema / tool-
+    # choice capability over ACP), so they are an inert, documented no-op:
+    # requests carrying them validate and succeed (free-form text is returned),
+    # and they take effect automatically if a future kiro-cli honors them.
+    #   * response_format: {"type": "text" | "json_object" | "json_schema", ...}
+    #   * tool_choice: "auto" | "none" | "required" | {"type": "function", ...}
+    #   * parallel_tool_calls: accepted, not acted upon.
+    response_format: Optional[dict] = None
+    tool_choice: Optional[Any] = None
+    parallel_tool_calls: Optional[bool] = None
     # Streaming usage opt-in: {"include_usage": true} appends a final usage-only
     # chunk to the SSE stream (OpenAI semantics).
     stream_options: Optional[dict] = None
@@ -273,7 +289,8 @@ async def chat_completions(
         return StreamingResponse(
             _stream_response(shim, messages, body.model, body.max_tokens,
                              body.temperature, body.top_p, stop, tools, fs_roots,
-                             terminal, include_usage),
+                             terminal, include_usage, body.response_format,
+                             body.tool_choice),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -288,6 +305,8 @@ async def chat_completions(
             top_p=body.top_p,
             stop=stop,
             tools=tools,
+            response_format=body.response_format,
+            tool_choice=body.tool_choice,
             filesystem_roots=fs_roots,
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
@@ -338,6 +357,12 @@ async def chat_completions(
             "prompt_tokens": usage["input_tokens"],
             "completion_tokens": usage["output_tokens"],
             "total_tokens": usage["total_tokens"],
+            # Prompt caching is a no-op over ACP (kiro-cli exposes no caching
+            # mechanism), so ``cached_tokens`` is 0 today. It is reported —
+            # rather than omitted — to keep the usage object faithful to the
+            # native OpenAI shape, and surfaces real counts if a future
+            # kiro-cli reports them. See the "Prompt caching" docs.
+            "prompt_tokens_details": {"cached_tokens": usage["cache_read_input_tokens"]},
         },
     }
 
@@ -354,6 +379,8 @@ async def _stream_response(
     fs_roots: list[FilesystemRoot],
     terminal: Optional[TerminalCapability],
     include_usage: bool = False,
+    response_format: Optional[dict] = None,
+    tool_choice: Optional[Any] = None,
 ) -> AsyncIterator[str]:
     """
     Translate ACP progress events to OpenAI streaming SSE format.
@@ -399,6 +426,8 @@ async def _stream_response(
             top_p=top_p,
             stop=stop,
             tools=tools,
+            response_format=response_format,
+            tool_choice=tool_choice,
             filesystem_roots=fs_roots,
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
@@ -478,6 +507,12 @@ async def _stream_response(
                                 "prompt_tokens": usage["input_tokens"],
                                 "completion_tokens": usage["output_tokens"],
                                 "total_tokens": usage["total_tokens"],
+                                # Prompt caching is a no-op over ACP; 0 today,
+                                # reported for shape-parity with the native
+                                # OpenAI usage object (see "Prompt caching").
+                                "prompt_tokens_details": {
+                                    "cached_tokens": usage["cache_read_input_tokens"],
+                                },
                             },
                         })
                         + "\n\n"
@@ -532,6 +567,18 @@ class OAIResponsesRequest(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     tools: Optional[list[dict]] = None
+    # Structured-output / tool-selection controls (issue #35). The Responses API
+    # expresses structured outputs via ``text.format`` (``{"format": {"type":
+    # "json_schema", ...}}``); ``response_format`` is also accepted for lenient
+    # clients. Accepted for compatibility and forwarded under the schema-safe
+    # ACP _meta extension — inert on kiro-cli today (no structured-output / tool-
+    # choice capability over ACP), so requests carrying them validate and
+    # succeed, and they take effect automatically if a future kiro-cli honors
+    # them.
+    text: Optional[dict] = None
+    response_format: Optional[dict] = None
+    tool_choice: Optional[Any] = None
+    parallel_tool_calls: Optional[bool] = None
     # Gateway extensions (optional, ignored by standard clients)
     filesystem_roots: list[dict] = Field(default_factory=list)
     terminal: Optional[dict] = None
@@ -639,6 +686,14 @@ def _build_response_object(
             "input_tokens": usage.get("input_tokens", 0),
             "output_tokens": usage.get("output_tokens", 0),
             "total_tokens": usage.get("total_tokens", 0),
+            # Prompt caching is a no-op over ACP (kiro-cli exposes no caching
+            # mechanism), so ``cached_tokens`` is 0 today. Reported — rather
+            # than omitted — for shape-parity with the native Responses usage
+            # object, and surfaces real counts if a future kiro-cli reports
+            # them. See the "Prompt caching" docs.
+            "input_tokens_details": {
+                "cached_tokens": usage.get("cache_read_input_tokens", 0),
+            },
         },
     }
 
@@ -653,11 +708,16 @@ async def create_response(
     tools = list(body.tools or [])
     fs_roots = [FilesystemRoot(**r) for r in body.filesystem_roots] if body.filesystem_roots else []
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
+    # The Responses API carries structured outputs under ``text.format``;
+    # ``response_format`` is also accepted for lenient clients. Either is
+    # forwarded under _meta (inert on kiro-cli today — issue #35).
+    response_format = body.response_format or body.text
 
     if body.stream:
         return StreamingResponse(
             _responses_stream(shim, messages, body.model, body.max_output_tokens,
-                              body.temperature, body.top_p, tools, fs_roots, terminal),
+                              body.temperature, body.top_p, tools, fs_roots, terminal,
+                              response_format, body.tool_choice),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -670,6 +730,8 @@ async def create_response(
             temperature=body.temperature,
             top_p=body.top_p,
             tools=tools,
+            response_format=response_format,
+            tool_choice=body.tool_choice,
             filesystem_roots=fs_roots,
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
@@ -712,6 +774,8 @@ async def _responses_stream(
     tools: list[dict],
     fs_roots: list[FilesystemRoot],
     terminal: Optional[TerminalCapability],
+    response_format: Optional[dict] = None,
+    tool_choice: Optional[Any] = None,
 ) -> AsyncIterator[str]:
     """Translate ACP events into Responses API SSE semantic events.
 
@@ -787,6 +851,8 @@ async def _responses_stream(
             temperature=temperature,
             top_p=top_p,
             tools=tools,
+            response_format=response_format,
+            tool_choice=tool_choice,
             filesystem_roots=fs_roots,
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,

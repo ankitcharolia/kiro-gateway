@@ -51,6 +51,8 @@ class TestNormalizeUsageReported:
             "input_tokens": 100,
             "output_tokens": 50,
             "total_tokens": 150,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
             "estimated": False,
         }
 
@@ -99,4 +101,31 @@ class TestNormalizeUsageEstimated:
 
     def test_shape_keys_always_present(self):
         usage = normalize_usage(None)
-        assert set(usage) == {"input_tokens", "output_tokens", "total_tokens", "estimated"}
+        assert set(usage) == {
+            "input_tokens", "output_tokens", "total_tokens",
+            "cache_creation_input_tokens", "cache_read_input_tokens",
+            "estimated",
+        }
+
+    def test_cache_tokens_default_zero_and_never_estimated(self):
+        """Cache fields default to 0 and do not flip the ``estimated`` flag."""
+        usage = normalize_usage(
+            {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+        assert usage["cache_creation_input_tokens"] == 0
+        assert usage["cache_read_input_tokens"] == 0
+        assert usage["estimated"] is False
+
+    def test_cache_tokens_surfaced_when_reported(self):
+        """Reported cache counts are surfaced verbatim (forward-compatible)."""
+        usage = normalize_usage(
+            {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "total_tokens": 150,
+                "cache_creation_input_tokens": 30,
+                "cache_read_input_tokens": 70,
+            },
+        )
+        assert usage["cache_creation_input_tokens"] == 30
+        assert usage["cache_read_input_tokens"] == 70

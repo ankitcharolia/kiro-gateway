@@ -670,6 +670,97 @@ class TestToolMeta:
 
 
 # ---------------------------------------------------------------------------
+# Structured-output forwarding (issue #35): prompt_stream attaches
+# response_format / tool_choice under _meta.structuredOutput and a per-tool
+# "strict" flag under _meta.tools. kiro-cli does not honor them today; these
+# assert the gateway *forwards* them (forward-compatible), not that the agent
+# acts on them.
+# ---------------------------------------------------------------------------
+
+class TestStructuredOutputMeta:
+    """_structured_output_meta + strict tool flag + prompt_stream payload."""
+
+    def test_structured_meta_only_includes_set_fields(self):
+        params = PromptParams(session_id="x", tool_choice="required")
+        assert ACPClient._structured_output_meta(params) == {"toolChoice": "required"}
+
+    def test_structured_meta_maps_both_fields(self):
+        rf = {"type": "json_object"}
+        params = PromptParams(session_id="x", response_format=rf, tool_choice="auto")
+        assert ACPClient._structured_output_meta(params) == {
+            "responseFormat": rf, "toolChoice": "auto",
+        }
+
+    def test_structured_meta_empty_when_unset(self):
+        assert ACPClient._structured_output_meta(PromptParams(session_id="x")) == {}
+
+    def test_tool_meta_includes_strict_when_set(self):
+        tool = ACPToolDefinition(
+            name="f", description="d",
+            input_schema={"type": "object"}, strict=True,
+        )
+        params = PromptParams(session_id="x", tools=[tool])
+        assert ACPClient._tool_meta(params) == [{
+            "name": "f", "description": "d",
+            "inputSchema": {"type": "object"}, "strict": True,
+        }]
+
+    def test_tool_meta_omits_strict_when_unset(self):
+        tool = ACPToolDefinition(name="f", input_schema={"type": "object"})
+        assert "strict" not in ACPClient._tool_meta(PromptParams(session_id="x", tools=[tool]))[0]
+
+    @pytest.mark.asyncio
+    async def test_prompt_stream_forwards_structured_output_meta(self):
+        """session/prompt carries _meta.structuredOutput when the caller sets it."""
+        client = ACPClient()
+        written: list[str] = []
+
+        async def fake_write_line(line: str) -> None:
+            written.append(line)
+
+        client._write_line = fake_write_line  # type: ignore[assignment]
+
+        rf = {"type": "json_schema", "json_schema": {"name": "S", "schema": {}}}
+        params = PromptParams(
+            session_id="so1", messages=[PromptMessage(role="user", content="hi")],
+            response_format=rf, tool_choice="required",
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(
+            _drive_queue(client, "so1", [{"type": "done", "finish_reason": "stop", "usage": {}}])
+        )
+        _ = [event async for event in gen]
+        await feeder
+
+        meta = json.loads([w for w in written if '"session/prompt"' in w][0])["params"]["_meta"]
+        assert meta["structuredOutput"] == {"responseFormat": rf, "toolChoice": "required"}
+
+    @pytest.mark.asyncio
+    async def test_prompt_stream_omits_structured_output_when_unset(self):
+        """No structured-output controls → no _meta.structuredOutput key."""
+        client = ACPClient()
+        written: list[str] = []
+
+        async def fake_write_line(line: str) -> None:
+            written.append(line)
+
+        client._write_line = fake_write_line  # type: ignore[assignment]
+
+        params = PromptParams(
+            session_id="so2", messages=[PromptMessage(role="user", content="hi")],
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(
+            _drive_queue(client, "so2", [{"type": "done", "finish_reason": "stop", "usage": {}}])
+        )
+        _ = [event async for event in gen]
+        await feeder
+
+        payload = json.loads([w for w in written if '"session/prompt"' in w][0])
+        assert "_meta" not in payload["params"]
+
+
+# ---------------------------------------------------------------------------
 # Token usage extraction & capture (issue #36): surface real kiro-cli usage
 # when reported over ACP; otherwise leave it empty for the shims to estimate.
 # ---------------------------------------------------------------------------
@@ -695,6 +786,25 @@ class TestACPUsageExtraction:
     def test_normalize_non_dict_is_empty(self):
         assert ACPClient._normalize_usage_keys(None) == {}
         assert ACPClient._normalize_usage_keys("nope") == {}
+
+    def test_normalize_omits_cache_keys_when_absent(self):
+        # No cache keys reported → none added (preserves the minimal shape).
+        assert ACPClient._normalize_usage_keys(
+            {"input_tokens": 3, "output_tokens": 4}
+        ) == {"input_tokens": 3, "output_tokens": 4}
+
+    def test_normalize_surfaces_cache_keys_snake(self):
+        assert ACPClient._normalize_usage_keys(
+            {"input_tokens": 3, "cache_creation_input_tokens": 9,
+             "cache_read_input_tokens": 11}
+        ) == {"input_tokens": 3, "cache_creation_input_tokens": 9,
+              "cache_read_input_tokens": 11}
+
+    def test_normalize_surfaces_cache_keys_camel_and_openai(self):
+        # camelCase cache-creation + OpenAI ``cachedTokens`` → cache_read.
+        assert ACPClient._normalize_usage_keys(
+            {"cacheCreationInputTokens": 2, "cachedTokens": 8}
+        ) == {"cache_creation_input_tokens": 2, "cache_read_input_tokens": 8}
 
     def test_find_usage_top_level(self):
         assert ACPClient._find_usage({"usage": {"input_tokens": 1}}) == {"input_tokens": 1}
