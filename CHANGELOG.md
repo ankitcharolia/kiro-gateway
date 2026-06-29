@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.2.1 (2026-06-29)
+
+### Features
+
+* **params:** enforce stop sequences + opt-in max_tokens, add MODEL_ALIASES (#32, #42) ([4947ce5](https://github.com/ankitcharolia/kiro-gateway/commit/4947ce5a15a965e9af0090d04fd301e3411d02ee))
+
+### Bug Fixes
+
+* **logging:** demote session/cancel notification log from INFO to DEBUG ([94149b2](https://github.com/ankitcharolia/kiro-gateway/commit/94149b263f8cde4c33a6575634e857dcea219e31))
+
+### Documentation
+
+* **changelog:** update for v2.2.0 [skip ci] ([a025dce](https://github.com/ankitcharolia/kiro-gateway/commit/a025dcec961510662617470742fdfb78ba7a661e))
+
+### Dependencies
+
+* **deps:** update actions/cache action to v6.1.0 ([0cdbe28](https://github.com/ankitcharolia/kiro-gateway/commit/0cdbe28656722f95febb8f0c894cd6fc5184cb17))
+* **deps:** update actions/attest-build-provenance action to v4.1.1 ([e12fc7e](https://github.com/ankitcharolia/kiro-gateway/commit/e12fc7e12d166d34c735e872ad270b1a47769193))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @github-actions[bot]
+* @renovate[bot]
+
 ## 2.2.0 (2026-06-29)
 
 ### Features
