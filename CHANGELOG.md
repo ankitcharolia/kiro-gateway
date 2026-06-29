@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.2.0 (2026-06-29)
+
+### Features
+
+* **shims:** report prompt-cache tokens ([#37](https://github.com/ankitcharolia/kiro-gateway/pull/37)) and forward structured-output controls ([#35](https://github.com/ankitcharolia/kiro-gateway/pull/35)) ([fa6a464](https://github.com/ankitcharolia/kiro-gateway/commit/fa6a4644f5885d7706fc9e141508320eb4744ea9))
+* **responses:** define stateful Responses API behavior — reject previous_response_id, store no-op ([#38](https://github.com/ankitcharolia/kiro-gateway/pull/38)) ([5a3db3b](https://github.com/ankitcharolia/kiro-gateway/commit/5a3db3b56454fb061c1d62c903f7a658c852a581))
+* **multimodal:** forward image input + extract/surface documents ([#33](https://github.com/ankitcharolia/kiro-gateway/pull/33)) ([00cd58a](https://github.com/ankitcharolia/kiro-gateway/commit/00cd58abbf3b809e40fe0d1f21a8dc9a1fd28d79))
+* **models:** validate requested model against the live catalogue ([#42](https://github.com/ankitcharolia/kiro-gateway/pull/42)) ([ff5597d](https://github.com/ankitcharolia/kiro-gateway/commit/ff5597d5c383ff1c92f9fb2729b148b8d9143951))
+
+### Bug Fixes
+
+* **prompt:** preserve multi-turn + tool-history fidelity in ACP serialization ([#43](https://github.com/ankitcharolia/kiro-gateway/pull/43)) ([7dd12d2](https://github.com/ankitcharolia/kiro-gateway/commit/7dd12d2b57c4b6bd5ef6e5a00d117384be77cf21))
+
+### Documentation
+
+* **changelog:** update for v2.1.3 [skip ci] ([58b2fad](https://github.com/ankitcharolia/kiro-gateway/commit/58b2fadf0bb17ddaed2891ecd468367ee739cc1d))
+* **embeddings:** record no-passthrough policy + native 501 error shape ([#34](https://github.com/ankitcharolia/kiro-gateway/pull/34)) ([7a147e4](https://github.com/ankitcharolia/kiro-gateway/commit/7a147e47c41fa4b9fd1476c1683dfaa9755f41b1))
+* **readme:** trim README — remove maintainer sections, condense behavioral docs ([26c379b](https://github.com/ankitcharolia/kiro-gateway/commit/26c379bc13df073c20aa77ff1ef47c091d698aad))
+
+
+### ❤️ Thanks to our contributors
+
+* @github-actions[bot]
+
 ## 2.1.3 (2026-06-26)
 
 ### Features
