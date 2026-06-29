@@ -726,7 +726,11 @@ class ACPClient:
         if not session_id:
             return
         await self._send_notification("session/cancel", {"sessionId": session_id})
-        logger.info(f"ACP session/cancel sent for session {session_id}")
+        # DEBUG, not INFO: cancellation is an expected teardown step (the client
+        # disconnected or the harness cancelled the turn before it finished), not
+        # a business event — logging it at INFO is noisy for harnesses that
+        # routinely abandon streams. See issue: log noise on session/cancel.
+        logger.debug(f"ACP session/cancel sent for session {session_id}")
 
     async def _cancel_quietly(self, session_id: str) -> None:
         """Run :meth:`cancel`, swallowing transport errors.
