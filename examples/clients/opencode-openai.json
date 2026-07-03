@@ -3,6 +3,15 @@
 // OpenCode streams by default — no extra config needed for live reasoning display.
 // Use claude-opus-4.8 to see thinking; kiro-cli does NOT emit thinking for sonnet.
 //
+// Per-model capability flags (custom OpenAI-compatible providers are NOT in
+// OpenCode's models.dev database, so OpenCode reads capabilities from THIS
+// config — omitting them disables image upload and the reasoning pane):
+//   "attachment": true  → enables image/file upload for the model
+//   "reasoning":  true  → enables OpenCode's reasoning/thinking display
+//   "tool_call":  true  → advertises the model as tool-capable
+// kiro-cli forwards base64 images and emits reasoning (opus) over the gateway,
+// so these flags let OpenCode actually surface both.
+//
 // NOTE: thinking.budgetTokens / outputConfig.effort variants are forwarded to
 // kiro-cli under _meta but are advisory only — kiro-cli decides based on the
 // model. They are kept for forward-compatibility and the OpenCode variant picker.
@@ -19,6 +28,10 @@
       "models": {
         "claude-opus-4.8": {
           "name": "Claude Opus 4.8 (thinking)",
+          "attachment": true,
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
           "limit": { "context": 1000000, "output": 32000 },
           "variants": {
             "low":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 4000  } } },
@@ -29,10 +42,18 @@
         },
         "claude-sonnet-4.6": {
           "name": "Claude Sonnet 4.6",
+          "attachment": true,
+          "reasoning": false,
+          "tool_call": true,
+          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
           "limit": { "context": 1000000, "output": 64000 }
         },
         "auto": {
           "name": "Auto",
+          "attachment": true,
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] },
           "limit": { "context": 1000000, "output": 64000 }
         }
       }
