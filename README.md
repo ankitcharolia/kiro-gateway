@@ -6,7 +6,18 @@
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
 [![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
 
+<div align="center">
+  <a href="https://trendshift.io/repositories/20881?utm_source=repository-badge&utm_medium=badge&utm_campaign=badge-repository-20881" target="_blank" rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/repositories/20881"
+         alt="headroomlabs-ai/headroom | Trendshift"
+         width="250"
+         height="55" />
+  </a>
+</div>
+
 An **ACP-based** bridge that lets any OpenAI-compatible or Anthropic-compatible AI harness use your **single** Kiro subscription — by routing every request through the official `kiro-cli` binary, never through reverse-engineered APIs.
+
+
 
 > ### 💛 Support this project
 >
