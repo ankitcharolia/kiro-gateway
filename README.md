@@ -9,7 +9,7 @@
 <div align="center">
   <a href="https://trendshift.io/repositories/20881?utm_source=repository-badge&utm_medium=badge&utm_campaign=badge-repository-20881" target="_blank" rel="noopener noreferrer">
     <img src="https://trendshift.io/api/badge/repositories/20881"
-         alt="headroomlabs-ai/headroom | Trendshift"
+         alt="ankitcharolia/kiro-gateway | Trendshift"
          width="250"
          height="55" />
   </a>
