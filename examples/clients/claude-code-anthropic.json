@@ -1,0 +1,39 @@
+// Put this configuration in ~/.claude/settings.json
+//
+// ⚠️  Claude Code's settings.json is STRICT JSON — it does not allow comments.
+//     Copy ONLY the { ... } object below (delete every "//" line) before saving,
+//     or Claude Code will fail to parse the file.
+//
+// Claude Code (Anthropic's official CLI) talks the Anthropic Messages API and
+// reads its backend + credentials from environment variables, which can be set
+// here in settings.json under "env" (applied on every launch, however Claude
+// Code is started).
+//
+// Routing:
+//   - ANTHROPIC_BASE_URL points at the gateway ROOT (no trailing /v1) — the
+//     Anthropic shim serves POST /v1/messages there.
+//   - ANTHROPIC_AUTH_TOKEN is sent as `Authorization: Bearer <key>`. The
+//     gateway's Anthropic shim accepts that as a fallback to `x-api-key`, so
+//     the Bearer token works. Set it to your KIRO_GATEWAY_API_KEY value.
+//     (Keep ANTHROPIC_API_KEY unset so Claude Code uses the base-URL route.)
+//   - ANTHROPIC_MODEL is the main model; ANTHROPIC_SMALL_FAST_MODEL is the
+//     lightweight model Claude Code uses for background tasks (titles, etc.).
+//     Both must be Kiro-supported ids (auto, claude-opus-4.8, claude-sonnet-4.6).
+//
+// Thinking/reasoning is MODEL-DEPENDENT: kiro-cli emits it for claude-opus-4.8
+// but not for claude-sonnet-4.6 (verified). The gateway surfaces it as Anthropic
+// `thinking` blocks when ACP_SURFACE_THINKING=true (the gateway default).
+//
+// NOTE ON EFFORT: per-request `thinking.budget_tokens` from Claude Code is not
+// yet wired to kiro-cli's effort control (tracked in gateway issue #59); it is
+// forwarded under _meta, which kiro-cli ignores. To bias thinking depth today,
+// set a session-wide default on the gateway via KIRO_ACP_EFFORT
+// (low|medium|high|xhigh|max).
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8000",
+    "ANTHROPIC_AUTH_TOKEN": "change-me",
+    "ANTHROPIC_MODEL": "claude-opus-4.8",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-sonnet-4.6"
+  }
+}

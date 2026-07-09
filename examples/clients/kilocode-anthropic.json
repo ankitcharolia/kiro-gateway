@@ -7,9 +7,11 @@
 //   - The gateway surfaces reasoning as Anthropic thinking blocks
 //     (ACP_SURFACE_THINKING=true, the gateway default).
 //
-// NOTE: thinking.budgetTokens variants are forwarded to kiro-cli under _meta
-// but are advisory only — kiro-cli decides based on the model, not the budget.
-// They are kept for forward-compatibility and for Kilo Code's variant picker UI.
+// NOTE: the thinking.budgetTokens variants below are forwarded to kiro-cli
+// under _meta but are NOT yet wired to kiro-cli's effort control (tracked in
+// gateway issue #59), so per-request budget has no effect today — they are kept
+// for Kilo Code's variant picker UI and forward-compatibility. To bias thinking
+// depth now, set a session-wide default via KIRO_ACP_EFFORT on the gateway.
 {
   "$schema": "https://kilo.ai/config.json",
   "provider": {

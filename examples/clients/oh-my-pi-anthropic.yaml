@@ -13,7 +13,7 @@ providers:
     baseUrl: http://127.0.0.1:8000
     apiKey: change-me
     api: anthropic-messages
-    disableStrictTools: true   # the gateway does not implement Anthropic's `strict` tool field
+    disableStrictTools: true   # optional: the gateway now accepts Anthropic's `strict` tool field (validated, inert) — this workaround is no longer required, kept as a harmless no-op
     models:
       - id: claude-opus-4.8
         name: Claude Opus 4.8 (thinking)

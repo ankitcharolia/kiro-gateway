@@ -12,9 +12,11 @@
 // kiro-cli forwards base64 images and emits reasoning (opus) over the gateway,
 // so these flags let OpenCode actually surface both.
 //
-// NOTE: thinking.budgetTokens / outputConfig.effort variants are forwarded to
-// kiro-cli under _meta but are advisory only — kiro-cli decides based on the
-// model. They are kept for forward-compatibility and the OpenCode variant picker.
+// NOTE: the thinking.budgetTokens variants below are forwarded to kiro-cli
+// under _meta but are NOT yet wired to kiro-cli's effort control (tracked in
+// gateway issue #59), so per-request budget has no effect today — they are kept
+// for the OpenCode variant picker and forward-compatibility. To bias thinking
+// depth now, set a session-wide default via KIRO_ACP_EFFORT on the gateway.
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {

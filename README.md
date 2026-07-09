@@ -262,6 +262,7 @@ speaks, copy it to the harness's config location, and set
 | OpenCode | OpenAI | [`opencode-openai.json`](examples/clients/opencode-openai.json) | `~/.config/opencode/opencode.json` |
 | Kilo Code | OpenAI | [`kilocode-openai.json`](examples/clients/kilocode-openai.json) | `~/.config/kilo/kilo.jsonc` |
 | Kilo Code | Anthropic | [`kilocode-anthropic.json`](examples/clients/kilocode-anthropic.json) | `~/.config/kilo/kilo.jsonc` |
+| Claude Code | Anthropic | [`claude-code-anthropic.json`](examples/clients/claude-code-anthropic.json) | `~/.claude/settings.json` |
 | Hermes-agent | OpenAI | [`hermes-agent-openai.yaml`](examples/clients/hermes-agent-openai.yaml) | `~/.hermes/config.yaml` |
 | OpenClaw | OpenAI | [`openclaw-openai.json`](examples/clients/openclaw-openai.json) | OpenClaw config (merge the `providers` block) |
 | OpenClaw | Anthropic | [`openclaw-anthropic.json`](examples/clients/openclaw-anthropic.json) | OpenClaw config (merge the `providers` block) |
@@ -270,7 +271,8 @@ speaks, copy it to the harness's config location, and set
 
 Each example carries its destination path as a comment on the first line.
 Replace the placeholder `change-me` (or `${KIRO_GATEWAY_API_KEY}`) with your
-gateway key before saving.
+gateway key before saving. (The Claude Code example's `settings.json` is strict
+JSON — remove the `//` comment lines before saving it.)
 
 ### Native ACP clients
 
