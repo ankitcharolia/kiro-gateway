@@ -478,10 +478,21 @@ final answer text is never changed** — and is gated by `ACP_SURFACE_THINKING`
 > **Not seeing any reasoning? It's model-dependent.** kiro-cli only emits
 > thinking for some models (e.g. `claude-opus-4.8` does; `claude-sonnet-4.6`
 > doesn't) and may skip it on trivial prompts — none of which affects the final
-> answer. Per-request `reasoning_effort` / "thinking budget" is **advisory
-> only**: kiro-cli decides based on the model, not the client param (the gateway
-> forwards it under `_meta` but kiro-cli does not act on it today). `/effort` is
-> an interactive-TUI command with no ACP equivalent.
+> answer.
+>
+> **Thinking effort *is* controllable over ACP** (verified against a live
+> kiro-cli 2.12.0 probe): as a launch flag — `kiro-cli acp --effort
+> <low|medium|high|xhigh|max>`, exposed by the gateway as `KIRO_ACP_EFFORT`
+> (see [Configuration](#configuration)) — and per session via the
+> `_kiro.dev/commands/execute` `/effort` slash-command extension (kiro-cli
+> advertises `/effort` in its `_kiro.dev/commands/available` list). What the
+> gateway does **not** do yet is translate a **per-request** `reasoning_effort`
+> / `thinking.budget_tokens` into that control: those client params are
+> currently only forwarded under `_meta` (which kiro-cli ignores), so a
+> per-request effort has no effect today. Wiring per-request effort to the
+> `/effort` extension is tracked in
+> [issue #59](https://github.com/ankitcharolia/kiro-gateway/issues/59); until
+> then, set a session-wide default via `KIRO_ACP_EFFORT`.
 
 ### Task list / plan
 
