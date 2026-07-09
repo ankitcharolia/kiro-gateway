@@ -93,8 +93,6 @@ pytest tests/integration/ -v
 pytest tests/unit/test_acp_compliance.py tests/unit/test_compliance.py -v
 pytest --cov=kiro --cov-report=term-missing
 
-# Docker
-docker compose up -d          # mounts ~/.kiro for credentials
 ```
 
 ## Project Structure

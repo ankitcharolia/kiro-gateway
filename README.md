@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/ankitcharolia/kiro-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/ankitcharolia/kiro-gateway/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-ghcr.io%2Fankitcharolia%2Fkiro--gateway-blue?logo=docker)](https://ghcr.io/ankitcharolia/kiro-gateway)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
 [![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
 
@@ -112,8 +111,7 @@ For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-
 | Requirement | Notes |
 |---|---|
 | **Kiro CLI** | Install from [kiro.dev](https://kiro.dev) and run `kiro-cli login` |
-| **Python 3.14+** | Required for the bare-metal path only |
-| **Docker** | Required for the container path only |
+| **Python 3.14+** | Required |
 
 ---
 
@@ -143,99 +141,6 @@ kiro-cli login
 # 6. Start the gateway
 python main.py
 # Gateway is now listening on http://localhost:8000
-```
-
----
-
-### Docker credentials & state
-
-The Docker image **bundles the Kiro CLI** (installed from the official
-`https://cli.kiro.dev/install` at build time), so you never mount the binary.
-You only mount your per-user Kiro credentials/state, which the CLI needs to
-authenticate and cannot be baked into an image:
-
-| Host path | Purpose | Mode |
-|---|---|---|
-| `~/.aws` | SSO token cache | read-write |
-| `~/.kiro` | sessions, settings | read-write |
-| `~/.local/share/kiro-cli` | OAuth token secret store (`data.sqlite3`) + helper binaries | read-write |
-
-Mounts must be **read-write** (the CLI refreshes the auth token in place and
-writes session files). Run the container as **your own UID/GID** so it can read
-and write those files: `--user "$(id -u):$(id -g)"`. Run `kiro-cli login` on the
-host once before starting the container.
-
----
-
-### Option B — Docker (published image)
-
-Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to the
-GitHub Container Registry on every release.
-
-```bash
-docker pull ghcr.io/ankitcharolia/kiro-gateway:latest
-
-docker run -d \
-  --name kiro-gateway \
-  -p 8000:8000 \
-  --user "$(id -u):$(id -g)" \
-  -e KIRO_GATEWAY_API_KEY=change-me \
-  -v "${HOME}/.aws:/home/gateway/.aws" \
-  -v "${HOME}/.kiro:/home/gateway/.kiro" \
-  -v "${HOME}/.local/share/kiro-cli:/home/gateway/.local/share/kiro-cli" \
-  ghcr.io/ankitcharolia/kiro-gateway:latest
-```
-
-> The published image must be built from a release that includes the bundled
-> Kiro CLI. If you pulled an older release, build locally (Option D) until a new
-> release is published.
-
-#### Pinning a specific version
-
-```bash
-docker pull ghcr.io/ankitcharolia/kiro-gateway:vX.Y.Z
-```
-
----
-
-### Option C — Docker Compose
-
-```bash
-git clone https://github.com/ankitcharolia/kiro-gateway.git
-cd kiro-gateway
-cp .env.example .env
-# edit .env: set KIRO_GATEWAY_API_KEY
-# add your UID/GID so the container can read your mounted credentials:
-printf 'UID=%s\nGID=%s\n' "$(id -u)" "$(id -g)" >> .env
-
-docker compose up -d
-```
-
-The included `docker-compose.yml` runs as your UID/GID and mounts `~/.aws`,
-`~/.kiro` and `~/.local/share/kiro-cli`. It uses the published image by default;
-to run the local source, comment out `image:` and uncomment `build: .`.
-
----
-
-### Option D — Build the Docker image locally
-
-The build installs the Kiro CLI into the image, so it is self-contained.
-
-```bash
-git clone https://github.com/ankitcharolia/kiro-gateway.git
-cd kiro-gateway
-
-docker build -t kiro-gateway:local .
-
-docker run -d \
-  --name kiro-gateway \
-  -p 8000:8000 \
-  --user "$(id -u):$(id -g)" \
-  -e KIRO_GATEWAY_API_KEY=change-me \
-  -v "${HOME}/.aws:/home/gateway/.aws" \
-  -v "${HOME}/.kiro:/home/gateway/.kiro" \
-  -v "${HOME}/.local/share/kiro-cli:/home/gateway/.local/share/kiro-cli" \
-  kiro-gateway:local
 ```
 
 ---
@@ -771,7 +676,7 @@ integration paths, not legal advice. The Kiro CLI is licensed as "AWS Content"
 under the [AWS Customer Agreement](https://aws.amazon.com/agreement/) and the
 [AWS IP License](https://aws.amazon.com/legal/aws-ip-license-terms/) (see the
 [official license](https://kiro.dev/license/)), so your use is governed by those
-terms. If you plan to publish a Docker image that bundles the Kiro CLI, review
+terms. If you plan to redistribute the Kiro CLI, review
 the redistribution terms first. See [`COMPLIANCE.md`](COMPLIANCE.md) for details.
 
 ## License
