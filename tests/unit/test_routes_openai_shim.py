@@ -1515,3 +1515,86 @@ class TestOpenAIShimDiffAndShell:
         assert "Running: echo hi" in rc and "hi" in rc
         assert msg["content"] == "Done."
         assert msg.get("tool_calls") is None
+
+
+# ---------------------------------------------------------------------------
+# kiro usage/cost/context metadata surfacing (issue #56): when kiro-cli reports
+# metadata it appears additively under usage.kiro_metadata; otherwise absent.
+# ---------------------------------------------------------------------------
+
+class _MetadataShim:
+    """ShimService stand-in whose result carries kiro_metadata."""
+
+    _META = {"credits": 0.17, "context_usage_percentage": 1.87, "turn_duration_ms": 4673}
+
+    def available_models(self):
+        return []
+
+    async def complete(self, **kwargs):
+        return {
+            "content": "ok", "reasoning": "", "tool_calls": [],
+            "finish_reason": "stop",
+            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+            "metadata": dict(self._META),
+        }
+
+    async def stream_tokens(self, **kwargs):
+        yield {"type": "text", "content": "ok"}
+        yield {"type": "done", "finish_reason": "stop", "usage": {},
+               "metadata": dict(self._META)}
+
+
+class _NoMetadataShim(_MetadataShim):
+    async def complete(self, **kwargs):
+        return {
+            "content": "ok", "reasoning": "", "tool_calls": [],
+            "finish_reason": "stop",
+            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+            "metadata": {},
+        }
+
+
+class TestOpenAIMetadataSurfacing:
+    """usage.kiro_metadata is surfaced additively in both modes."""
+
+    def test_chat_non_stream_surfaces_metadata(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _MetadataShim()
+        resp = sync_client.post("/v1/chat/completions", headers=openai_headers, json={
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+        assert resp.status_code == 200
+        usage = resp.json()["usage"]
+        # Native token fields unchanged.
+        assert usage["prompt_tokens"] == 5
+        assert usage["completion_tokens"] == 3
+        # Metadata surfaced additively.
+        assert usage["kiro_metadata"]["credits"] == pytest.approx(0.17)
+        assert usage["kiro_metadata"]["turn_duration_ms"] == 4673
+
+    def test_chat_non_stream_no_metadata_key_when_empty(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _NoMetadataShim()
+        resp = sync_client.post("/v1/chat/completions", headers=openai_headers, json={
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+        assert resp.status_code == 200
+        assert "kiro_metadata" not in resp.json()["usage"]
+
+    def test_chat_stream_surfaces_metadata_in_usage_chunk(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _MetadataShim()
+        resp = sync_client.post("/v1/chat/completions", headers=openai_headers, json={
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        })
+        assert resp.status_code == 200
+        usage_chunks = [
+            json.loads(line[len("data: "):])
+            for line in resp.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+            and json.loads(line[len("data: "):]).get("usage")
+        ]
+        assert usage_chunks, "expected a usage-only chunk"
+        assert usage_chunks[-1]["usage"]["kiro_metadata"]["credits"] == pytest.approx(0.17)

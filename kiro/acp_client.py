@@ -368,6 +368,12 @@ class ACPClient:
         # so this is usually empty and the shims fall back to a tokenizer
         # estimate; it is forward-compatible if a future kiro-cli emits counts.
         self._session_usage: dict[str, dict] = {}
+        # Per-session kiro-cli usage/cost/context metadata captured from
+        # _kiro.dev/metadata (v2: credits, context%, turn duration) and
+        # session_info_update contextUsage (v3: per-category token breakdown).
+        # Surfaced additively under usage["kiro_metadata"] — never mixed into
+        # the native token counts. Empty when kiro-cli reports nothing.
+        self._session_metadata: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -704,6 +710,7 @@ class ACPClient:
         tool_by_id: dict[str, dict] = {}
         finish_reason = "stop"
         usage: dict[str, Any] = {}
+        metadata: dict[str, Any] = {}
 
         async for event in self.prompt_stream(params):
             etype = event.get("type")
@@ -740,6 +747,7 @@ class ACPClient:
             elif etype == "done":
                 finish_reason = event.get("finish_reason", "stop")
                 usage = event.get("usage", {}) or {}
+                metadata = event.get("metadata", {}) or {}
             elif etype == "error":
                 raise ACPError(
                     event.get("code", -32000),
@@ -753,6 +761,7 @@ class ACPClient:
             "tool_calls": tool_calls,
             "finish_reason": finish_reason,
             "usage": usage,
+            "metadata": metadata,
         }
 
     async def prompt_stream(self, params: PromptParams) -> AsyncIterator[dict[str, Any]]:
@@ -1296,6 +1305,7 @@ class ACPClient:
             return
         if msg.get("error"):
             err = msg["error"]
+            self._session_metadata.pop(session_id, None)
             queue.put_nowait({
                 "type": "error",
                 "message": err.get("message", "ACP prompt error"),
@@ -1311,11 +1321,18 @@ class ACPClient:
         captured = self._session_usage.pop(session_id, {})
         if captured:
             usage = {**captured, **usage}
-        queue.put_nowait({
+        done_event: dict[str, Any] = {
             "type": "done",
             "finish_reason": _STOP_REASON_MAP.get(stop_reason, "stop"),
             "usage": usage,
-        })
+        }
+        # Attach any captured kiro-cli usage/cost/context metadata additively
+        # (credits, context %, turn duration, v3 token breakdown). Empty on
+        # builds that report none, so the event shape is unchanged then.
+        metadata = self._session_metadata.pop(session_id, {})
+        if metadata:
+            done_event["metadata"] = metadata
+        queue.put_nowait(done_event)
 
     @staticmethod
     def _normalize_usage_keys(usage: Any) -> dict:
@@ -1415,14 +1432,112 @@ class ACPClient:
         """
         return ACPClient._find_usage(result)
 
+    @staticmethod
+    def _parse_kiro_metadata(obj: Any) -> dict:
+        """Extract kiro-cli usage/cost/context metadata from a notification.
+
+        Handles two shapes seen on a live kiro-cli 2.12.0 probe:
+
+        * **v2** ``_kiro.dev/metadata`` params — ``contextUsagePercentage``
+          (context-window fill %), ``meteringUsage`` (a list of
+          ``{value, unit}`` cost entries; the credit-unit values are summed),
+          and ``turnDurationMs`` (turn latency).
+        * **v3** ``session_info_update`` — ``contextUsage`` (top level or under
+          ``_meta.kiro``) carrying ``usagePercentage`` and a ``breakdown`` of
+          per-category token counts.
+
+        These are surfaced additively (never mixed into the native token
+        counts): v2 ``meteringUsage`` is *credits*, not tokens, and the v3
+        breakdown is cumulative context composition rather than per-turn
+        input/output. Only keys actually present are returned; never raises.
+
+        Args:
+            obj: A notification ``params`` or ``update`` object.
+
+        Returns:
+            A normalised metadata dict (possibly empty).
+        """
+        if not isinstance(obj, dict):
+            return {}
+        meta: dict[str, Any] = {}
+
+        # v2 — context-window fill percentage.
+        pct = obj.get("contextUsagePercentage")
+        if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+            meta["context_usage_percentage"] = float(pct)
+
+        # v2 — turn latency.
+        dur = obj.get("turnDurationMs")
+        if isinstance(dur, (int, float)) and not isinstance(dur, bool):
+            meta["turn_duration_ms"] = int(dur)
+
+        # v2 — metering cost (sum credit-unit entries).
+        metering = obj.get("meteringUsage")
+        if isinstance(metering, list):
+            credits = 0.0
+            found = False
+            for item in metering:
+                if not isinstance(item, dict):
+                    continue
+                value = item.get("value")
+                unit = str(item.get("unit") or "").lower()
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and unit == "credit":
+                    credits += float(value)
+                    found = True
+            if found:
+                meta["credits"] = credits
+
+        # v3 — contextUsage (top level or under _meta.kiro).
+        ctx = obj.get("contextUsage")
+        if not isinstance(ctx, dict):
+            outer_meta = obj.get("_meta")
+            if isinstance(outer_meta, dict):
+                kiro = outer_meta.get("kiro")
+                if isinstance(kiro, dict):
+                    ctx = kiro.get("contextUsage")
+        if isinstance(ctx, dict):
+            upct = ctx.get("usagePercentage")
+            if (
+                isinstance(upct, (int, float)) and not isinstance(upct, bool)
+                and "context_usage_percentage" not in meta
+            ):
+                meta["context_usage_percentage"] = float(upct)
+            breakdown = ctx.get("breakdown")
+            if isinstance(breakdown, dict):
+                categories: dict[str, int] = {}
+                total = 0
+                for name, entry in breakdown.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    tokens = entry.get("tokens")
+                    if isinstance(tokens, (int, float)) and not isinstance(tokens, bool):
+                        categories[str(name)] = int(tokens)
+                        total += int(tokens)
+                if categories:
+                    meta["context_tokens"] = total
+                    meta["context_breakdown"] = categories
+
+        return meta
+
     def _handle_notification(self, msg: dict) -> None:
         """Translate ``session/update`` notifications into gateway events."""
         method = msg.get("method", "")
         params = msg.get("params", {})
 
+        if method == "_kiro.dev/metadata":
+            # v2 usage/cost/context metadata (credits, context %, turn latency).
+            # Not part of the OpenAI/Anthropic surface as token counts — captured
+            # separately and surfaced additively on the terminal "done" event.
+            meta_sid = params.get("sessionId", "") if isinstance(params, dict) else ""
+            if meta_sid:
+                parsed = self._parse_kiro_metadata(params)
+                if parsed:
+                    self._session_metadata.setdefault(meta_sid, {}).update(parsed)
+            return
+
         if method != "session/update":
-            # _kiro.dev/* metadata, commands, etc. are not part of the
-            # OpenAI/Anthropic surface — ignore them.
+            # Other _kiro.dev/* / _kiro/* notifications, commands, etc. are not
+            # part of the OpenAI/Anthropic surface — ignore them.
             logger.debug(f"ACP notification ignored: {method}")
             return
 
@@ -1441,6 +1556,13 @@ class ACPClient:
         captured = self._find_usage(update) or self._find_usage(params)
         if captured:
             self._session_usage.setdefault(session_id, {}).update(captured)
+
+        # Capture usage/cost/context metadata carried on an update (v3
+        # session_info_update contextUsage, or any _kiro metadata riding a
+        # session/update). Additive; empty on kiro-cli builds that omit it.
+        meta = self._parse_kiro_metadata(update) or self._parse_kiro_metadata(params)
+        if meta:
+            self._session_metadata.setdefault(session_id, {}).update(meta)
 
         if kind == "agent_message_chunk":
             text = self._extract_text(update.get("content"))

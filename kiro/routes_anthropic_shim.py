@@ -392,6 +392,24 @@ async def create_message(
         completion_tool_calls=result.get("tool_calls"),
     )
 
+    usage_obj: dict[str, Any] = {
+        "input_tokens": usage["input_tokens"],
+        "output_tokens": usage["output_tokens"],
+        # Prompt caching is a no-op over ACP (kiro-cli exposes no caching
+        # mechanism), so these are 0 today. They are reported — rather than
+        # omitted — to keep the usage object faithful to the native
+        # Anthropic shape, and surface real counts if a future kiro-cli
+        # reports them. See the "Prompt caching" docs.
+        "cache_creation_input_tokens": usage["cache_creation_input_tokens"],
+        "cache_read_input_tokens": usage["cache_read_input_tokens"],
+    }
+    # Additive: real usage/cost/context metadata kiro-cli reported (credits,
+    # context %, turn duration, v3 token breakdown). Present only when non-empty
+    # so the native usage shape is unchanged when kiro-cli reports nothing.
+    kiro_metadata = result.get("metadata") or {}
+    if kiro_metadata:
+        usage_obj["kiro_metadata"] = kiro_metadata
+
     return {
         "id": f"msg_{uuid.uuid4().hex[:12]}",
         "type": "message",
@@ -400,17 +418,7 @@ async def create_message(
         "model": body.model,
         "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": usage["input_tokens"],
-            "output_tokens": usage["output_tokens"],
-            # Prompt caching is a no-op over ACP (kiro-cli exposes no caching
-            # mechanism), so these are 0 today. They are reported — rather than
-            # omitted — to keep the usage object faithful to the native
-            # Anthropic shape, and surface real counts if a future kiro-cli
-            # reports them. See the "Prompt caching" docs.
-            "cache_creation_input_tokens": usage["cache_creation_input_tokens"],
-            "cache_read_input_tokens": usage["cache_read_input_tokens"],
-        },
+        "usage": usage_obj,
     }
 
 
@@ -630,6 +638,9 @@ async def _stream_response(
                     },
                     "usage": {
                         "output_tokens": output_usage["output_tokens"],
+                        # Additive: real usage/cost/context metadata kiro-cli
+                        # reported. Omitted when empty (native shape unchanged).
+                        **({"kiro_metadata": event["metadata"]} if event.get("metadata") else {}),
                     },
                 })
                 yield sse("message_stop", {"type": "message_stop"})

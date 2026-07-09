@@ -336,6 +336,19 @@ REPL command, not an ACP message, and the gateway is stateless per request), so
 counts are normally estimates; no gateway change is needed if a future kiro-cli
 reports them.
 
+**Real usage/cost/context metadata (`usage.kiro_metadata`, issue #56).** kiro-cli
+*does* emit usage signals on notifications the gateway now captures via
+`ACPClient._parse_kiro_metadata` into `_session_metadata` and attaches to the
+terminal `done` event (`event["metadata"]`, only when non-empty). Two shapes
+(live kiro-cli 2.12.0 probe): **v2** `_kiro.dev/metadata` → `credits` (summed
+`meteringUsage`), `context_usage_percentage`, `turn_duration_ms`; **v3**
+`session_info_update.contextUsage` → `context_usage_percentage` +
+`context_breakdown`/`context_tokens`. It is surfaced **additively** under
+`usage.kiro_metadata` on both shims (both modes) and the ACP route — never mixed
+into the native token fields (`meteringUsage` is *credits*, not tokens; the v3
+breakdown is cumulative context, not per-turn I/O). Present only when kiro-cli
+reports something, so the native `usage` shape is unchanged otherwise.
+
 **logprobs are unsupported** (ACP exposes none): the OpenAI shim accepts
 `logprobs`/`top_logprobs` for compatibility and returns `"logprobs": null` per
 choice. When touching usage, keep all shims/modes consistent and assert the

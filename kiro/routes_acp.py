@@ -68,12 +68,20 @@ async def acp_chat(
         for tc in result.get("tool_calls", [])
     ]
 
+    # Surface any usage/cost/context metadata kiro-cli reported additively on
+    # the usage object (the streaming ACP route mirrors it automatically via
+    # the "done" event). Present only when non-empty.
+    usage = dict(result.get("usage", {}) or {})
+    kiro_metadata = result.get("metadata") or {}
+    if kiro_metadata:
+        usage["kiro_metadata"] = kiro_metadata
+
     return ACPChatResponse(
         session_id="",
         content=result["content"],
         tool_calls=tool_calls,
         finish_reason=result.get("finish_reason", "stop"),
-        usage=result.get("usage", {}),
+        usage=usage,
     )
 
 

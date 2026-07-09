@@ -597,6 +597,22 @@ usage field is never silently `0`.
   them. `/usage` is not a harness feature (harnesses read the `usage` object,
   not the slash command). Estimates are for budgeting, not exact billing.
 
+- **Real usage/cost/context metadata (`usage.kiro_metadata`).** kiro-cli *does*
+  emit real usage signals on ACP notifications, which the gateway captures and
+  surfaces **additively** under `usage.kiro_metadata` (present only when
+  kiro-cli reports something — the native token fields are unchanged). Verified
+  against a live kiro-cli 2.12.0 probe:
+  - **v2** (`_kiro.dev/metadata`): `credits` (per-turn cost, summed from
+    `meteringUsage`), `context_usage_percentage` (context-window fill), and
+    `turn_duration_ms` (turn latency).
+  - **v3** (`session_info_update.contextUsage`): `context_usage_percentage`
+    plus a per-category token `context_breakdown` and its `context_tokens` sum
+    (parsed forward-compatibly; reachable once the v3 auth blocker is resolved).
+
+  `meteringUsage` is **credits, not tokens**, so it is never mapped into the
+  `*_tokens` fields. The metadata rides `usage.kiro_metadata` on both shims
+  (streaming and non-streaming) and the ACP route's `done` event.
+
 ### Prompt caching (no-op, but reported)
 
 Prompt caching is **not available over ACP** (kiro-cli advertises no caching

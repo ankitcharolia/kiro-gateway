@@ -4,6 +4,8 @@ All ACP calls are mocked — no kiro CLI needed.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 
@@ -1379,3 +1381,67 @@ class TestAnthropicShimToolActivityReasoning:
         assert any(b["type"] == "thinking" and "Fetching web content" in b["thinking"] for b in blocks)
         assert all(b["type"] != "tool_use" for b in blocks)
         assert any(b["type"] == "text" and b["text"] == "Berlin is sunny." for b in blocks)
+
+
+# ---------------------------------------------------------------------------
+# kiro usage/cost/context metadata surfacing (issue #56).
+# ---------------------------------------------------------------------------
+
+class _AnthropicMetadataShim:
+    """ShimService stand-in whose result carries kiro_metadata."""
+
+    _META = {"credits": 0.17, "context_usage_percentage": 1.87, "turn_duration_ms": 4673}
+
+    def available_models(self):
+        return []
+
+    async def complete(self, **kwargs):
+        return {
+            "content": "ok", "reasoning": "", "tool_calls": [],
+            "finish_reason": "stop",
+            "usage": {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+            "metadata": dict(self._META),
+        }
+
+    async def stream_tokens(self, **kwargs):
+        yield {"type": "text", "content": "ok"}
+        yield {"type": "done", "finish_reason": "stop", "usage": {},
+               "metadata": dict(self._META)}
+
+
+class TestAnthropicMetadataSurfacing:
+    """usage.kiro_metadata is surfaced additively in both modes."""
+
+    def test_messages_non_stream_surfaces_metadata(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _AnthropicMetadataShim()
+        resp = sync_client.post("/v1/messages", headers=anthropic_headers, json={
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+        assert resp.status_code == 200
+        usage = resp.json()["usage"]
+        # Native token/cache fields unchanged.
+        assert usage["input_tokens"] == 5
+        assert usage["output_tokens"] == 3
+        assert usage["cache_read_input_tokens"] == 0
+        # Metadata surfaced additively.
+        assert usage["kiro_metadata"]["credits"] == pytest.approx(0.17)
+
+    def test_messages_stream_surfaces_metadata_in_message_delta(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _AnthropicMetadataShim()
+        resp = sync_client.post("/v1/messages", headers=anthropic_headers, json={
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+        assert resp.status_code == 200
+        deltas = [
+            json.loads(line[len("data: "):])
+            for line in resp.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        message_deltas = [d for d in deltas if d.get("type") == "message_delta"]
+        assert message_deltas, "expected a message_delta event"
+        assert message_deltas[-1]["usage"]["kiro_metadata"]["credits"] == pytest.approx(0.17)

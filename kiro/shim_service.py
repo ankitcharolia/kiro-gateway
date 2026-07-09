@@ -347,5 +347,6 @@ class ShimService:
                 "tool_calls": result.get("tool_calls", []),
                 "finish_reason": result.get("finish_reason", "stop"),
                 "usage": result.get("usage", {}),
+                "metadata": result.get("metadata", {}),
             }
-        return {"content": str(result), "reasoning": "", "tool_calls": [], "finish_reason": "stop", "usage": {}}
+        return {"content": str(result), "reasoning": "", "tool_calls": [], "finish_reason": "stop", "usage": {}, "metadata": {}}

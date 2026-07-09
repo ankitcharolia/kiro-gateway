@@ -1162,6 +1162,182 @@ class TestACPUsageCapture:
 
 
 # ---------------------------------------------------------------------------
+# Usage/cost/context metadata (issue #56): kiro-cli reports credits, context %,
+# turn duration (v2) and a token breakdown (v3) on notifications the gateway
+# now captures and surfaces additively (never mixed into native token counts).
+# ---------------------------------------------------------------------------
+
+class TestKiroMetadataParser:
+    """_parse_kiro_metadata normalises v2 and v3 metadata shapes."""
+
+    def test_v2_metadata_shape(self):
+        parsed = ACPClient._parse_kiro_metadata({
+            "sessionId": "s",
+            "contextUsagePercentage": 1.8748,
+            "meteringUsage": [
+                {"value": 0.0972, "unit": "credit", "unitPlural": "credits"},
+                {"value": 0.0764, "unit": "credit", "unitPlural": "credits"},
+            ],
+            "turnDurationMs": 4673,
+        })
+        assert parsed["context_usage_percentage"] == pytest.approx(1.8748)
+        assert parsed["turn_duration_ms"] == 4673
+        assert parsed["credits"] == pytest.approx(0.1736)
+        # v2 metering is credits — never mapped to token fields.
+        assert "context_tokens" not in parsed
+
+    def test_v3_context_usage_breakdown(self):
+        parsed = ACPClient._parse_kiro_metadata({
+            "sessionUpdate": "session_info_update",
+            "_meta": {"kiro": {"contextUsage": {
+                "usagePercentage": 4.2,
+                "breakdown": {
+                    "contextFiles": {"tokens": 0, "percent": 0},
+                    "tools": {"tokens": 4149, "percent": 2.1},
+                    "kiroResponses": {"tokens": 0, "percent": 0},
+                    "yourPrompts": {"tokens": 4100, "percent": 2.1},
+                    "sessionFiles": {"tokens": 0, "percent": 0},
+                },
+            }}},
+        })
+        assert parsed["context_usage_percentage"] == pytest.approx(4.2)
+        assert parsed["context_tokens"] == 8249  # sum of category tokens
+        assert parsed["context_breakdown"]["tools"] == 4149
+        assert parsed["context_breakdown"]["yourPrompts"] == 4100
+
+    def test_v3_context_usage_top_level(self):
+        """contextUsage is also accepted at the top level (not only under _meta)."""
+        parsed = ACPClient._parse_kiro_metadata({
+            "contextUsage": {"usagePercentage": 10.0,
+                             "breakdown": {"tools": {"tokens": 5}}},
+        })
+        assert parsed["context_usage_percentage"] == 10.0
+        assert parsed["context_tokens"] == 5
+
+    def test_empty_and_irrelevant_updates_yield_empty(self):
+        assert ACPClient._parse_kiro_metadata({"sessionUpdate": "agent_message_chunk"}) == {}
+        assert ACPClient._parse_kiro_metadata({}) == {}
+        assert ACPClient._parse_kiro_metadata(None) == {}
+        assert ACPClient._parse_kiro_metadata("nope") == {}
+
+    def test_booleans_are_not_treated_as_numbers(self):
+        # bool is a subclass of int — must be rejected, not coerced.
+        assert ACPClient._parse_kiro_metadata({"contextUsagePercentage": True}) == {}
+        assert ACPClient._parse_kiro_metadata({"turnDurationMs": False}) == {}
+
+    def test_non_credit_metering_units_ignored(self):
+        parsed = ACPClient._parse_kiro_metadata({
+            "meteringUsage": [{"value": 3.0, "unit": "token"}],
+        })
+        assert "credits" not in parsed
+
+
+class TestKiroMetadataCapture:
+    """Metadata is captured from notifications and attached to the done event."""
+
+    def test_v2_metadata_notification_captured_and_surfaced(self):
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["sM"] = queue
+
+        client._handle_notification({
+            "method": "_kiro.dev/metadata",
+            "params": {
+                "sessionId": "sM",
+                "contextUsagePercentage": 1.87,
+                "meteringUsage": [{"value": 0.1, "unit": "credit"}],
+                "turnDurationMs": 4673,
+            },
+        })
+        assert client._session_metadata["sM"]["credits"] == pytest.approx(0.1)
+
+        client._prompt_sessions["reqM"] = "sM"
+        client._finish_prompt("reqM", {"result": {"stopReason": "end_turn"}})
+        done = queue.get_nowait()
+        assert done["type"] == "done"
+        assert done["metadata"]["turn_duration_ms"] == 4673
+        assert done["metadata"]["context_usage_percentage"] == pytest.approx(1.87)
+        # Popped after finishing (no leak).
+        assert "sM" not in client._session_metadata
+
+    def test_v3_session_info_update_metadata_captured(self):
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["sV"] = queue
+
+        client._handle_notification({
+            "method": "session/update",
+            "params": {
+                "sessionId": "sV",
+                "update": {
+                    "sessionUpdate": "session_info_update",
+                    "_meta": {"kiro": {"contextUsage": {
+                        "usagePercentage": 4.2,
+                        "breakdown": {"tools": {"tokens": 4149},
+                                      "yourPrompts": {"tokens": 4100}},
+                    }}},
+                },
+            },
+        })
+        assert client._session_metadata["sV"]["context_tokens"] == 8249
+
+        client._prompt_sessions["reqV"] = "sV"
+        client._finish_prompt("reqV", {"result": {"stopReason": "end_turn"}})
+        done = queue.get_nowait()
+        assert done["metadata"]["context_tokens"] == 8249
+
+    def test_no_metadata_key_when_none_reported(self):
+        """The done event has no 'metadata' key when kiro-cli reports none."""
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["sN"] = queue
+        client._prompt_sessions["reqN"] = "sN"
+
+        client._finish_prompt("reqN", {"result": {"stopReason": "end_turn"}})
+        done = queue.get_nowait()
+        assert "metadata" not in done
+
+    def test_metadata_cleared_on_error(self):
+        """Captured metadata is discarded (not leaked) on the error path."""
+        client = ACPClient()
+        queue = asyncio.Queue()
+        client._event_queues["sE"] = queue
+        client._session_metadata["sE"] = {"credits": 0.5}
+        client._prompt_sessions["reqE"] = "sE"
+
+        client._finish_prompt("reqE", {"error": {"code": -32000, "message": "boom"}})
+        err = queue.get_nowait()
+        assert err["type"] == "error"
+        assert "sE" not in client._session_metadata
+
+    @pytest.mark.asyncio
+    async def test_prompt_result_carries_metadata(self):
+        """Non-streaming prompt() surfaces metadata in the result dict."""
+        client = ACPClient()
+
+        async def fake_stream(params):
+            yield {"type": "text", "content": "hi"}
+            yield {"type": "done", "finish_reason": "stop", "usage": {},
+                   "metadata": {"credits": 0.2, "context_usage_percentage": 3.0}}
+
+        client.prompt_stream = fake_stream  # type: ignore[assignment]
+        result = await _REAL_PROMPT(client, PromptParams(session_id="s"))
+        assert result["metadata"] == {"credits": 0.2, "context_usage_percentage": 3.0}
+
+    @pytest.mark.asyncio
+    async def test_prompt_result_metadata_empty_by_default(self):
+        client = ACPClient()
+
+        async def fake_stream(params):
+            yield {"type": "text", "content": "hi"}
+            yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+        client.prompt_stream = fake_stream  # type: ignore[assignment]
+        result = await _REAL_PROMPT(client, PromptParams(session_id="s"))
+        assert result["metadata"] == {}
+
+
+# ---------------------------------------------------------------------------
 # Reasoning aggregation (issue #40): prompt() collects thinking deltas into a
 # `reasoning` field without affecting `content`.
 # ---------------------------------------------------------------------------

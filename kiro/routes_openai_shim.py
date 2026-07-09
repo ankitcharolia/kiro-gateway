@@ -398,6 +398,24 @@ async def chat_completions(
         # unchanged. Clients that don't read it simply ignore the field.
         message["reasoning_content"] = reasoning
 
+    usage_obj: dict[str, Any] = {
+        "prompt_tokens": usage["input_tokens"],
+        "completion_tokens": usage["output_tokens"],
+        "total_tokens": usage["total_tokens"],
+        # Prompt caching is a no-op over ACP (kiro-cli exposes no caching
+        # mechanism), so ``cached_tokens`` is 0 today. It is reported —
+        # rather than omitted — to keep the usage object faithful to the
+        # native OpenAI shape, and surfaces real counts if a future
+        # kiro-cli reports them. See the "Prompt caching" docs.
+        "prompt_tokens_details": {"cached_tokens": usage["cache_read_input_tokens"]},
+    }
+    # Additive: any real usage/cost/context metadata kiro-cli reported (credits,
+    # context %, turn duration, v3 token breakdown). Present only when non-empty
+    # so the native usage shape is unchanged when kiro-cli reports nothing.
+    kiro_metadata = result.get("metadata") or {}
+    if kiro_metadata:
+        usage_obj["kiro_metadata"] = kiro_metadata
+
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
@@ -410,17 +428,7 @@ async def chat_completions(
             "logprobs": None,
             "finish_reason": finish_reason,
         }],
-        "usage": {
-            "prompt_tokens": usage["input_tokens"],
-            "completion_tokens": usage["output_tokens"],
-            "total_tokens": usage["total_tokens"],
-            # Prompt caching is a no-op over ACP (kiro-cli exposes no caching
-            # mechanism), so ``cached_tokens`` is 0 today. It is reported —
-            # rather than omitted — to keep the usage object faithful to the
-            # native OpenAI shape, and surfaces real counts if a future
-            # kiro-cli reports them. See the "Prompt caching" docs.
-            "prompt_tokens_details": {"cached_tokens": usage["cache_read_input_tokens"]},
-        },
+        "usage": usage_obj,
     }
 
 
@@ -552,6 +560,20 @@ async def _stream_response(
                         completion_text="".join(text_acc),
                         completion_tool_calls=list(collected_tool_calls.values()),
                     )
+                    usage_chunk: dict[str, Any] = {
+                        "prompt_tokens": usage["input_tokens"],
+                        "completion_tokens": usage["output_tokens"],
+                        "total_tokens": usage["total_tokens"],
+                        # Prompt caching is a no-op over ACP; 0 today,
+                        # reported for shape-parity with the native
+                        # OpenAI usage object (see "Prompt caching").
+                        "prompt_tokens_details": {
+                            "cached_tokens": usage["cache_read_input_tokens"],
+                        },
+                    }
+                    kiro_metadata = event.get("metadata") or {}
+                    if kiro_metadata:
+                        usage_chunk["kiro_metadata"] = kiro_metadata
                     yield (
                         "data: "
                         + json.dumps({
@@ -560,17 +582,7 @@ async def _stream_response(
                             "created": created,
                             "model": model,
                             "choices": [],
-                            "usage": {
-                                "prompt_tokens": usage["input_tokens"],
-                                "completion_tokens": usage["output_tokens"],
-                                "total_tokens": usage["total_tokens"],
-                                # Prompt caching is a no-op over ACP; 0 today,
-                                # reported for shape-parity with the native
-                                # OpenAI usage object (see "Prompt caching").
-                                "prompt_tokens_details": {
-                                    "cached_tokens": usage["cache_read_input_tokens"],
-                                },
-                            },
+                            "usage": usage_chunk,
                         })
                         + "\n\n"
                     )
@@ -721,6 +733,7 @@ def _build_response_object(
     usage: dict,
     status: str = "completed",
     reasoning: str = "",
+    metadata: Optional[dict] = None,
 ) -> dict:
     """Assemble a Responses API ``response`` object from aggregated output."""
     output: list[dict] = []
@@ -748,6 +761,21 @@ def _build_response_object(
             "arguments": json.dumps(tc.get("arguments", {})),
             "status": "completed",
         })
+    usage_obj: dict[str, Any] = {
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+        # Prompt caching is a no-op over ACP (kiro-cli exposes no caching
+        # mechanism), so ``cached_tokens`` is 0 today. Reported — rather
+        # than omitted — for shape-parity with the native Responses usage
+        # object, and surfaces real counts if a future kiro-cli reports
+        # them. See the "Prompt caching" docs.
+        "input_tokens_details": {
+            "cached_tokens": usage.get("cache_read_input_tokens", 0),
+        },
+    }
+    if metadata:
+        usage_obj["kiro_metadata"] = metadata
     return {
         "id": response_id,
         "object": "response",
@@ -756,19 +784,7 @@ def _build_response_object(
         "model": model,
         "output": output,
         "output_text": text,
-        "usage": {
-            "input_tokens": usage.get("input_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-            # Prompt caching is a no-op over ACP (kiro-cli exposes no caching
-            # mechanism), so ``cached_tokens`` is 0 today. Reported — rather
-            # than omitted — for shape-parity with the native Responses usage
-            # object, and surfaces real counts if a future kiro-cli reports
-            # them. See the "Prompt caching" docs.
-            "input_tokens_details": {
-                "cached_tokens": usage.get("cache_read_input_tokens", 0),
-            },
-        },
+        "usage": usage_obj,
     }
 
 
@@ -864,6 +880,7 @@ async def create_response(
         tool_calls=result.get("tool_calls", []),
         usage=usage,
         reasoning=result.get("reasoning") or "",
+        metadata=result.get("metadata") or {},
     )
 
 
@@ -1128,6 +1145,7 @@ async def _responses_stream(
                     tool_calls=final_tool_calls,
                     usage=usage,
                     reasoning="".join(reasoning_parts),
+                    metadata=event.get("metadata") or {},
                 )
                 yield sse("response.completed", {"response": final})
                 break
