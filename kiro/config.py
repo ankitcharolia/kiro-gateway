@@ -165,6 +165,46 @@ ACP_SURFACE_THINKING: bool = (
 # per-request via filesystem_roots; otherwise the gateway process cwd is used.
 ACP_WORKSPACE_DIR: str = os.environ.get("ACP_WORKSPACE_DIR", os.getcwd())
 
+# Optional ACP session "mode" (agent persona) to select on every session via
+# session/set_mode. kiro-cli reports the available modes on session/new (e.g.
+# ``kiro_default``, ``code``, ``kiro_planner``, ``kiro_guide``); a mode is the
+# agent that answers the turn. Empty (default) leaves the session on kiro-cli's
+# own default mode — behaviour is unchanged unless this is set. An unknown mode
+# is accepted silently by kiro-cli (the session keeps its default), so a
+# mis-set value never fails the turn.
+ACP_MODE: str = os.environ.get("KIRO_ACP_MODE", "").strip()
+
+# ---------------------------------------------------------------------------
+# ACP subprocess spawn arguments (issue #53)
+#
+# ``kiro-cli acp`` accepts flags that let the caller pick the agent, initial
+# model, thinking effort, and agent engine at launch. The gateway exposes each
+# as an env knob and builds the argv deterministically in ACPClient.start().
+# All are optional and additive: with nothing set the gateway spawns the same
+# process as before, except the engine is pinned explicitly (see below).
+#
+# NOTE: KIRO_ACP_MODEL (this ``--model`` spawn flag, the *initial* session
+# model) is distinct from KIRO_ACP_MODE (the agent persona selected per session
+# via session/set_mode). The per-request model still overrides this default.
+# ---------------------------------------------------------------------------
+# --agent: name of a (custom) agent config to use for the first session.
+ACP_AGENT: str = os.environ.get("KIRO_ACP_AGENT", "").strip()
+# --model: model id to select when starting the first session.
+ACP_MODEL: str = os.environ.get("KIRO_ACP_MODEL", "").strip()
+# --effort: initial thinking effort level (low | medium | high | xhigh | max).
+ACP_EFFORT: str = os.environ.get("KIRO_ACP_EFFORT", "").strip()
+# --agent-engine: "v1" | "v2" | "v3". Pinned explicitly to v2 (the current
+# kiro-cli default) so a future flip of the default engine cannot silently
+# change the gateway's behaviour. v3 currently requires host-mediated auth
+# that the gateway does not implement (see issue #52) — accepted syntactically
+# but not usable yet.
+_ACP_ENGINE_CHOICES = ("v1", "v2", "v3")
+_acp_engine_raw = os.environ.get("KIRO_ACP_ENGINE", "v2").strip().lower()
+ACP_ENGINE: str = _acp_engine_raw if _acp_engine_raw in _ACP_ENGINE_CHOICES else "v2"
+# Escape hatch: extra raw args appended verbatim to the acp argv, parsed with
+# shell-style quoting (e.g. KIRO_ACP_EXTRA_ARGS='--verbose --trust-tools fs_read').
+ACP_EXTRA_ARGS: str = os.environ.get("KIRO_ACP_EXTRA_ARGS", "").strip()
+
 
 # ---------------------------------------------------------------------------
 # Settings object — exposes every constant as an attribute so callers can
@@ -206,6 +246,12 @@ class _Settings:
     ACP_SURFACE_TOOL_CALLS: bool = field(default_factory=lambda: ACP_SURFACE_TOOL_CALLS)
     ACP_SURFACE_THINKING: bool = field(default_factory=lambda: ACP_SURFACE_THINKING)
     ACP_WORKSPACE_DIR: str = field(default_factory=lambda: ACP_WORKSPACE_DIR)
+    ACP_MODE: str = field(default_factory=lambda: ACP_MODE)
+    ACP_AGENT: str = field(default_factory=lambda: ACP_AGENT)
+    ACP_MODEL: str = field(default_factory=lambda: ACP_MODEL)
+    ACP_EFFORT: str = field(default_factory=lambda: ACP_EFFORT)
+    ACP_ENGINE: str = field(default_factory=lambda: ACP_ENGINE)
+    ACP_EXTRA_ARGS: str = field(default_factory=lambda: ACP_EXTRA_ARGS)
 
     # Feature flags (default enabled; override via env)
     ACP_ENABLED: bool = field(

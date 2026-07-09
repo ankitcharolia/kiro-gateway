@@ -20,6 +20,7 @@ See COMPLIANCE.md for details.
 
 from contextlib import asynccontextmanager
 import argparse
+import shlex
 import sys
 
 import uvicorn
@@ -65,10 +66,43 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting Kiro Gateway v{APP_VERSION} (ACP mode)...")
     logger.info(f"kiro-cli path: {settings.KIRO_CLI_PATH}")
     logger.info(f"tool auto-approval: {'on' if settings.ACP_TRUST_TOOLS else 'off'}")
+    if settings.ACP_MODE:
+        logger.info(f"ACP mode (agent): {settings.ACP_MODE}")
+
+    # Parse the optional raw-args escape hatch with shell-style quoting.
+    try:
+        extra_args = shlex.split(settings.ACP_EXTRA_ARGS) if settings.ACP_EXTRA_ARGS else []
+    except ValueError as exc:
+        logger.warning(
+            f"KIRO_ACP_EXTRA_ARGS could not be parsed ({exc}); ignoring it."
+        )
+        extra_args = []
+
+    logger.info(f"ACP engine: {settings.ACP_ENGINE}")
+    if settings.ACP_ENGINE == "v3":
+        logger.warning(
+            "KIRO_ACP_ENGINE=v3 selected: the v3 engine requires host-mediated "
+            "auth (_kiro/auth/getAccessToken) that the gateway does not "
+            "implement, so generation will fail. See issue #52. Use v2."
+        )
+    if settings.ACP_AGENT:
+        logger.info(f"ACP spawn agent: {settings.ACP_AGENT}")
+    if settings.ACP_MODEL:
+        logger.info(f"ACP initial model: {settings.ACP_MODEL}")
+    if settings.ACP_EFFORT:
+        logger.info(f"ACP initial effort: {settings.ACP_EFFORT}")
+    if extra_args:
+        logger.info(f"ACP extra args: {extra_args}")
 
     acp_client = ACPClient(
         command=settings.KIRO_CLI_PATH,
         trust_tools=settings.ACP_TRUST_TOOLS,
+        mode=settings.ACP_MODE or None,
+        agent=settings.ACP_AGENT or None,
+        initial_model=settings.ACP_MODEL or None,
+        effort=settings.ACP_EFFORT or None,
+        engine=settings.ACP_ENGINE,
+        extra_args=extra_args,
     )
     await acp_client.start()
     await acp_client.initialize()

@@ -445,6 +445,12 @@ take precedence over `.env`).
 | `ACP_SURFACE_TOOL_CALLS` | `false` | How the shims present kiro-cli's built-in tool activity: `false` (default) = inline non-executable reasoning text (interleaved, needs `ACP_SURFACE_THINKING`); `true` = executable `tool_calls`/`tool_use`. ACP-native route always emits a structured `acp_tool_call`. |
 | `ACP_SURFACE_THINKING` | `true` | Surface kiro-cli reasoning in each API's native shape (OpenAI `reasoning_content` / Responses reasoning items; Anthropic `thinking` blocks). Additive — final answer unchanged. `false` emits only the answer. |
 | `ACP_WORKSPACE_DIR` | process cwd | Default session `cwd` |
+| `KIRO_ACP_MODE` | `` (kiro-cli default) | Agent persona selected per session via `session/set_mode` (`kiro_default`, `code`, `kiro_planner`, `kiro_guide`). Unknown value accepted silently (keeps default). Distinct from `KIRO_ACP_MODEL`. |
+| `KIRO_ACP_ENGINE` | `v2` | `--agent-engine` (`v1`/`v2`/`v3`), pinned explicitly so a future default-engine flip can't change behaviour. `v3` needs host-mediated auth the gateway lacks (issue #52) — generation fails; keep `v2`. Invalid value falls back to `v2`. |
+| `KIRO_ACP_AGENT` | `` (none) | `--agent`: (custom) agent config for the first session (spawn flag). |
+| `KIRO_ACP_MODEL` | `` (none) | `--model`: initial session model at spawn. Distinct from `KIRO_ACP_MODE`; a per-request model still overrides it. |
+| `KIRO_ACP_EFFORT` | `` (none) | `--effort`: initial thinking effort (`low`/`medium`/`high`/`xhigh`/`max`). |
+| `KIRO_ACP_EXTRA_ARGS` | `` (none) | Escape hatch: extra raw `kiro-cli acp` args, shell-quoted, appended verbatim. |
 | `ACP_TIMEOUT` | `120` | Seconds to await a JSON-RPC response |
 | `ACP_STDIO_MAX_BYTES` | `16777216` (16 MiB) | Max bytes per ACP stdout line; raise for very large tool outputs in long turns |
 | `ACP_ENABLED` / `OPENAI_SHIM_ENABLED` / `ANTHROPIC_SHIM_ENABLED` | `true` | Router toggles |

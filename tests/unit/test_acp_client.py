@@ -259,6 +259,176 @@ class TestModelDiscoveryAndForwarding:
         assert client.available_models == []
 
 
+# ---------------------------------------------------------------------------
+# Mode ("agent") discovery + forwarding (session/new "modes" + session/set_mode)
+# ---------------------------------------------------------------------------
+
+class TestModeDiscoveryAndForwarding:
+    """new_session caches the live mode catalogue and forwards mode selection."""
+
+    _MODES = {
+        "currentModeId": "kiro_default",
+        "availableModes": [
+            {"id": "code", "name": "code", "description": ""},
+            {"id": "kiro_default", "name": "kiro_default",
+             "description": "The default agent for Kiro CLI"},
+            {"id": "kiro_planner", "name": "kiro_planner",
+             "description": "Specialized planning agent"},
+        ],
+    }
+
+    @pytest.mark.asyncio
+    async def test_new_session_captures_available_modes(self):
+        """The 'modes' block from session/new is cached and normalised."""
+        client = ACPClient()
+
+        async def fake_call(method, params, timeout=120.0):
+            if method == "session/new":
+                return {"sessionId": "m1", "modes": self._MODES}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        session_id = await _REAL_NEW_SESSION(client)
+
+        assert session_id == "m1"
+        ids = [m["id"] for m in client.available_modes]
+        assert ids == ["code", "kiro_default", "kiro_planner"]
+        # Description is preserved / defaulted, and current mode captured.
+        planner = next(m for m in client.available_modes if m["id"] == "kiro_planner")
+        assert planner["description"] == "Specialized planning agent"
+        assert client._current_mode_id == "kiro_default"
+
+    @pytest.mark.asyncio
+    async def test_new_session_forwards_mode_via_set_mode(self):
+        """When a mode is requested, session/set_mode is sent with that id."""
+        client = ACPClient()
+        calls: list[tuple[str, dict]] = []
+
+        async def fake_call(method, params, timeout=120.0):
+            calls.append((method, params))
+            if method == "session/new":
+                return {"sessionId": "m2", "modes": self._MODES}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client, mode="kiro_planner")
+
+        set_calls = [c for c in calls if c[0] == "session/set_mode"]
+        assert len(set_calls) == 1
+        assert set_calls[0][1] == {"sessionId": "m2", "modeId": "kiro_planner"}
+        # State is updated to the selected mode.
+        assert client._current_mode_id == "kiro_planner"
+
+    @pytest.mark.asyncio
+    async def test_new_session_without_mode_skips_set_mode(self):
+        """No mode requested and none configured → no session/set_mode call."""
+        client = ACPClient()
+        methods: list[str] = []
+
+        async def fake_call(method, params, timeout=120.0):
+            methods.append(method)
+            if method == "session/new":
+                return {"sessionId": "m3", "modes": self._MODES}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client)
+
+        assert "session/set_mode" not in methods
+
+    @pytest.mark.asyncio
+    async def test_new_session_skips_set_mode_when_mode_matches_default(self):
+        """Requested mode == session default → no redundant set_mode RTT."""
+        client = ACPClient()
+        methods: list[str] = []
+
+        async def fake_call(method, params, timeout=120.0):
+            methods.append(method)
+            if method == "session/new":
+                return {"sessionId": "m4", "modes": self._MODES}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client, mode="kiro_default")
+
+        assert "session/set_mode" not in methods
+
+    @pytest.mark.asyncio
+    async def test_configured_default_mode_is_applied(self):
+        """A client-level default mode (KIRO_ACP_MODE) is forwarded on new_session."""
+        client = ACPClient(mode="kiro_planner")
+        calls: list[tuple[str, dict]] = []
+
+        async def fake_call(method, params, timeout=120.0):
+            calls.append((method, params))
+            if method == "session/new":
+                return {"sessionId": "m5", "modes": self._MODES}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client)
+
+        set_calls = [c for c in calls if c[0] == "session/set_mode"]
+        assert len(set_calls) == 1
+        assert set_calls[0][1] == {"sessionId": "m5", "modeId": "kiro_planner"}
+
+    @pytest.mark.asyncio
+    async def test_per_call_mode_overrides_configured_default(self):
+        """An explicit new_session(mode=…) wins over the configured default."""
+        client = ACPClient(mode="kiro_planner")
+        calls: list[tuple[str, dict]] = []
+
+        async def fake_call(method, params, timeout=120.0):
+            calls.append((method, params))
+            if method == "session/new":
+                return {"sessionId": "m6", "modes": self._MODES}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client, mode="code")
+
+        set_calls = [c for c in calls if c[0] == "session/set_mode"]
+        assert len(set_calls) == 1
+        assert set_calls[0][1]["modeId"] == "code"
+
+    @pytest.mark.asyncio
+    async def test_set_mode_swallows_acp_error(self):
+        """A failed set_mode is logged and swallowed, never raised."""
+        from kiro.acp_client import ACPError
+
+        client = ACPClient()
+
+        async def fake_call(method, params, timeout=120.0):
+            raise ACPError(-32000, "set_mode exploded")
+
+        client._call = fake_call  # type: ignore[assignment]
+        # Must not raise, and the mode id must not be recorded on failure.
+        await client.set_mode("m7", "bogus-mode")
+        assert client._current_mode_id is None
+
+    @pytest.mark.asyncio
+    async def test_available_modes_empty_before_any_session(self):
+        """No session created yet → empty mode catalogue."""
+        client = ACPClient()
+        assert client.available_modes == []
+
+    @pytest.mark.asyncio
+    async def test_new_session_without_modes_block_is_safe(self):
+        """A session/new result lacking 'modes' leaves the catalogue empty."""
+        client = ACPClient()
+
+        async def fake_call(method, params, timeout=120.0):
+            if method == "session/new":
+                return {"sessionId": "m8"}  # no modes block
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client)
+
+        assert client.available_modes == []
+        assert client._current_mode_id is None
+
+
 class TestStdioBufferLimit:
     """The stdio read buffer must be large enough for big ACP lines."""
 
@@ -278,6 +448,120 @@ class TestStdioBufferLimit:
         """A custom stdio buffer limit is honoured."""
         client = ACPClient(stdio_limit=1234567)
         assert client._stdio_limit == 1234567
+
+
+# ---------------------------------------------------------------------------
+# Spawn argv construction (issue #53): kiro-cli acp flags are configurable and
+# the engine is always pinned explicitly.
+# ---------------------------------------------------------------------------
+
+class TestSpawnArgvConstruction:
+    """_build_argv() assembles the kiro-cli acp argv from spawn options."""
+
+    def test_default_argv_pins_engine_v2(self):
+        """With nothing configured, only the explicit engine pin is added."""
+        client = ACPClient(command="kiro-cli")
+        assert client._build_argv() == ["kiro-cli", "acp", "--agent-engine", "v2"]
+
+    def test_custom_command_is_used(self):
+        """The configured binary path is the argv[0]."""
+        client = ACPClient(command="/opt/kiro/kiro-cli")
+        assert client._build_argv()[0] == "/opt/kiro/kiro-cli"
+
+    def test_engine_is_configurable(self):
+        """A non-default engine is passed through to --agent-engine."""
+        client = ACPClient(engine="v3")
+        assert client._build_argv()[:4] == ["kiro-cli", "acp", "--agent-engine", "v3"]
+
+    def test_agent_flag_added_when_set(self):
+        """--agent is appended only when an agent is configured."""
+        client = ACPClient(agent="my-agent")
+        argv = client._build_argv()
+        assert "--agent" in argv
+        assert argv[argv.index("--agent") + 1] == "my-agent"
+
+    def test_model_flag_added_when_set(self):
+        """--model is appended only when an initial model is configured."""
+        client = ACPClient(initial_model="claude-sonnet-4.6")
+        argv = client._build_argv()
+        assert argv[argv.index("--model") + 1] == "claude-sonnet-4.6"
+
+    def test_effort_flag_added_when_set(self):
+        """--effort is appended only when an effort level is configured."""
+        client = ACPClient(effort="high")
+        argv = client._build_argv()
+        assert argv[argv.index("--effort") + 1] == "high"
+
+    def test_extra_args_appended_verbatim(self):
+        """extra_args are appended verbatim after the known flags."""
+        client = ACPClient(extra_args=["--verbose", "--trust-tools", "fs_read"])
+        argv = client._build_argv()
+        assert argv[-3:] == ["--verbose", "--trust-tools", "fs_read"]
+
+    def test_all_options_combined_in_deterministic_order(self):
+        """Every option set → deterministic engine/agent/model/effort/extra order."""
+        client = ACPClient(
+            command="kiro-cli",
+            agent="planner",
+            initial_model="claude-opus-4.8",
+            effort="max",
+            engine="v1",
+            extra_args=["--verbose"],
+        )
+        assert client._build_argv() == [
+            "kiro-cli", "acp",
+            "--agent-engine", "v1",
+            "--agent", "planner",
+            "--model", "claude-opus-4.8",
+            "--effort", "max",
+            "--verbose",
+        ]
+
+    def test_blank_options_are_ignored(self):
+        """Empty/whitespace strings do not add flags (treated as unset)."""
+        client = ACPClient(agent="  ", initial_model="", effort=None)
+        assert client._build_argv() == ["kiro-cli", "acp", "--agent-engine", "v2"]
+
+    def test_engine_defaults_to_v2_when_blank(self):
+        """A blank engine falls back to the explicit v2 pin."""
+        client = ACPClient(engine="")
+        assert client._build_argv()[:4] == ["kiro-cli", "acp", "--agent-engine", "v2"]
+
+
+class TestEngineConfigValidation:
+    """config.ACP_ENGINE validates the KIRO_ACP_ENGINE env value."""
+
+    def _reload_config(self, monkeypatch, value):
+        import importlib
+        import kiro.config as cfg
+        if value is None:
+            monkeypatch.delenv("KIRO_ACP_ENGINE", raising=False)
+        else:
+            monkeypatch.setenv("KIRO_ACP_ENGINE", value)
+        return importlib.reload(cfg)
+
+    def test_default_engine_is_v2(self, monkeypatch):
+        cfg = self._reload_config(monkeypatch, None)
+        try:
+            assert cfg.ACP_ENGINE == "v2"
+        finally:
+            self._reload_config(monkeypatch, None)
+
+    @pytest.mark.parametrize("value", ["v1", "v2", "v3", "V3"])
+    def test_valid_engines_accepted(self, monkeypatch, value):
+        cfg = self._reload_config(monkeypatch, value)
+        try:
+            assert cfg.ACP_ENGINE == value.lower()
+        finally:
+            self._reload_config(monkeypatch, None)
+
+    @pytest.mark.parametrize("value", ["v4", "bogus", "2", ""])
+    def test_invalid_engine_falls_back_to_v2(self, monkeypatch, value):
+        cfg = self._reload_config(monkeypatch, value)
+        try:
+            assert cfg.ACP_ENGINE == "v2"
+        finally:
+            self._reload_config(monkeypatch, None)
 
 
 # ---------------------------------------------------------------------------

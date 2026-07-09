@@ -198,6 +198,20 @@ ACP_TIMEOUT=120                  # Seconds to await a JSON-RPC response
 ACP_STDIO_MAX_BYTES=16777216     # Max bytes per ACP stdout line (16 MiB) — raise
                                  # for very large tool outputs in long agent turns
 
+# ── ACP session mode & spawn args ─────────────────────────────────────
+# Agent persona selected per session via session/set_mode (kiro_default,
+# code, kiro_planner, kiro_guide). Empty = kiro-cli's default mode.
+KIRO_ACP_MODE=
+# Flags passed to `kiro-cli acp` at launch (all optional). The engine is
+# pinned explicitly (default v2) so a future change to kiro-cli's default
+# engine can't silently alter behaviour. v3 needs host-mediated auth the
+# gateway does not implement (generation fails) — keep v2.
+KIRO_ACP_ENGINE=v2               # v1 | v2 | v3
+KIRO_ACP_AGENT=                  # --agent: (custom) agent config for the first session
+KIRO_ACP_MODEL=                  # --model: initial session model (per-request model still wins)
+KIRO_ACP_EFFORT=                 # --effort: low | medium | high | xhigh | max
+KIRO_ACP_EXTRA_ARGS=             # extra raw args appended verbatim (shell-quoted)
+
 # ── Feature flags ─────────────────────────────────────────────────────
 ACP_ENABLED=true
 OPENAI_SHIM_ENABLED=true

@@ -311,9 +311,27 @@ class ACPClient:
         command: str = "kiro-cli",
         trust_tools: bool = True,
         stdio_limit: int = ACP_STDIO_MAX_BYTES,
+        mode: Optional[str] = None,
+        agent: Optional[str] = None,
+        initial_model: Optional[str] = None,
+        effort: Optional[str] = None,
+        engine: str = "v2",
+        extra_args: Optional[list[str]] = None,
     ):
         self._command = command
         self._trust_tools = trust_tools
+        # Optional ACP session "mode" (agent persona) selected on every session
+        # via session/set_mode. Empty/None leaves the session on kiro-cli's
+        # default mode (behaviour unchanged).
+        self._mode = (mode or "").strip() or None
+        # ``kiro-cli acp`` spawn arguments (issue #53). Each is optional; the
+        # engine is always pinned explicitly (default "v2") so a future change
+        # to kiro-cli's default engine cannot silently alter behaviour.
+        self._agent = (agent or "").strip() or None
+        self._initial_model = (initial_model or "").strip() or None
+        self._effort = (effort or "").strip() or None
+        self._engine = (engine or "v2").strip() or "v2"
+        self._extra_args = list(extra_args or [])
         # Max bytes per JSON-RPC line read from kiro-cli stdout (see config).
         self._stdio_limit = stdio_limit
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -338,6 +356,12 @@ class ACPClient:
         # {"id", "name", "description"}), and kiro-cli's current default model.
         self._available_models: list[dict] = []
         self._current_model_id: Optional[str] = None
+        # Live mode ("agent") catalogue captured from session/new (same
+        # normalised {"id", "name", "description"} shape) and the session's
+        # current default mode id. kiro-cli reports these under a ``modes``
+        # block; they let the gateway advertise/select the agent persona.
+        self._available_modes: list[dict] = []
+        self._current_mode_id: Optional[str] = None
         # Per-session token usage captured from session/update notifications,
         # merged into the terminal "done" event. kiro-cli 2.x does not report
         # usage over ACP today (its /usage view is an interactive REPL command),
@@ -349,9 +373,31 @@ class ACPClient:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _build_argv(self) -> list[str]:
+        """Assemble the ``kiro-cli acp`` argv from the configured spawn options.
+
+        Deterministic order: base command, an explicit ``--agent-engine`` pin,
+        then the optional ``--agent`` / ``--model`` / ``--effort`` flags (only
+        when set), then any raw ``extra_args`` appended verbatim. With nothing
+        configured this yields ``[command, "acp", "--agent-engine", "v2"]`` — the
+        same process as before plus an explicit engine pin (issue #53).
+
+        Returns:
+            The argv list to spawn.
+        """
+        argv = [self._command, "acp", "--agent-engine", self._engine]
+        if self._agent:
+            argv += ["--agent", self._agent]
+        if self._initial_model:
+            argv += ["--model", self._initial_model]
+        if self._effort:
+            argv += ["--effort", self._effort]
+        argv += self._extra_args
+        return argv
+
     async def start(self) -> None:
         """Spawn ``kiro-cli acp`` and begin reading its stdio."""
-        argv = [self._command, "acp"]
+        argv = self._build_argv()
         logger.info(f"Spawning ACP subprocess: {' '.join(argv)}")
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -431,6 +477,7 @@ class ACPClient:
         capabilities: Optional[GatewayCapabilities] = None,
         cwd: Optional[str] = None,
         model: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> str:
         """
         Create a fresh ACP session and return its id.
@@ -444,6 +491,10 @@ class ACPClient:
             model: Optional model id to select for this session (forwarded to
                 kiro-cli via ``session/set_model``). When omitted, the session
                 uses kiro-cli's current default model.
+            mode: Optional mode ("agent") id to select for this session
+                (forwarded via ``session/set_mode``). When omitted, the
+                client's configured default mode (``KIRO_ACP_MODE``) is used,
+                and when that is unset too the session keeps kiro-cli's default.
 
         Returns:
             The agent-assigned ``sessionId``.
@@ -456,12 +507,19 @@ class ACPClient:
         session_id = str(result["sessionId"])
         self._session_id = session_id
         self._capture_available_models(result)
+        self._capture_available_modes(result)
         logger.debug(f"ACP session created: {session_id} (cwd={workdir})")
         # Only issue the extra session/set_model round-trip when the requested
         # model differs from the session's current default. This avoids a
         # redundant RTT on every request for agents that use the default model.
         if model and model != self._current_model_id:
             await self.set_model(session_id, model)
+        # Likewise select the mode ("agent") only when one is requested (per
+        # call or via the configured default) and it differs from the session's
+        # current mode, so the common default-mode path adds no round-trip.
+        desired_mode = mode or self._mode
+        if desired_mode and desired_mode != self._current_mode_id:
+            await self.set_mode(session_id, desired_mode)
         return session_id
 
     def _capture_available_models(self, session_result: dict) -> None:
@@ -534,6 +592,79 @@ class ACPClient:
     def available_models(self) -> list[dict]:
         """Return the cached live model catalogue (``{"id","name","description"}``)."""
         return list(self._available_models)
+
+    def _capture_available_modes(self, session_result: dict) -> None:
+        """
+        Cache the mode ("agent") catalogue reported by ``session/new``.
+
+        kiro-cli returns a ``modes`` object on ``session/new``::
+
+            {"modes": {"currentModeId": "kiro_default",
+                       "availableModes": [{"id", "name", "description"}, ...]}}
+
+        Each mode is an agent persona (``kiro_default``, ``code``,
+        ``kiro_planner``, ``kiro_guide``, …). The list is normalised to
+        ``{"id", "name", "description"}`` dicts and cached alongside the current
+        mode id so the gateway can advertise/select the active agent.
+
+        Args:
+            session_result: The raw ``session/new`` result dict.
+        """
+        modes_info = session_result.get("modes")
+        if not isinstance(modes_info, dict):
+            return
+        current = modes_info.get("currentModeId")
+        if isinstance(current, str) and current:
+            self._current_mode_id = current
+        available = modes_info.get("availableModes")
+        if not isinstance(available, list):
+            return
+        normalised: list[dict] = []
+        for entry in available:
+            if not isinstance(entry, dict):
+                continue
+            mode_id = entry.get("id")
+            if not mode_id:
+                continue
+            normalised.append({
+                "id": str(mode_id),
+                "name": str(entry.get("name") or mode_id),
+                "description": str(entry.get("description") or ""),
+            })
+        if normalised:
+            self._available_modes = normalised
+
+    async def set_mode(self, session_id: str, mode_id: str) -> None:
+        """
+        Select the mode ("agent") for a session via ``session/set_mode``.
+
+        Mirrors :meth:`set_model`: kiro-cli accepts the request silently and
+        does not validate the id (an unknown mode leaves the session on its
+        default), so failures are logged and swallowed — a mode-selection
+        problem never breaks the completion itself. Verified against a live
+        kiro-cli 2.12.0 probe: ``{"sessionId", "modeId"}`` → ``{}``.
+
+        Args:
+            session_id: The ACP session to configure.
+            mode_id: The mode/agent id requested (e.g. ``kiro_planner``).
+        """
+        try:
+            await self._call(
+                "session/set_mode",
+                {"sessionId": session_id, "modeId": mode_id},
+            )
+            self._current_mode_id = mode_id
+            logger.info(f"ACP session {session_id} mode set to '{mode_id}'")
+        except ACPError as exc:
+            logger.warning(
+                f"session/set_mode failed for '{mode_id}': {exc}; "
+                "session will use its default mode"
+            )
+
+    @property
+    def available_modes(self) -> list[dict]:
+        """Return the cached live mode catalogue (``{"id","name","description"}``)."""
+        return list(self._available_modes)
 
     @staticmethod
     def _derive_cwd(capabilities: Optional[GatewayCapabilities]) -> str:
