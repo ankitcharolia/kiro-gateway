@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.2.2 (2026-07-09)
+
+### Documentation
+
+* **changelog:** update for v2.2.1 [skip ci] ([e5a9562](https://github.com/ankitcharolia/kiro-gateway/commit/e5a956286c58b5828a6f47b491117398646fe0cb))
+* **examples:** advertise image/reasoning/tool_call capabilities in harness configs ([4b79493](https://github.com/ankitcharolia/kiro-gateway/commit/4b7949388d07da375f9bc37eeaea9c1818161177))
+* remove Docker installation options and Docker-related files ([cc7b3f7](https://github.com/ankitcharolia/kiro-gateway/commit/cc7b3f77ab570f82f96481aca162831c823f55e7))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @github-actions[bot]
+
 ## 2.2.1 (2026-06-29)
 
 ### Features
