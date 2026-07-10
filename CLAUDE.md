@@ -166,12 +166,11 @@ existing env vars take precedence over `.env`).
 ## Run, verify, test
 
 ```bash
-# Run (bare metal)
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+# Run (bare metal) — needs uv: https://docs.astral.sh/uv/
+uv sync                       # creates .venv and installs deps
 cp .env.example .env          # set KIRO_GATEWAY_API_KEY
 kiro-cli login                # once
-python main.py                # serves on http://localhost:8000
+uv run main.py                # serves on http://localhost:8000
 
 # Smoke test
 curl localhost:8000/health
@@ -181,7 +180,7 @@ curl -H "Authorization: Bearer $KIRO_GATEWAY_API_KEY" -H 'Content-Type: applicat
   localhost:8000/v1/chat/completions
 
 # Tests (fully network-isolated; no real kiro-cli needed)
-pytest -q
+uv run pytest -q
 ```
 
 The test suite mocks the ACP subprocess. The `test_client` fixture in
@@ -201,4 +200,4 @@ patch it there too or integration tests will block on the JSON-RPC timeout.
    non-streaming. Add ACP-route coverage when relevant.
 4. **Never spawn the real binary in tests.** Mock it via the conftest fixtures.
 5. **Type hints + Google-style docstrings + English-only identifiers.**
-6. **Run `pytest -q` before finishing.** The suite must stay green and fast.
+6. **Run `uv run pytest -q` before finishing.** The suite must stay green and fast.

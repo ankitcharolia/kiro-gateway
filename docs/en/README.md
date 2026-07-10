@@ -83,11 +83,10 @@ routes_openai_shim   routes_anthropic_shim
 ```bash
 git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+uv sync
 cp .env.example .env   # edit KIRO_GATEWAY_API_KEY
 kiro-cli login
-python main.py
+uv run main.py
 ```
 
 ### Option B — Docker (published image)
@@ -279,7 +278,7 @@ A request may also pass `filesystem_roots`; the first root's path becomes the
 ## Running Tests
 
 ```bash
-pip install -e ".[dev]"
+uv sync
 pytest tests/ -v
 pytest --cov=kiro --cov-report=term-missing
 ```

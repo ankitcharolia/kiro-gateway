@@ -33,7 +33,7 @@
     <!-- ── Edit the paths below to match your setup ──────────────────── -->
 
     <!-- Full path to the Python interpreter inside your virtual environment.
-         Run `which python` after `source .venv/bin/activate` to find this.  -->
+         `uv sync` creates .venv in the repo root.  -->
     <key>ProgramArguments</key>
     <array>
         <string>/Users/YOUR_USERNAME/kiro-gateway/.venv/bin/python</string>

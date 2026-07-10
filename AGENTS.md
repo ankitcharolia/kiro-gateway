@@ -79,19 +79,18 @@ Kiro Backend
 ## Essential Commands
 
 ```bash
-# Run (bare metal)
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+# Run (bare metal) — needs uv: https://docs.astral.sh/uv/
+uv sync                       # creates .venv and installs deps
 cp .env.example .env          # set KIRO_GATEWAY_API_KEY
 kiro-cli login                # once
-python main.py                # http://localhost:8000  (--host / --port to override)
+uv run main.py                # http://localhost:8000  (--host / --port to override)
 
 # Tests
-pytest -q                     # full suite (network-isolated, fast)
-pytest tests/unit/ -v
-pytest tests/integration/ -v
-pytest tests/unit/test_acp_compliance.py tests/unit/test_compliance.py -v
-pytest --cov=kiro --cov-report=term-missing
+uv run pytest -q              # full suite (network-isolated, fast)
+uv run pytest tests/unit/ -v
+uv run pytest tests/integration/ -v
+uv run pytest tests/unit/test_acp_compliance.py tests/unit/test_compliance.py -v
+uv run pytest --cov=kiro --cov-report=term-missing
 
 ```
 
@@ -113,8 +112,8 @@ kiro-gateway/
 ├── tests/                      # conftest.py + unit/ + integration/
 ├── docs/                       # Translated user docs (en, es, pt, id, zh, ja, ko, ru)
 ├── .env.example                # Configuration template
-├── requirements.txt
-└── pytest.ini
+├── pyproject.toml              # Project metadata, deps, tool config (uv-managed)
+└── uv.lock                     # Pinned dependency lockfile
 ```
 
 > Some legacy modules from an earlier design may still exist in `kiro/`. The
@@ -488,7 +487,7 @@ take precedence over `.env`).
   classes grouped by `Success` / `Errors` / `EdgeCases`.
 - Add tests to the matching existing `test_*.py` (see `tests/README.md`) rather
   than creating new files for existing modules.
-- Run `pytest -q` before finishing; the suite must stay green and fast.
+- Run `uv run pytest -q` before finishing; the suite must stay green and fast.
 
 ## Conventions
 
@@ -543,4 +542,4 @@ When working here:
 3. **Both APIs, both modes** — OpenAI + Anthropic, streaming + non-streaming.
 4. **Never spawn the real binary in tests** — use the conftest fixtures.
 5. **Type hints, docstrings, English-only, loguru.**
-6. **`pytest -q` green before finishing.**
+6. **`uv run pytest -q` green before finishing.**

@@ -62,7 +62,7 @@ a credential extractor or internal-API interceptor.
 
 1. Install kiro-cli: https://kiro.dev/docs/cli/
 2. Log in: `kiro-cli auth login`
-3. Start gateway: `python main.py`
+3. Start gateway: `uv run main.py`
 
 No `.env`, no tokens, no credential files needed.
 

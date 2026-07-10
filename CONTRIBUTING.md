@@ -9,9 +9,9 @@ Kiro Gateway is a **transparent proxy** - we fix API-level issues while preservi
 ## Getting Started
 
 1. Fork and clone the repo
-2. Install dependencies: `pip install -r requirements.txt`
+2. Install [uv](https://docs.astral.sh/uv/), then install dependencies: `uv sync`
 3. Copy `.env.example` to `.env` and configure
-4. Run tests: `pytest -v`
+4. Run tests: `uv run pytest -v`
 
 ## Development Workflow
 
@@ -22,7 +22,7 @@ git checkout -b fix/your-fix
 git checkout -b feat/your-feature
 
 # Make changes and test
-pytest -v
+uv run pytest -v
 
 # Commit (Conventional Commits format)
 git commit -m "fix(scope): description"

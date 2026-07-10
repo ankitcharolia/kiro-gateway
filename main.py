@@ -163,8 +163,14 @@ async def health():
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Kiro Gateway — ACP-compliant proxy for kiro-cli")
-    parser.add_argument("-H", "--host", default=None, metavar="HOST")
-    parser.add_argument("-p", "--port", type=int, default=None, metavar="PORT")
+    parser.add_argument(
+        "-H", "--host", default=None, metavar="HOST",
+        help=f"Bind address (default: SERVER_HOST env or {settings.SERVER_HOST})",
+    )
+    parser.add_argument(
+        "-p", "--port", type=int, default=None, metavar="PORT",
+        help=f"Bind port (default: SERVER_PORT env or {settings.SERVER_PORT})",
+    )
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {APP_VERSION}")
     return parser.parse_args()
 

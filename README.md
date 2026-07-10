@@ -122,24 +122,21 @@ For tools that only understand the Anthropic API (Claude Code, Kilo Code, OpenCl
 git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
 
-# 2. Create a Python virtual environment
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+# 2. Install dependencies (uv creates .venv automatically)
+#    Install uv first: https://docs.astral.sh/uv/getting-started/installation/
+uv sync
 
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Configure environment
+# 3. Configure environment
 cp .env.example .env
 # Open .env and set at minimum:
 #   KIRO_GATEWAY_API_KEY=<your-chosen-secret-key>
 #   KIRO_CLI_PATH=kiro-cli    # full path if not on $PATH
 
-# 5. Authenticate with Kiro (once)
+# 4. Authenticate with Kiro (once)
 kiro-cli login
 
-# 6. Start the gateway
-python main.py
+# 5. Start the gateway
+uv run main.py
 # Gateway is now listening on http://localhost:8000
 ```
 

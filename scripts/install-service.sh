@@ -36,7 +36,7 @@ info "Repository root : $REPO_ROOT"
 # ── Sanity checks (skip on uninstall) ─────────────────────────────────────────
 if [[ "$UNINSTALL" == false ]]; then
   [[ -f "$REPO_ROOT/main.py" ]] || die "main.py not found in $REPO_ROOT — are you inside the kiro-gateway repo?"
-  [[ -f "$VENV_PYTHON" ]]       || die ".venv not found. Run: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+  [[ -f "$VENV_PYTHON" ]]       || die ".venv not found. Run: uv sync"
   [[ -f "$ENV_FILE" ]]          || die ".env not found. Run: cp .env.example .env  (then set KIRO_GATEWAY_API_KEY)"
   grep -q "^KIRO_GATEWAY_API_KEY=" "$ENV_FILE" || warn ".env does not contain KIRO_GATEWAY_API_KEY — the gateway will start but auth will fall back to the default test key."
 fi
