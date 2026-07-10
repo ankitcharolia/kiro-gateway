@@ -1660,6 +1660,56 @@ class TestStructuredToolRendering:
         assert out == "2 match(es) in 1 file(s)"
         assert "matches" not in out
 
+    # --- execute (shell) tool output (verified against a live kiro-cli 2.12.0
+    # probe: shell output arrives as {"Json": {"exit_status","stdout","stderr"}},
+    # not a "Text" item — so it must be extracted, or the output is lost). ---
+
+    def test_execute_json_stdout_extracted(self):
+        """A successful shell command's stdout is extracted from the Json shape."""
+        out = ACPClient._extract_tool_output({"items": [{"Json": {
+            "exit_status": "exit status: 0", "stdout": "42\n", "stderr": ""}}]})
+        assert out == "42"
+
+    def test_execute_json_stderr_and_exit_code_on_failure(self):
+        """A failing command surfaces stderr and an [exit: N] marker."""
+        out = ACPClient._extract_tool_output({"items": [{"Json": {
+            "exit_status": "exit status: 127",
+            "stdout": "",
+            "stderr": "bash: line 1: nope: command not found\n"}}]})
+        assert "command not found" in out
+        assert "[exit: 127]" in out
+
+    def test_execute_json_failure_with_no_output_shows_marker(self):
+        """A command that fails silently still shows the exit marker."""
+        out = ACPClient._extract_tool_output({"items": [{"Json": {
+            "exit_status": "exit status: 1", "stdout": "", "stderr": ""}}]})
+        assert out == "[exit: 1]"
+
+    def test_execute_json_success_no_exit_marker(self):
+        """A zero-exit command shows output without an exit marker."""
+        out = ACPClient._extract_tool_output({"items": [{"Json": {
+            "exit_status": "exit status: 0", "stdout": "ok", "stderr": ""}}]})
+        assert out == "ok"
+        assert "exit:" not in out
+
+    def test_execute_output_rendered_as_fenced_block(self):
+        """render_tool_activity wraps execute output in a fenced block."""
+        out = ACPClient._extract_tool_output({"items": [{"Json": {
+            "exit_status": "exit status: 0", "stdout": "42\n", "stderr": ""}}]})
+        rendered = render_tool_activity(
+            {"type": "tool_call_update", "kind": "execute", "output": out})
+        assert "```\n42\n```" in rendered
+
+    def test_execute_failure_rendered_with_marker(self):
+        """A failed command renders stderr + exit marker in a fenced block."""
+        out = ACPClient._extract_tool_output({"items": [{"Json": {
+            "exit_status": "exit status: 127", "stdout": "",
+            "stderr": "bash: nope: command not found\n"}}]})
+        rendered = render_tool_activity(
+            {"type": "tool_call_update", "kind": "execute", "output": out})
+        assert "command not found" in rendered
+        assert "[exit: 127]" in rendered
+
 
 # ---------------------------------------------------------------------------
 # Multi-turn prompt serialization (issue #43): the stateless gateway carries

@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re as _re
 import uuid
 from asyncio import Queue
 from typing import Any, AsyncIterator, Optional
@@ -183,13 +184,24 @@ def _format_tool_args(arguments: dict) -> str:
 
 
 def _summarize_json_output(payload: Any) -> str:
-    """Summarise a structured tool result (grep/glob) into a one-line string.
+    """Summarise a structured tool result into activity text.
+
+    Handles the ``Json`` result shapes kiro-cli emits on a ``tool_call_update``:
+
+    * **grep** — ``{"numMatches", "numFiles", …}`` → a one-line match summary.
+    * **glob** — ``{"filePaths"|"totalFiles", …}`` → a one-line file-count summary.
+    * **execute (shell)** — ``{"exit_status", "stdout", "stderr"}`` → the command's
+      stdout/stderr text, with a ``[exit: …]`` marker appended when the command
+      failed (non-zero exit) so a failing command is visible even with no output.
+      Verified against a live kiro-cli 2.12.0 probe: shell output arrives as this
+      ``Json`` shape, **not** as a ``Text`` item — so without this branch the
+      output (and any failure) is silently dropped from the activity view.
 
     Args:
         payload: The ``Json`` value from a tool ``rawOutput`` item.
 
     Returns:
-        A concise summary, or ``""`` for shapes we don't summarise (avoids
+        The summary/output text, or ``""`` for shapes we don't render (avoids
         dumping arbitrary JSON into the reasoning stream).
     """
     if not isinstance(payload, dict):
@@ -209,6 +221,19 @@ def _summarize_json_output(payload: Any) -> str:
         if count is None:
             count = len(payload.get("filePaths") or [])
         return f"{count} file(s) found"
+    # execute (shell): {"exit_status": "exit status: N", "stdout": ..., "stderr": ...}
+    if "exit_status" in payload or "stdout" in payload or "stderr" in payload:
+        stdout = str(payload.get("stdout") or "").rstrip()
+        stderr = str(payload.get("stderr") or "").rstrip()
+        segments = [seg for seg in (stdout, stderr) if seg]
+        body = "\n".join(segments)
+        exit_status = str(payload.get("exit_status") or "").strip()
+        match = _re.search(r"-?\d+", exit_status)
+        exit_code = int(match.group()) if match else 0
+        if exit_code != 0:
+            marker = f"[exit: {exit_code}]"
+            body = f"{body}\n{marker}" if body else marker
+        return body
     return ""
 
 
