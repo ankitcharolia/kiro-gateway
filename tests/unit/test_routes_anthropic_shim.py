@@ -1215,7 +1215,13 @@ class TestAnthropicShimToolSurfacingGate:
         resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
         body = resp.json()
         assert any(b["type"] == "tool_use" for b in body["content"])
-        assert body["stop_reason"] == "tool_use"
+        # Tool name is sanitized (spaces → underscores).
+        tool_block = next(b for b in body["content"] if b["type"] == "tool_use")
+        assert tool_block["name"] == "Fetching_web_content"
+        # _ToolEmittingACP returns content AND tool_calls; when content is
+        # present the turn is complete — stop_reason must be "end_turn", not
+        # "tool_use" (harnesses must not loop on tool execution).
+        assert body["stop_reason"] == "end_turn"
 
     def test_stream_default_suppresses_tool_use(self, sync_client, anthropic_headers):
         sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
@@ -1228,8 +1234,129 @@ class TestAnthropicShimToolSurfacingGate:
         sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
         payload = {**self._MSG, "stream": True}
         resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        # Tool block is emitted (name sanitized).
         assert '"tool_use"' in resp.text
-        assert "Fetching web content" in resp.text
+        assert "Fetching_web_content" in resp.text
+        # Content was also streamed, so stop_reason must be "end_turn" not
+        # "tool_use" — harnesses must not loop on tool execution.
+        assert '"stop_reason": "end_turn"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: stop_reason=tool_use only when tool blocks are present
+# AND no text content was produced. When kiro-cli runs its own tools and then
+# returns a text answer, stop_reason must be "end_turn" so harnesses don't
+# hang waiting for tool execution that kiro-cli already performed internally.
+# Tool names must be sanitized to valid Anthropic tool identifiers.
+# ---------------------------------------------------------------------------
+
+class _PureToolUseACP:
+    """Stub that returns tool_use blocks with NO text content."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [{"id": "toolu_01", "name": "my_function", "arguments": {"x": 1}}],
+            "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "tool_call", "id": "toolu_01", "name": "my_function", "arguments": {"x": 1}}
+        yield {"type": "done", "finish_reason": "tool_calls"}
+
+
+class _DirtyNameToolACP:
+    """Stub with invalid tool names: spaces, colons, slashes."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [
+                {"id": "c1", "name": "Running: ls -la /tmp", "arguments": {}},
+                {"id": "c2", "name": "", "arguments": {}},
+            ],
+            "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "tool_call", "id": "c1", "name": "Running: ls -la /tmp", "arguments": {}}
+        yield {"type": "done", "finish_reason": "tool_calls"}
+
+
+class TestAnthropicToolCallStopReasonRegression:
+    """Regression: stop_reason=tool_use only without text; names are sanitized."""
+
+    _MSG = {
+        "model": "claude-sonnet-4.6", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "q"}],
+    }
+
+    def test_non_stream_pure_tool_use_emits_tool_use(self, sync_client, anthropic_headers, monkeypatch):
+        """A turn with tool_use and NO content should use stop_reason=tool_use."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_PureToolUseACP())
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.json()["stop_reason"] == "tool_use"
+
+    def test_stream_pure_tool_use_emits_tool_use(self, sync_client, anthropic_headers, monkeypatch):
+        """Streaming pure tool_use (no text) should end with stop_reason=tool_use."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_PureToolUseACP())
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert '"stop_reason": "tool_use"' in resp.text
+
+    def test_non_stream_tool_use_with_content_emits_end_turn(self, sync_client, anthropic_headers, monkeypatch):
+        """A turn with tool_use AND text content should use stop_reason=end_turn."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.json()["stop_reason"] == "end_turn", (
+            "stop_reason must be end_turn when content is present alongside tool_use "
+            "(kiro-cli already ran the tool and returned the answer)"
+        )
+
+    def test_stream_tool_use_with_content_emits_end_turn(self, sync_client, anthropic_headers, monkeypatch):
+        """Streaming a turn with tool_use + content must end with stop_reason=end_turn."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert '"stop_reason": "end_turn"' in resp.text
+        assert '"stop_reason": "tool_use"' not in resp.text
+
+    def test_tool_name_sanitization(self, sync_client, anthropic_headers, monkeypatch):
+        """kiro-cli tool names with spaces/colons/slashes are sanitized."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_DirtyNameToolACP())
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        tool_blocks = [b for b in resp.json()["content"] if b["type"] == "tool_use"]
+        names = [b["name"] for b in tool_blocks]
+        assert all(" " not in n for n in names), f"Tool names still contain spaces: {names}"
+        assert all(":" not in n for n in names), f"Tool names still contain colons: {names}"
+        # Empty name falls back to kiro_tool.
+        assert "kiro_tool" in names
+
+    def test_stream_tool_name_sanitization(self, sync_client, anthropic_headers, monkeypatch):
+        """Streaming tool names must also be sanitized."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_DirtyNameToolACP())
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert "Running: ls" not in resp.text
+        assert "Running_ls" in resp.text or "Running__ls" in resp.text
 
 
 # ---------------------------------------------------------------------------

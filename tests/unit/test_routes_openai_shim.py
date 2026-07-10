@@ -1260,8 +1260,13 @@ class TestOpenAIShimToolSurfacingGate:
         sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
         resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
         choice = resp.json()["choices"][0]
-        assert choice["finish_reason"] == "tool_calls"
-        assert choice["message"]["tool_calls"][0]["function"]["name"] == "Fetching web content"
+        # _ToolEmittingACP returns both content AND tool_calls; when content is
+        # present the turn is complete so finish_reason must be "stop", not
+        # "tool_calls" (a harness would otherwise loop waiting to execute a tool
+        # kiro-cli already ran internally).
+        assert choice["finish_reason"] == "stop"
+        # Tool name is sanitized: spaces → underscores.
+        assert choice["message"]["tool_calls"][0]["function"]["name"] == "Fetching_web_content"
 
     def test_chat_stream_default_suppresses_tool_calls(self, sync_client, openai_headers):
         sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
@@ -1275,8 +1280,133 @@ class TestOpenAIShimToolSurfacingGate:
         sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
         payload = {**self._CHAT, "stream": True}
         resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        # Tool call chunk is emitted (name sanitized).
         assert '"tool_calls"' in resp.text
-        assert "Fetching web content" in resp.text
+        assert "Fetching_web_content" in resp.text
+        # Content was also streamed, so finish_reason must be "stop" not
+        # "tool_calls" — harnesses must not loop on tool execution.
+        assert '"finish_reason": "stop"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: finish_reason=tool_calls only when tool calls are present
+# AND no text content was produced. When kiro-cli runs its own tools and then
+# returns a text answer, finish_reason must be "stop" so harnesses don't hang
+# waiting for tool execution that kiro-cli already performed internally.
+# Tool names must be sanitized to valid function identifiers.
+# ---------------------------------------------------------------------------
+
+class _PureToolCallACP:
+    """Stub that returns tool calls with NO text content (pure tool-call turn)."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [{"id": "c1", "name": "my_function", "arguments": {"x": 1}}],
+            "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "tool_call", "id": "c1", "name": "my_function", "arguments": {"x": 1}}
+        yield {"type": "done", "finish_reason": "tool_calls"}
+
+
+class _DirtyNameToolACP:
+    """Stub with invalid tool names: spaces, colons, slashes."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [
+                {"id": "c1", "name": "Running: ls -la /tmp", "arguments": {}},
+                {"id": "c2", "name": "Reading listing tmp", "arguments": {}},
+                {"id": "c3", "name": "  !!invalid!!  ", "arguments": {}},
+                {"id": "c4", "name": "", "arguments": {}},
+            ],
+            "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "tool_call", "id": "c1", "name": "Running: ls -la /tmp", "arguments": {}}
+        yield {"type": "tool_call", "id": "c2", "name": "Reading listing tmp", "arguments": {}}
+        yield {"type": "done", "finish_reason": "tool_calls"}
+
+
+class TestOpenAIToolCallFinishReasonRegression:
+    """Regression: finish_reason=tool_calls only without text; names are sanitized."""
+
+    _CHAT = {"model": "claude-sonnet-4.6", "messages": [{"role": "user", "content": "q"}]}
+
+    def test_non_stream_pure_tool_call_emits_tool_calls(self, sync_client, openai_headers, monkeypatch):
+        """A turn with tool calls and NO content should use finish_reason=tool_calls."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_PureToolCallACP())
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        choice = resp.json()["choices"][0]
+        assert choice["finish_reason"] == "tool_calls"
+
+    def test_stream_pure_tool_call_emits_tool_calls(self, sync_client, openai_headers, monkeypatch):
+        """Streaming pure tool call (no text) should end with finish_reason=tool_calls."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_PureToolCallACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert '"finish_reason": "tool_calls"' in resp.text
+
+    def test_non_stream_tool_call_with_content_emits_stop(self, sync_client, openai_headers, monkeypatch):
+        """A turn with tool calls AND content should use finish_reason=stop (not tool_calls)."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        choice = resp.json()["choices"][0]
+        assert choice["finish_reason"] == "stop", (
+            "finish_reason must be stop when content is present alongside tool_calls "
+            "(kiro-cli already ran the tool and returned the answer)"
+        )
+
+    def test_stream_tool_call_with_content_emits_stop(self, sync_client, openai_headers, monkeypatch):
+        """Streaming a turn with tools + content must end with finish_reason=stop."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_ToolEmittingACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert '"finish_reason": "stop"' in resp.text
+        assert '"finish_reason": "tool_calls"' not in resp.text
+
+    def test_tool_name_sanitization_replaces_invalid_chars(self, sync_client, openai_headers, monkeypatch):
+        """kiro-cli tool names with spaces/colons/slashes are sanitized to valid identifiers."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_DirtyNameToolACP())
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        body = resp.json()
+        tcs = body["choices"][0]["message"]["tool_calls"]
+        names = [tc["function"]["name"] for tc in tcs]
+        assert all(" " not in n for n in names), f"Tool names still contain spaces: {names}"
+        assert all(":" not in n for n in names), f"Tool names still contain colons: {names}"
+        assert all("/" not in n for n in names), f"Tool names still contain slashes: {names}"
+        # Empty name falls back to kiro_tool.
+        assert "kiro_tool" in names
+
+    def test_stream_tool_name_sanitization(self, sync_client, openai_headers, monkeypatch):
+        """Streaming tool names must also be sanitized."""
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_DirtyNameToolACP())
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert "Running: ls" not in resp.text
+        assert "Running__ls" in resp.text or "Running_ls" in resp.text
 
 
 # ---------------------------------------------------------------------------
