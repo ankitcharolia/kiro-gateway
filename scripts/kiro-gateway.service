@@ -4,7 +4,7 @@
 # uses your authenticated session):
 #
 #   cp scripts/kiro-gateway.service ~/.config/systemd/user/kiro-gateway.service
-#   # Edit the file: set WorkingDirectory and the ExecStart .venv path
+#   # Edit the file: set WorkingDirectory and the ExecStart .venv path (uv sync creates it)
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now kiro-gateway
 #   systemctl --user status kiro-gateway
@@ -31,7 +31,7 @@ Type=simple
 # Full path to the kiro-gateway repository checkout:
 WorkingDirectory=%h/kiro-gateway
 
-# Path to the Python interpreter inside the virtual environment:
+# Path to the Python interpreter inside the uv-managed venv (run `uv sync` first):
 ExecStart=%h/kiro-gateway/.venv/bin/python %h/kiro-gateway/main.py
 
 # Path to the .env file (must contain at least KIRO_GATEWAY_API_KEY):

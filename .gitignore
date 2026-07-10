@@ -19,6 +19,10 @@ __pycache__/
 dist/
 build/
 
+# uv / virtual environment (uv.lock IS committed)
+.venv/
+kiro/_version.py
+
 # Debug logs (generated when DEBUG_MODE is enabled)
 debug_logs*/
 debug*.json

@@ -20,50 +20,46 @@ Any attempt to make an unauthorized network call will result in immediate test f
 ### Installing Dependencies
 
 ```bash
-# Main project dependencies
-pip install -r requirements.txt
-
-# Additional testing dependencies
-pip install pytest pytest-asyncio hypothesis
+# Install project + dev dependencies (creates .venv)
+uv sync
 ```
 
 ### Running All Tests
 
 ```bash
 # Run the entire test suite
-pytest
+uv run pytest
 
 # Run with verbose output
-pytest -v
+uv run pytest -v
 
 # Run with verbose output and coverage
-pytest -v -s --tb=short
+uv run pytest -v -s --tb=short
 
 # Run only unit tests
-pytest tests/unit/ -v
+uv run pytest tests/unit/ -v
 
 # Run only integration tests
-pytest tests/integration/ -v
+uv run pytest tests/integration/ -v
 
 # Run a specific file
-pytest tests/unit/test_auth_manager.py -v
+uv run pytest tests/unit/test_auth_manager.py -v
 
 # Run a specific test
-pytest tests/unit/test_auth_manager.py::TestKiroAuthManagerInitialization::test_initialization_stores_credentials -v
+uv run pytest tests/unit/test_auth_manager.py::TestKiroAuthManagerInitialization::test_initialization_stores_credentials -v
 ```
 
 ### pytest Options
 
 ```bash
 # Stop on first failure
-pytest -x
+uv run pytest -x
 
 # Show local variables on errors
-pytest -l
+uv run pytest -l
 
 # Run in parallel mode (requires pytest-xdist)
-pip install pytest-xdist
-pytest -n auto
+uv run --with pytest-xdist pytest -n auto
 ```
 
 ## Test Structure
@@ -149,22 +145,18 @@ When adding new tests:
 # Make sure you're in project root
 cd /path/to/kiro-gateway
 
-# pytest.ini already contains pythonpath = .
-# Just run pytest
-pytest
+# Run tests via uv (deps + venv managed automatically)
+uv run pytest
 ```
 
 ### Tests pass locally but fail in CI
 
-- Check dependency versions in requirements.txt
+- Check dependency versions in pyproject.toml / uv.lock
 - Ensure all mocks correctly isolate external calls
 
 ### Async tests don't work
 
 ```bash
-# Make sure pytest-asyncio is installed
-pip install pytest-asyncio
-
 # Check for @pytest.mark.asyncio decorator
 ```
 
@@ -173,11 +165,8 @@ pip install pytest-asyncio
 To check code coverage:
 
 ```bash
-# Install coverage
-pip install pytest-cov
-
 # Run with coverage report
-pytest --cov=kiro --cov-report=html
+uv run pytest --cov=kiro --cov-report=html
 
 # View report
 open htmlcov/index.html  # macOS/Linux

@@ -77,11 +77,10 @@ routes_openai_shim    routes_anthropic_shim
 ```bash
 git clone https://github.com/ankitcharolia/kiro-gateway.git
 cd kiro-gateway
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+uv sync
 cp .env.example .env   # editar KIRO_GATEWAY_API_KEY
 kiro auth login
-python main.py
+uv run main.py
 ```
 
 ### Opción B — Docker (imagen publicada)
@@ -229,7 +228,7 @@ se convierte en el `cwd` de `session/new`.
 ## Ejecución de Pruebas
 
 ```bash
-pip install -e ".[dev]"
+uv sync
 pytest tests/ -v
 pytest --cov=kiro --cov-report=term-missing
 ```

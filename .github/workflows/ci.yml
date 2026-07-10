@@ -19,27 +19,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6.3.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Cache pip
-        uses: actions/cache@v6.1.0
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
-          restore-keys: ${{ runner.os }}-pip-
+          enable-cache: true
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install pytest-cov  # safety net: ensures coverage plugin is always present
+        run: uv sync --locked
 
       - name: Run tests with coverage
         run: |
-          pytest --tb=short --cov=kiro --cov-report=term-missing --cov-report=xml -q
+          uv run pytest --tb=short --cov=kiro --cov-report=term-missing --cov-report=xml -q
         env:
           KIRO_GATEWAY_API_KEY: test-proxy-key
           COMPLIANCE_MODE: "true"

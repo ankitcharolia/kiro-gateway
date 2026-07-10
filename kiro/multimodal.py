@@ -115,8 +115,8 @@ def _decode_base64(data: str) -> Optional[bytes]:
 def _extract_pdf_text(raw: bytes) -> Optional[str]:
     """Extract text from PDF bytes using ``pypdf``.
 
-    ``pypdf`` is a standard dependency (see ``pyproject.toml`` /
-    ``requirements.txt``), so PDF text extraction works out of the box. Returns
+    ``pypdf`` is a standard dependency (see ``pyproject.toml``), so PDF text
+    extraction works out of the box. Returns
     the extracted text, or ``None`` when the PDF yields no extractable text
     (e.g. a scanned/image-only PDF) or fails to parse — the caller then falls
     back to an explicit placeholder. The import is kept lazy so a broken/absent
