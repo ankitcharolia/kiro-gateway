@@ -173,11 +173,10 @@ KIRO_GATEWAY_API_KEY=change-me          # Secret key clients must send as Bearer
 KIRO_CLI_PATH=kiro-cli           # Override if kiro-cli is not on $PATH
 
 # ── Models ────────────────────────────────────────────────────────────
-# Fallback model list advertised by GET /v1/models before the live catalogue
-# is discovered from kiro-cli. The live list (reported on every session) takes
-# precedence at runtime. The model named in a request is forwarded to kiro-cli
-# via session/set_model, so clients can select any model kiro-cli supports.
-KIRO_MODELS=auto,claude-opus-4.8,claude-sonnet-4.6
+# The gateway opens a warm-up session at startup to discover the live model
+# catalogue from kiro-cli automatically — KIRO_MODELS is an emergency fallback
+# only. Leave it unset (the default) unless kiro-cli is unavailable at startup.
+# KIRO_MODELS=auto,claude-opus-4-8,claude-sonnet-4-6
 # How to handle a requested model that isn't in kiro-cli's live catalogue.
 #   warn (default) = log a warning and fall back to the session default;
 #   strict         = reject with a 404 (native error shape);

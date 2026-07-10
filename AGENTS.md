@@ -450,7 +450,7 @@ take precedence over `.env`).
 |---|---|---|
 | `KIRO_GATEWAY_API_KEY` | `test-proxy-key` | Client auth secret |
 | `KIRO_CLI_PATH` | `kiro-cli` | Path/name of the Kiro CLI binary |
-| `KIRO_MODELS` | `auto,claude-opus-4.8,claude-sonnet-4.6` | Fallback `/v1/models` list before the live catalogue is discovered |
+| `KIRO_MODELS` | `` (none) | Emergency fallback model list for `GET /v1/models` — leave unset; the gateway populates the live catalogue automatically via a warm-up session at startup |
 | `MODEL_VALIDATION` | `warn` | How a requested model absent from the live catalogue is handled: `warn` (log + fall back), `strict` (404 native error), `off` (forward silently). Skipped until the catalogue is known (issue #42). |
 | `MODEL_ALIASES` | `` (none) | Comma-separated `alias=target` pairs rewriting a requested model id to a real kiro-cli model before validation/`set_model` (e.g. `gpt-4o=claude-sonnet-4.6`). |
 | `ENFORCE_MAX_TOKENS` | `false` | When `true`, the gateway caps output at `max_tokens` (`finish_reason=length`). `stop` sequences are always enforced when sent. kiro-cli honors neither over ACP (issue #32). |
