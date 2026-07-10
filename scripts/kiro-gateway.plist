@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Kiro Gateway — macOS launchd agent (runs under your user account so
+  kiro-cli can access your authenticated session).
+
+  Installation:
+    1. Copy this file and edit the placeholders (see comments below):
+         cp scripts/kiro-gateway.plist ~/Library/LaunchAgents/com.kiro.gateway.plist
+         # Edit ~/Library/LaunchAgents/com.kiro.gateway.plist
+
+    2. Load (and start) the agent:
+         launchctl load -w ~/Library/LaunchAgents/com.kiro.gateway.plist
+
+    3. Check status / view logs:
+         launchctl list | grep kiro
+         tail -f /tmp/kiro-gateway.stdout.log
+         tail -f /tmp/kiro-gateway.stderr.log
+
+  To stop and unload:
+    launchctl unload ~/Library/LaunchAgents/com.kiro.gateway.plist
+
+  To restart after editing the plist:
+    launchctl unload ~/Library/LaunchAgents/com.kiro.gateway.plist
+    launchctl load -w ~/Library/LaunchAgents/com.kiro.gateway.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kiro.gateway</string>
+
+    <!-- ── Edit the paths below to match your setup ──────────────────── -->
+
+    <!-- Full path to the Python interpreter inside your virtual environment.
+         Run `which python` after `source .venv/bin/activate` to find this.  -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOUR_USERNAME/kiro-gateway/.venv/bin/python</string>
+        <string>/Users/YOUR_USERNAME/kiro-gateway/main.py</string>
+    </array>
+
+    <!-- Working directory — the repository checkout root.                  -->
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USERNAME/kiro-gateway</string>
+
+    <!-- Environment variables. At minimum set KIRO_GATEWAY_API_KEY.
+         Alternatively, point to your .env file via EnvironmentVariables and
+         a wrapper script that sources it — launchd does not load .env files
+         natively. The simplest approach is to list all required vars here.  -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>KIRO_GATEWAY_API_KEY</key>
+        <string>change-me</string>
+        <!-- Optional overrides (defaults are usually fine):
+        <key>KIRO_CLI_PATH</key>
+        <string>kiro-cli</string>
+        <key>SERVER_PORT</key>
+        <string>8000</string>
+        -->
+    </dict>
+    <!-- ─────────────────────────────────────────────────────────────── -->
+
+    <!-- Start automatically when the user logs in.                         -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart if the process exits.                                       -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Log files — readable with `tail -f`.                               -->
+    <key>StandardOutPath</key>
+    <string>/tmp/kiro-gateway.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/kiro-gateway.stderr.log</string>
+</dict>
+</plist>

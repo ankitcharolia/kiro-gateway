@@ -1,0 +1,55 @@
+# Kiro Gateway — systemd service unit
+#
+# Installation (user-level, recommended — runs under your account so kiro-cli
+# uses your authenticated session):
+#
+#   cp scripts/kiro-gateway.service ~/.config/systemd/user/kiro-gateway.service
+#   # Edit the file: set WorkingDirectory and the ExecStart .venv path
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now kiro-gateway
+#   systemctl --user status kiro-gateway
+#
+# To follow logs:
+#   journalctl --user -u kiro-gateway -f
+#
+# System-level installation (if you need the gateway available before login):
+#
+#   sudo cp scripts/kiro-gateway.service /etc/systemd/system/kiro-gateway.service
+#   # Edit the file: set User, WorkingDirectory, EnvironmentFile, ExecStart
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kiro-gateway
+
+[Unit]
+Description=Kiro Gateway — ACP-compliant OpenAI/Anthropic bridge for kiro-cli
+Documentation=https://github.com/ankitcharolia/kiro-gateway
+After=network.target
+
+[Service]
+Type=simple
+
+# ── Edit these three lines to match your setup ───────────────────────────────
+# Full path to the kiro-gateway repository checkout:
+WorkingDirectory=%h/kiro-gateway
+
+# Path to the Python interpreter inside the virtual environment:
+ExecStart=%h/kiro-gateway/.venv/bin/python %h/kiro-gateway/main.py
+
+# Path to the .env file (must contain at least KIRO_GATEWAY_API_KEY):
+EnvironmentFile=%h/kiro-gateway/.env
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Restart the process if it exits unexpectedly.
+Restart=on-failure
+RestartSec=5s
+
+# Capture stdout/stderr in the journal.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kiro-gateway
+
+# Security hardening (user-level service — adjust if running as root).
+# PrivateTmp=true
+# NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

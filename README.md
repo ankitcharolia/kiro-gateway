@@ -31,7 +31,7 @@ surfaces:
 ### Full request path
 
 ```
-OpenCode / Hermes-agent / Kilo Code / Craft-agent / OpenClaw
+OpenCode / Hermes-agent / Kilo Code / Claude Code / OpenClaw
               (any OpenAI or Anthropic API client)
                              │
             ┌────────────────┴─────────────────┐
@@ -93,7 +93,7 @@ For tools that only understand the OpenAI API (Cursor, Cline, Continue, OpenCode
 
 ### 3. Anthropic shim
 
-For tools that only understand the Anthropic API (Claude Code, Kilo Code, Craft-agent, OpenClaw, Oh My Pi, …).
+For tools that only understand the Anthropic API (Claude Code, Kilo Code, OpenClaw, Oh My Pi, …).
 
 | Endpoint | Description |
 |---|---|
@@ -142,6 +142,22 @@ kiro-cli login
 python main.py
 # Gateway is now listening on http://localhost:8000
 ```
+
+---
+
+## Run as a service
+
+Start automatically on login and restart on crash — no terminal required.
+
+```bash
+bash scripts/install-service.sh            # install & start
+bash scripts/install-service.sh --uninstall  # remove
+```
+
+The script auto-detects your repo root and venv, writes the platform-native
+service file (`systemd` on Linux, `launchd` on macOS), and starts the gateway.
+Template files with comments are in `scripts/kiro-gateway.service` (Linux) and
+`scripts/kiro-gateway.plist` (macOS) if you prefer to configure manually.
 
 ---
 
@@ -241,7 +257,7 @@ _(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, Oh My Pi, …)_
 
 ### Anthropic-compatible clients
 
-_(Claude Code, Kilo Code, Craft-agent, OpenClaw, Oh My Pi, …)_
+_(Claude Code, Kilo Code, OpenClaw, Oh My Pi, …)_
 
 | Setting | Value |
 |---|---|
@@ -328,45 +344,6 @@ on a non-streaming completion or as a streaming error event.
 
 ---
 
-## Embeddings (not supported — by design)
-
-`POST /v1/embeddings` returns **`501 Not Implemented`** in the OpenAI-native
-error envelope (`{"error": {"type": "invalid_request_error", "code":
-"embeddings_not_supported", "message": …}}`). kiro-cli over ACP exposes **no
-embeddings model** — it only generates text — so the gateway has no compliant
-way to produce embedding vectors. It deliberately neither 404s (clients read
-that as a misconfigured base URL) nor fabricates vectors (which would silently
-corrupt search results).
-
-**Harness features that depend on embeddings will not work through this
-gateway**, including:
-
-- **RAG / document indexing** (building a vector store over a codebase or docs).
-- **Semantic code search** (embedding-based "find similar code").
-- **Embedding-based long-term memory** (vector recall of past context).
-
-Chat/completion features are unaffected — only the embeddings step fails, with a
-clear, parseable `501`.
-
-### Decision: no built-in embeddings passthrough
-
-A built-in opt-in passthrough to a user-configured embeddings provider was
-**considered and declined**. It would require the gateway to **hold a
-third-party API credential** and **transmit request data to an endpoint outside
-kiro-cli** — both of which break the project's foundational compliance model
-(*only the official binary is invoked; no credential handling; no routing
-through other providers*). Embeddings are therefore kept entirely out of this
-gateway.
-
-**Recommended pattern:** point your harness's **embedding model** at a dedicated
-embeddings provider directly (e.g. an OpenAI/local-embeddings endpoint),
-configured separately from this gateway, while the **chat/completion model**
-points at the gateway. Most harnesses let you configure the embedding and chat
-providers independently. This keeps embeddings fully outside the single-account,
-credential-free compliance path.
-
----
-
 ## System & developer roles
 
 Instruction provenance is preserved rather than flattened into anonymous user
@@ -419,36 +396,6 @@ separated by blank lines:
   in the prompt history.
 
 ---
-
-## Image & document input
-
-The gateway forwards **image** attachments to kiro-cli and surfaces
-**documents/audio** as text instead of silently dropping them. Capability ground
-truth — verified against a **live kiro-cli 2.10.0 probe** (`initialize` →
-`agentCapabilities.promptCapabilities`): `{"image": true, "audio": false,
-"embeddedContext": false}`.
-
-| Input | Behaviour |
-|---|---|
-| OpenAI `image_url` / Responses `input_image` — **base64 data URL** | Forwarded to kiro-cli as an ACP image content block (`{"type":"image","mimeType":…,"data":…}`) |
-| Anthropic `image` — **base64 source** | Forwarded as an ACP image content block |
-| Image given as a **remote URL** | **Not fetched** (kiro-cli has no URL content-block capability; fetching untrusted URLs server-side is an SSRF risk). Surfaced as text: `[image: <url> (remote URL not fetched …)]` |
-| **Text-like document** (`text/*`, JSON, XML, CSV, …) | Decoded and injected as text: `[document: <name>]\n<content>` — the model reads it |
-| **PDF document** | Text extracted with `pypdf` (a standard dependency) — works out of the box; a scanned/image-only PDF that yields no text falls back to a placeholder |
-| **Other binary document** / **audio** | Explicit placeholder (`[document: … omitted — unsupported by kiro-cli]` / `[audio omitted …]`) — never a silent drop |
-
-- **Both shims, both modes.** Images are forwarded on OpenAI `/v1/chat/completions`,
-  OpenAI `/v1/responses`, and Anthropic `/v1/messages`, in streaming and
-  non-streaming paths. Verified end-to-end against the live probe: a forwarded
-  32×32 PNG made the model answer with the image's colour.
-- **Why documents aren't forwarded as binary.** kiro-cli advertises
-  `embeddedContext: false`, so it rejects embedded resources on the wire. The
-  gateway therefore reduces documents to text (extracted or placeholder) so the
-  model is always aware an attachment existed.
-- **Prompt shape.** Images travel as their own ACP content blocks appended after
-  the labelled text transcript, with an inline `[image]` marker left in the turn
-  text to mark where each appeared (ACP content blocks carry no role; see
-  [Multi-turn & tool history fidelity](#multi-turn--tool-history-fidelity)).
 
 ---
 
@@ -571,66 +518,6 @@ They are forwarded (not dropped) so they take effect automatically if a future
 > Strict schemas are accepted either way (the Oh My Pi `disableStrictTools`
 > workaround is no longer needed), though strict enforcement is still inert. See
 > [issue #35](https://github.com/ankitcharolia/kiro-gateway/issues/35).
-
----
-
-## Usage & token accounting
-
-Both shims return a `usage` object on every completion. The gateway **prefers
-real counts** reported by `kiro-cli` and otherwise falls back to a **consistent
-local tokenizer estimate** (tiktoken `cl100k_base` + a Claude correction
-factor — the same estimator used by `POST /v1/messages/count_tokens`), so a
-usage field is never silently `0`.
-
-| API / mode | Usage surface |
-|---|---|
-| OpenAI `/v1/chat/completions` (non-stream) | `usage.{prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details.cached_tokens}` |
-| OpenAI `/v1/chat/completions` (stream) | a final usage-only chunk (`choices: []`) **when** the request sets `stream_options: {"include_usage": true}` (OpenAI semantics) |
-| OpenAI `/v1/responses` (stream + non-stream) | `usage.{input_tokens, output_tokens, total_tokens, input_tokens_details.cached_tokens}` |
-| Anthropic `/v1/messages` (non-stream) | `usage.{input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens}` |
-| Anthropic `/v1/messages` (stream) | `input_tokens` (+ cache fields) in `message_start`, `output_tokens` in `message_delta` |
-
-- **Real vs. estimated.** Each field is resolved independently: a reported,
-  positive count wins; otherwise it's estimated. `kiro-cli` 2.x reports no usage
-  over ACP today (its `/usage` is an interactive REPL command, not part of the
-  `session/prompt` result), so most counts are estimates — but the gateway
-  already reads any usage `kiro-cli` emits (prompt result, `session/update`, or
-  `_meta`), so real counts surface automatically if a future version provides
-  them. `/usage` is not a harness feature (harnesses read the `usage` object,
-  not the slash command). Estimates are for budgeting, not exact billing.
-
-- **Real usage/cost/context metadata (`usage.kiro_metadata`).** kiro-cli *does*
-  emit real usage signals on ACP notifications, which the gateway captures and
-  surfaces **additively** under `usage.kiro_metadata` (present only when
-  kiro-cli reports something — the native token fields are unchanged). Verified
-  against a live kiro-cli 2.12.0 probe:
-  - **v2** (`_kiro.dev/metadata`): `credits` (per-turn cost, summed from
-    `meteringUsage`), `context_usage_percentage` (context-window fill), and
-    `turn_duration_ms` (turn latency).
-  - **v3** (`session_info_update.contextUsage`): `context_usage_percentage`
-    plus a per-category token `context_breakdown` and its `context_tokens` sum
-    (parsed forward-compatibly; reachable once the v3 auth blocker is resolved).
-
-  `meteringUsage` is **credits, not tokens**, so it is never mapped into the
-  `*_tokens` fields. The metadata rides `usage.kiro_metadata` on both shims
-  (streaming and non-streaming) and the ACP route's `done` event.
-
-### Prompt caching (no-op, but reported)
-
-Prompt caching is **not available over ACP** (kiro-cli advertises no caching
-capability). So Anthropic `cache_control` markers are **accepted as a no-op**
-(validated, never a 422), and the native cache-token fields are **reported (as
-`0`) rather than omitted**, keeping the `usage` shape faithful: Anthropic
-`usage.cache_creation_input_tokens` / `cache_read_input_tokens`, OpenAI chat
-`usage.prompt_tokens_details.cached_tokens`, OpenAI Responses
-`usage.input_tokens_details.cached_tokens`. They are never estimated and surface
-real counts verbatim if a future `kiro-cli` reports them.
-
-### logprobs (unsupported)
-
-The ACP path exposes no token log-probabilities. The OpenAI shim accepts
-`logprobs` / `top_logprobs` for compatibility and reports `"logprobs": null` per
-choice; the Anthropic Messages API has no logprobs feature.
 
 ---
 
