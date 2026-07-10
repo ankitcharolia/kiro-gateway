@@ -107,6 +107,22 @@ async def lifespan(app: FastAPI):
     await acp_client.start()
     await acp_client.initialize()
 
+    # Warm-up: open and immediately close a session so the live model catalogue
+    # is populated before the first real request. This makes KIRO_MODELS a pure
+    # fallback (only needed if kiro-cli fails to start) rather than a required
+    # static list.
+    try:
+        warmup_session_id = await acp_client.new_session()
+        logger.info(
+            f"Model catalogue populated from kiro-cli: "
+            f"{[m['id'] for m in acp_client.available_models]}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            f"Warm-up session failed ({exc}); model list falls back to KIRO_MODELS. "
+            "The gateway will still serve requests."
+        )
+
     app.state.acp_client = acp_client
     app.state.shim_service = ShimService(acp_client)
 
