@@ -190,12 +190,18 @@ def _summarize_json_output(payload: Any) -> str:
 
     * **grep** — ``{"numMatches", "numFiles", …}`` → a one-line match summary.
     * **glob** — ``{"filePaths"|"totalFiles", …}`` → a one-line file-count summary.
+    * **web_search** — ``{"results": [{"title", "url", "snippet"}, …]}`` → a short
+      list of the top result titles/URLs. Verified against a live kiro-cli 2.12.0
+      probe: web_search runs as a ``search``-kind tool whose result is this
+      ``Json`` shape — without this branch the results are dropped from the
+      activity view (inconsistent with grep/glob, which are summarised).
     * **execute (shell)** — ``{"exit_status", "stdout", "stderr"}`` → the command's
       stdout/stderr text, with a ``[exit: …]`` marker appended when the command
       failed (non-zero exit) so a failing command is visible even with no output.
-      Verified against a live kiro-cli 2.12.0 probe: shell output arrives as this
-      ``Json`` shape, **not** as a ``Text`` item — so without this branch the
-      output (and any failure) is silently dropped from the activity view.
+      Verified against a live kiro-cli 2.12.0 probe: shell output (and ``use_aws``,
+      which also runs as an ``execute``-kind tool) arrives as this ``Json`` shape,
+      **not** as a ``Text`` item — so without this branch the output (and any
+      failure) is silently dropped from the activity view.
 
     Args:
         payload: The ``Json`` value from a tool ``rawOutput`` item.
@@ -221,6 +227,26 @@ def _summarize_json_output(payload: Any) -> str:
         if count is None:
             count = len(payload.get("filePaths") or [])
         return f"{count} file(s) found"
+    # web_search: {"results": [{"title", "url", "snippet"}, ...]}. Checked after
+    # grep (whose result items are file/matches, not title/url, and which is
+    # caught by numMatches above) so the two never collide.
+    results = payload.get("results")
+    if (
+        isinstance(results, list) and results
+        and isinstance(results[0], dict)
+        and ("title" in results[0] or "url" in results[0])
+    ):
+        lines = [f"{len(results)} result(s):"]
+        for entry in results[:5]:
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title") or "").strip()
+            url = str(entry.get("url") or "").strip()
+            if title and url:
+                lines.append(f"- {title} ({url})")
+            elif title or url:
+                lines.append(f"- {title or url}")
+        return "\n".join(lines)
     # execute (shell): {"exit_status": "exit status: N", "stdout": ..., "stderr": ...}
     if "exit_status" in payload or "stdout" in payload or "stderr" in payload:
         stdout = str(payload.get("stdout") or "").rstrip()
