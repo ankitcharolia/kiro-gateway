@@ -1710,6 +1710,51 @@ class TestStructuredToolRendering:
         assert "command not found" in rendered
         assert "[exit: 127]" in rendered
 
+    def test_use_aws_bare_exit_code_marker(self):
+        """use_aws runs as an execute-kind tool; its exit_status is a bare number
+        (e.g. "253"), not "exit status: N". The failure marker must still appear."""
+        out = ACPClient._extract_tool_output({"items": [{"Json": {
+            "exit_status": "253", "stdout": "",
+            "stderr": "\naws: [ERROR]: An error occurred (NoCredentials)...\n"}}]})
+        assert "NoCredentials" in out
+        assert "[exit: 253]" in out
+
+    # --- web_search tool output ({"results": [{"title","url","snippet"}]}) ---
+
+    def test_web_search_results_summarized(self):
+        """web_search results are summarised as a short title/URL list."""
+        out = ACPClient._extract_tool_output({"items": [{"Json": {"results": [
+            {"title": "IANA Reserved Domains", "url": "https://res-dom.iana.org/",
+             "snippet": "example.com and example.org ..."},
+            {"title": "Example Domain", "url": "https://example.com/", "snippet": "..."},
+        ]}}]})
+        assert "2 result(s)" in out
+        assert "IANA Reserved Domains" in out
+        assert "https://res-dom.iana.org/" in out
+
+    def test_web_search_rendered_in_search_branch(self):
+        """render_tool_activity surfaces web_search results inline under the search kind."""
+        out = ACPClient._extract_tool_output({"items": [{"Json": {"results": [
+            {"title": "T1", "url": "https://a.example/"}]}}]})
+        rendered = render_tool_activity(
+            {"type": "tool_call_update", "kind": "search", "output": out})
+        assert "T1" in rendered
+        assert "↳" in rendered
+
+    def test_web_search_title_only(self):
+        """A result with only a title (no url) still renders."""
+        out = ACPClient._extract_tool_output(
+            {"items": [{"Json": {"results": [{"title": "Only Title"}]}}]})
+        assert "Only Title" in out
+
+    def test_grep_results_not_mistaken_for_web_search(self):
+        """A grep result (has numMatches; result items are file/matches) is still
+        summarised as grep, never as web_search, despite carrying a `results` key."""
+        out = ACPClient._extract_tool_output({"items": [{"Json": {
+            "numMatches": 3, "numFiles": 2,
+            "results": [{"file": "x", "matches": ["a"]}]}}]})
+        assert out == "3 match(es) in 2 file(s)"
+
 
 # ---------------------------------------------------------------------------
 # Multi-turn prompt serialization (issue #43): the stateless gateway carries
