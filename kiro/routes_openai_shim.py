@@ -197,6 +197,35 @@ def _oai_messages_to_acp(messages: list[OAIMessage]) -> list[PromptMessage]:
     return result
 
 
+import re as _re
+
+_INVALID_TOOL_NAME_CHARS = _re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _sanitize_tool_name(name: str) -> str:
+    """Sanitize a tool name to be a valid OpenAI / Anthropic function name.
+
+    kiro-cli's built-in tools emit descriptive titles like "Running: ls -la /tmp"
+    or "Reading listing tmp" as tool names. These contain spaces, colons, slashes
+    and other characters that are rejected by harness function-name validators
+    (``^[a-zA-Z0-9_-]+$``). This function replaces every invalid character with
+    ``_`` and collapses consecutive underscores, ensuring the name is always
+    accepted without changing its recognisable meaning.
+
+    Args:
+        name: Raw tool call title from kiro-cli.
+
+    Returns:
+        Sanitized, API-valid function name (falls back to ``kiro_tool`` when
+        the result is empty after cleaning).
+    """
+    if not name:
+        return "kiro_tool"
+    sanitized = _INVALID_TOOL_NAME_CHARS.sub("_", name)
+    sanitized = _re.sub(r"_+", "_", sanitized).strip("_")
+    return sanitized or "kiro_tool"
+
+
 def _acp_tool_calls_to_oai(tool_calls: list[dict]) -> list[dict]:
     """Convert ACP ToolCall list to OpenAI tool_calls format."""
     result = []
@@ -205,7 +234,7 @@ def _acp_tool_calls_to_oai(tool_calls: list[dict]) -> list[dict]:
             "id": tc.get("id", str(uuid.uuid4())),
             "type": "function",
             "function": {
-                "name": tc.get("name", ""),
+                "name": _sanitize_tool_name(tc.get("name", "")),
                 "arguments": json.dumps(tc.get("arguments", {})),
             },
         })
@@ -403,7 +432,16 @@ async def chat_completions(
         return _openai_error_response(mapped)
 
     tool_calls = _acp_tool_calls_to_oai(result.get("tool_calls", []))
-    finish_reason = "tool_calls" if tool_calls else result.get("finish_reason", "stop")
+    # Only use finish_reason=tool_calls when tool calls are present AND no text
+    # content was produced. When kiro-cli runs its own built-in tools and then
+    # produces a text answer, both are present — in that case the turn is
+    # complete and the harness must not loop waiting for tool results that
+    # kiro-cli already resolved internally.
+    finish_reason = (
+        "tool_calls"
+        if tool_calls and not result.get("content")
+        else result.get("finish_reason", "stop")
+    )
 
     usage = normalize_usage(
         result.get("usage"),
@@ -550,7 +588,7 @@ async def _stream_response(
 
             elif etype == "tool_call":
                 tc_id = event.get("id", str(uuid.uuid4()))
-                name = event.get("name", "")
+                name = _sanitize_tool_name(event.get("name", ""))
                 arguments = event.get("arguments", {})
                 collected_tool_calls[tc_id] = {"name": name, "arguments": arguments}
                 if tc_id not in active_tool_idx:
@@ -574,8 +612,17 @@ async def _stream_response(
                     }]})
 
             elif etype == "done":
-                finish_reason = "tool_calls" if active_tool_idx else (
-                    event.get("finish_reason") or "stop"
+                # Only use finish_reason=tool_calls when tool calls were emitted
+                # AND no text content was streamed. When kiro-cli runs its own
+                # built-in tools mid-turn and also produces a text answer,
+                # active_tool_idx is non-empty but the turn is complete —
+                # returning tool_calls would cause harnesses (Claude Code,
+                # OpenCode) to loop waiting for tool results that kiro-cli
+                # already resolved internally.
+                finish_reason = (
+                    "tool_calls"
+                    if active_tool_idx and not text_acc
+                    else (event.get("finish_reason") or "stop")
                 )
                 yield chunk({}, finish_reason=finish_reason)
                 if include_usage:
@@ -1096,7 +1143,7 @@ async def _responses_stream(
                     text_item_open = False
 
                 tc_id = event.get("id", f"call_{uuid.uuid4().hex[:24]}")
-                name = event.get("name", "")
+                name = _sanitize_tool_name(event.get("name", ""))
                 arguments = event.get("arguments", {})
                 if tc_id not in tool_output_index:
                     output_index += 1

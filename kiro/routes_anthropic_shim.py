@@ -32,6 +32,7 @@ Fixes
 from __future__ import annotations
 
 import json
+import re as _re
 import time
 import uuid
 from typing import Any, AsyncIterator, Optional
@@ -52,6 +53,30 @@ from kiro.shim_service import ShimService
 from kiro.tokenizer import estimate_request_tokens, normalize_usage
 
 router = APIRouter(tags=["Anthropic Shim"])
+
+_INVALID_TOOL_NAME_CHARS = _re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _sanitize_tool_name(name: str) -> str:
+    """Sanitize a tool name to be a valid Anthropic tool-use name.
+
+    kiro-cli's built-in tools emit descriptive titles like "Running: ls -la /tmp"
+    or "Reading listing tmp" as tool names. Anthropic requires names matching
+    ``^[a-zA-Z0-9_-]+$``; invalid characters are replaced with ``_`` and
+    consecutive underscores are collapsed.
+
+    Args:
+        name: Raw tool call title from kiro-cli.
+
+    Returns:
+        Sanitized, API-valid tool name (falls back to ``kiro_tool`` when the
+        result is empty after cleaning).
+    """
+    if not name:
+        return "kiro_tool"
+    sanitized = _INVALID_TOOL_NAME_CHARS.sub("_", name)
+    sanitized = _re.sub(r"_+", "_", sanitized).strip("_")
+    return sanitized or "kiro_tool"
 
 
 # ---------------------------------------------------------------------------
@@ -397,11 +422,15 @@ async def create_message(
         content_blocks.append({
             "type": "tool_use",
             "id": tc.get("id", str(uuid.uuid4())),
-            "name": tc.get("name", ""),
+            "name": _sanitize_tool_name(tc.get("name", "")),
             "input": tc.get("arguments", {}),
         })
 
-    if result.get("tool_calls"):
+    if result.get("tool_calls") and not result["content"]:
+        # Only use stop_reason=tool_use when tool calls are present AND no text
+        # content was produced. When kiro-cli runs its own built-in tools and
+        # then streams a text answer, both are present — in that case the turn
+        # is complete and the harness must not loop waiting for tool results.
         stop_reason = "tool_use"
     else:
         # Map the internal finish_reason to Anthropic vocabulary so gateway-side
@@ -589,7 +618,7 @@ async def _stream_response(
 
             elif etype == "tool_call":
                 tc_id = event.get("id", str(uuid.uuid4()))
-                name = event.get("name", "")
+                name = _sanitize_tool_name(event.get("name", ""))
                 arguments = event.get("arguments", {})
                 collected_tool_calls[tc_id] = {"name": name, "arguments": arguments}
 
@@ -639,7 +668,13 @@ async def _stream_response(
                     yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
 
                 usage = event.get("usage", {}) or {}
-                stop_reason = "tool_use" if active_tool_blocks else (
+                # Only use stop_reason=tool_use when tool blocks were emitted AND
+                # no text content was streamed. When kiro-cli runs its own built-in
+                # tools and then produces a text answer, active_tool_blocks is
+                # non-empty but the turn is complete — returning tool_use would
+                # cause Claude Code / Kilo Code to loop waiting for tool results
+                # that kiro-cli already resolved internally.
+                stop_reason = "tool_use" if active_tool_blocks and not text_acc else (
                     event.get("finish_reason") or "end_turn"
                 )
                 # Normalise OpenAI-style finish reasons to Anthropic vocabulary.
