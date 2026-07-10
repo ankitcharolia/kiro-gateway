@@ -35,27 +35,35 @@ def test_openai_models_object_field(sync_client, openai_headers):
 
 
 def test_openai_models_fallback_uses_current_dotted_ids(sync_client, openai_headers):
-    """With no live catalogue, /v1/models serves the configured fallback ids.
+    """With no live catalogue, /v1/models serves normalised (hyphenated) model ids.
 
-    The fallback uses kiro-cli's real dotted model ids (e.g. claude-sonnet-4.6),
-    never the old stale dash-style ids.
+    kiro-cli reports dotted ids (e.g. claude-sonnet-4.6); the gateway normalises
+    them to hyphenated form (claude-sonnet-4-6) so Claude Code 2.x recognises them.
     """
     response = sync_client.get("/v1/models", headers=openai_headers)
     ids = [m["id"] for m in response.json()["data"]]
-    assert "claude-sonnet-4.6" in ids
+    assert "claude-sonnet-4-6" in ids
+    assert "claude-sonnet-4.6" not in ids
     # The stale dash-style id must no longer be advertised.
     assert "claude-sonnet-4-5" not in ids
 
 
 def test_openai_models_serves_live_catalogue_when_present(sync_client, openai_headers):
-    """When the ACP client has discovered models, /v1/models reflects them."""
+    """When the ACP client has discovered models, /v1/models normalises them.
+
+    'auto' is kept for non-Claude-Code harnesses. 'claude-auto' is appended as
+    an extra entry so Claude Code's ^(claude|anthropic) discovery filter also
+    includes it in the /model picker. Both route to kiro's auto model.
+    """
     sync_client.app.state.shim_service.available_models = lambda: [
         {"id": "auto", "name": "auto", "description": ""},
         {"id": "claude-opus-4.8", "name": "claude-opus-4.8", "description": ""},
     ]
     response = sync_client.get("/v1/models", headers=openai_headers)
     ids = [m["id"] for m in response.json()["data"]]
-    assert ids == ["auto", "claude-opus-4.8"]
+    assert "auto" in ids
+    assert "claude-auto" in ids
+    assert "claude-opus-4-8" in ids
 
 
 # ---------------------------------------------------------------------------

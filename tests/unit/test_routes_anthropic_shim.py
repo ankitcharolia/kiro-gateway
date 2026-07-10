@@ -24,10 +24,12 @@ def test_anthropic_models_endpoint(sync_client, anthropic_headers):
 
 @pytest.mark.asyncio
 async def test_anthropic_list_models_fallback_dotted_ids():
-    """Anthropic list_models falls back to current dotted model ids.
+    """Anthropic list_models falls back to normalised (hyphenated) model ids.
 
     The handler is tested directly because the OpenAI shim also registers
     /v1/models and shadows the Anthropic route in the mounted app.
+    kiro-cli reports dotted ids (e.g. claude-sonnet-4.6); the gateway normalises
+    them to hyphenated form (claude-sonnet-4-6) so Claude Code 2.x recognises them.
     """
     from unittest.mock import MagicMock
 
@@ -38,14 +40,15 @@ async def test_anthropic_list_models_fallback_dotted_ids():
     result = await list_models(shim=shim)
 
     ids = [m["id"] for m in result["data"]]
-    assert "claude-sonnet-4.6" in ids
+    assert "claude-sonnet-4-6" in ids
+    assert "claude-sonnet-4.6" not in ids
     assert "claude-sonnet-4-5" not in ids
     assert all(m["type"] == "model" for m in result["data"])
 
 
 @pytest.mark.asyncio
 async def test_anthropic_list_models_serves_live_catalogue():
-    """Anthropic list_models reflects the live catalogue when present."""
+    """Anthropic list_models normalises live catalogue ids to hyphenated form."""
     from unittest.mock import MagicMock
 
     from kiro.routes_anthropic_shim import list_models
@@ -56,7 +59,7 @@ async def test_anthropic_list_models_serves_live_catalogue():
     ])
     result = await list_models(shim=shim)
 
-    assert result["data"][0]["id"] == "claude-opus-4.8"
+    assert result["data"][0]["id"] == "claude-opus-4-8"
     assert result["data"][0]["display_name"] == "Opus 4.8"
 
 

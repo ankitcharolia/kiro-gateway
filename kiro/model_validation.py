@@ -54,6 +54,14 @@ def resolve_alias(model: Optional[str], aliases: dict) -> Optional[str]:
     a real kiro-cli model before validation and ``session/set_model``. A model
     with no alias entry is returned unchanged.
 
+    Also auto-reverses the gateway's own normalisation: kiro-cli reports model
+    ids with dotted minor versions (``claude-opus-4.8``) but the gateway
+    advertises them in hyphenated form (``claude-opus-4-8``) so Claude Code
+    2.x can recognise them. When a client requests a hyphenated id that isn't
+    in the explicit alias table, the function converts it back to dotted form
+    automatically — so you don't need a ``MODEL_ALIASES`` entry for every
+    kiro-cli model just because of the dot/hyphen difference.
+
     Args:
         model: The requested model id (may be ``None``).
         aliases: The ``{alias: target}`` map (``settings.MODEL_ALIASES``).
@@ -61,12 +69,33 @@ def resolve_alias(model: Optional[str], aliases: dict) -> Optional[str]:
     Returns:
         The resolved model id (or the original when no alias applies).
     """
-    if not model or not aliases:
+    import re
+
+    if not model:
         return model
-    target = aliases.get(model)
-    if target and target != model:
-        logger.info(f"Model alias: '{model}' -> '{target}'")
-        return target
+
+    # Explicit alias table wins first.
+    if aliases:
+        target = aliases.get(model)
+        if target and target != model:
+            logger.info(f"Model alias: '{model}' -> '{target}'")
+            return target
+
+    # Reverse the "auto" → "claude-auto" normalisation the gateway applies
+    # to /v1/models so Claude Code's discovery filter accepts it.
+    if model == "claude-auto":
+        logger.debug("Model auto-denormalise: 'claude-auto' -> 'auto'")
+        return "auto"
+
+    # Auto-reverse the dot→hyphen normalisation the gateway applies to /v1/models.
+    # e.g. "claude-opus-4-8" -> "claude-opus-4.8", "claude-sonnet-4-6" -> "claude-sonnet-4.6"
+    # Only applied to claude-*-<major>-<minor> shaped ids to avoid mangling
+    # unrelated model names (gpt-4o, gemini-1.5-pro, etc.).
+    auto = re.sub(r'^(claude-\w+-\d+)-(\d+)$', r'\1.\2', model)
+    if auto != model:
+        logger.debug(f"Model auto-denormalise: '{model}' -> '{auto}'")
+        return auto
+
     return model
 
 

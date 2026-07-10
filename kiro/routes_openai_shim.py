@@ -216,6 +216,27 @@ def _get_shim(request: Request) -> ShimService:
     return request.app.state.shim_service
 
 
+def _normalise_model_id(model_id: str) -> str:
+    """Normalise a kiro-cli model ID for external API clients.
+
+    Dotted minor versions are converted to hyphenated form
+    (``claude-opus-4.8`` → ``claude-opus-4-8``) so Claude Code 2.x doesn't
+    trigger its retirement check.  ``auto`` is returned unchanged.
+
+    A separate ``claude-auto`` entry is injected by ``list_models`` alongside
+    ``auto`` so Claude Code's ``^(claude|anthropic)`` discovery filter also
+    picks it up in the ``/model`` picker.
+
+    Args:
+        model_id: Raw model ID from kiro-cli.
+
+    Returns:
+        Normalised model ID safe for external clients.
+    """
+    import re
+    return re.sub(r'\.(\d+)$', r'-\1', model_id)
+
+
 def _openai_error_response(mapped: MappedError) -> JSONResponse:
     """Build a native OpenAI error ``JSONResponse`` from a classified error.
 
@@ -283,11 +304,16 @@ async def list_models(shim: ShimService = Depends(_get_shim)):
     ``DEFAULT_KIRO_MODELS`` so discovery works before the first completion.
     """
     live = shim.available_models()
-    model_ids = [m["id"] for m in live] if live else list(DEFAULT_KIRO_MODELS)
+    model_ids = [_normalise_model_id(m["id"]) for m in live] if live else [_normalise_model_id(m) for m in DEFAULT_KIRO_MODELS]
     models = [
         {"id": model_id, "object": "model", "owned_by": "kiro"}
         for model_id in model_ids
     ]
+    # Claude Code's gateway discovery filter only accepts ^(claude|anthropic) ids.
+    # Inject claude-auto alongside auto so it appears in Claude Code's /model picker
+    # while other harnesses keep the plain auto entry.
+    if "auto" in model_ids:
+        models.append({"id": "claude-auto", "object": "model", "owned_by": "kiro"})
     return {"object": "list", "data": models}
 
 
