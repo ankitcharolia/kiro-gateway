@@ -74,13 +74,17 @@ async def verify_anthropic_key(
 ) -> bool:
     """FastAPI dependency enforcing ``x-api-key`` auth for Anthropic routes.
 
-    Anthropic clients authenticate with the ``x-api-key`` header. An
-    ``Authorization: Bearer`` header is accepted as a fallback so tools that
-    only send Bearer tokens still work against the Anthropic shim.
+    Anthropic clients authenticate with the ``x-api-key`` header.
+    ``Authorization: Bearer`` is also accepted as a fallback.
+
+    When both headers are present (Claude Code gateway mode sends
+    ``Authorization: Bearer <gateway-key>`` *and* ``x-api-key: <cached-anthropic-key>``
+    simultaneously), Bearer is checked first so the gateway key wins over a
+    stale real-Anthropic key that would cause a spurious 401.
 
     Args:
-        x_api_key: ``x-api-key`` header value (preferred).
-        authorization: ``Authorization: Bearer <key>`` header (fallback).
+        x_api_key: ``x-api-key`` header value.
+        authorization: ``Authorization: Bearer <key>`` header.
 
     Returns:
         ``True`` when the key is valid.
@@ -88,6 +92,11 @@ async def verify_anthropic_key(
     Raises:
         HTTPException: ``401`` when no valid key is presented.
     """
-    token = x_api_key or extract_bearer(authorization)
+    bearer = extract_bearer(authorization)
+    # Prefer Bearer: Claude Code in gateway mode sends both headers, and the
+    # Bearer value is the ANTHROPIC_AUTH_TOKEN (the gateway key), while
+    # x-api-key may carry a stale real-Anthropic key from the local credential
+    # cache.  Try Bearer first; fall back to x-api-key only when Bearer is absent.
+    token = bearer or x_api_key
     validate_proxy_key(token)
     return True
