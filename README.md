@@ -225,9 +225,15 @@ KIRO_ACP_EFFORT=                 # --effort: low | medium | high | xhigh | max
 KIRO_ACP_EXTRA_ARGS=             # extra raw args appended verbatim (shell-quoted)
 
 # ── MCP servers (external tools kiro-cli runs itself) ─────────────────
-# The only external-tool channel kiro-cli honors over ACP: registered on every
-# session/new and executed by kiro-cli (mcpCapabilities.http=true, sse=false) —
-# the gateway never runs them, so compliance is preserved. Empty = none.
+# MCP is the only external-tool channel kiro-cli honors over ACP (the gateway
+# never runs the tools, so compliance is preserved). USUALLY YOU DON'T NEED
+# THESE: servers added with `kiro-cli mcp add` (global ~/.kiro/settings/mcp.json
+# or a per-agent config) are auto-loaded by kiro-cli on every ACP session — even
+# when the gateway sends an empty list — so that is the recommended path. The
+# vars below are an OPTIONAL SUPPLEMENT: a list the gateway injects on every
+# session/new, ADDED on top of kiro-cli's own config. Empty (default) = rely on
+# kiro-cli's config. (The gateway cannot read a harness's own MCP config — the
+# OpenAI/Anthropic APIs have no MCP channel.)
 # Provide inline JSON via KIRO_MCP_SERVERS OR a file path via KIRO_MCP_CONFIG;
 # each accepts an ACP mcpServers array or the mcp.json object form. An HTTP
 # entry MUST carry type:"http" and headers as an ARRAY — the gateway normalises

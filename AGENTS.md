@@ -204,18 +204,34 @@ Two distinct cases — do not conflate them:
 
 ## MCP servers (external tools kiro-cli runs itself)
 
-MCP servers registered on `session/new`'s `mcpServers` are the **only**
-external-tool channel kiro-cli honors over ACP (`mcpCapabilities.http: true`,
-`sse: false`); kiro-cli executes them itself, so **compliance is preserved** —
-the gateway never runs the tools. `config._load_mcp_servers` reads
-`KIRO_MCP_SERVERS` (inline JSON) or `KIRO_MCP_CONFIG` (file path); each accepts
-an ACP `mcpServers` array or the `mcp.json` object form (`{"mcpServers":
-{"<name>": {...}}}` / bare `{"<name>": {...}}`) normalised to the array shape.
-`main.py` passes `settings.MCP_SERVERS` to `ACPClient(mcp_servers=…)`, which
-stores them as the per-session default; `new_session(mcp_servers=…)` accepts a
-per-call override, and the **warm-up session passes `[]`** so a
-misconfigured/unreachable server can't block startup. Default is `[]` —
-behaviour is unchanged unless configured.
+There are **two** ways an MCP server reaches a session, and they **compose**:
+
+1. **kiro-cli's own native config (recommended, zero gateway config).** Servers
+   added via `kiro-cli mcp add` (global `~/.kiro/settings/mcp.json` or a
+   per-agent `~/.kiro/agents/<name>.json` `mcpServers` map) are **auto-loaded by
+   `kiro-cli acp` on every session** — verified against a live kiro-cli 2.12.1
+   probe: a globally-added server's tool was callable even when the gateway sent
+   `session/new mcpServers: []`. So the default (`settings.MCP_SERVERS == []`)
+   is **not** "no MCP" — it's "whatever the operator configured in kiro-cli."
+2. **Gateway-injected list (optional supplement).** `settings.MCP_SERVERS`
+   (`KIRO_MCP_SERVERS` inline JSON / `KIRO_MCP_CONFIG` file) is forwarded on
+   `session/new`'s `mcpServers` and is **additive** on top of the native config
+   (the empty client list did not suppress native servers). Use it for servers
+   you want scoped to the gateway rather than kiro-cli's global/agent config.
+
+Either way kiro-cli executes the tools itself, so **compliance is preserved** —
+the gateway never runs them. The gateway **cannot** ingest a *harness's* own MCP
+config: the OpenAI/Anthropic wire APIs have no MCP channel, and harness-side MCP
+tools arrive as client-declared `tools`, which kiro-cli ignores over ACP
+(issue #31).
+
+`config._load_mcp_servers` reads `KIRO_MCP_SERVERS` (inline JSON) or
+`KIRO_MCP_CONFIG` (file path); each accepts an ACP `mcpServers` array or the
+`mcp.json` object form (`{"mcpServers": {"<name>": {...}}}` / bare `{"<name>":
+{...}}`) normalised to the array shape. `main.py` passes `settings.MCP_SERVERS`
+to `ACPClient(mcp_servers=…)`, which stores them as the per-session default;
+`new_session(mcp_servers=…)` accepts a per-call override, and the **warm-up
+session passes `[]`** so a misconfigured/unreachable server can't block startup.
 
 **Required wire shape (verified against a live kiro-cli 2.12.1 round-trip).** An
 HTTP MCP entry MUST be `{"type": "http", "name": …, "url": …, "headers":
