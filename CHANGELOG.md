@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.3.0 (2026-07-13)
+
+### Features
+
+* **acp:** configurable spawn args and per-session mode selection ([c5a55b6](https://github.com/ankitcharolia/kiro-gateway/commit/c5a55b6e6f519134079c652ae01657da5c835cda))
+* **usage:** surface real kiro-cli usage/cost/context metadata over ACP ([#56](https://github.com/ankitcharolia/kiro-gateway/pull/56)) ([84f492b](https://github.com/ankitcharolia/kiro-gateway/commit/84f492b21dd38e97f10ab3c81fd133022de284d9))
+* **models:** normalise model IDs for Claude Code 2.x compatibility ([0adfb74](https://github.com/ankitcharolia/kiro-gateway/commit/0adfb7475474185f965983a8e061e33e153578e1))
+* **startup:** warm-up session populates model catalogue dynamically ([efb3dda](https://github.com/ankitcharolia/kiro-gateway/commit/efb3ddae5081b603dd2b547ee9381753fc0ddf1d))
+* **mcp:** register MCP servers, map surfaced tool calls, bound session/new ([0ce9190](https://github.com/ankitcharolia/kiro-gateway/commit/0ce919040568487b963d05674506fae07a743c06))
+
+### Bug Fixes
+
+* **config:** remove inline comments from .env.example to prevent systemd EnvironmentFile parse errors ([e8d87e4](https://github.com/ankitcharolia/kiro-gateway/commit/e8d87e45831b54d606ca33cbd31e090c68efd8c9))
+* **auth:** prefer Bearer over x-api-key when both headers are present ([7b21f94](https://github.com/ankitcharolia/kiro-gateway/commit/7b21f94be34a61704c3adc9af62c12fed3bd1af9))
+* **shims:** stop harness hang on kiro-cli built-in tool activity ([57ac812](https://github.com/ankitcharolia/kiro-gateway/commit/57ac8121a0b7ec8d4181f6eb1c5c0f03d4742f54))
+* **acp:** surface shell (execute) tool output in activity view ([a9673e0](https://github.com/ankitcharolia/kiro-gateway/commit/a9673e0695aabe5923f2cf70221c339cbf81f955))
+* **acp:** surface web_search results in activity view; confirm use_aws coverage ([6fe307c](https://github.com/ankitcharolia/kiro-gateway/commit/6fe307c3ce125e0f9bcd2b3bc6bcab5027cc7dc6))
+
+### Documentation
+
+* **changelog:** update for v2.2.2 [skip ci] ([79b88fc](https://github.com/ankitcharolia/kiro-gateway/commit/79b88fc4942b16639182b9464c70983d6460cc49))
+* correct stale claim that effort has no ACP equivalent ([#55](https://github.com/ankitcharolia/kiro-gateway/pull/55)) ([814ae61](https://github.com/ankitcharolia/kiro-gateway/commit/814ae6198d54145b82db762e9119eb6d313bf311))
+* **examples:** add Claude Code config + fix stale effort/strict notes ([1d3aaee](https://github.com/ankitcharolia/kiro-gateway/commit/1d3aaeed5bf055f3e8d7ad3291bfb125e1bcecdc))
+* replace craft-agent with Claude Code, add service install scripts ([cf35631](https://github.com/ankitcharolia/kiro-gateway/commit/cf3563178f780f42b55037b55965e0d0c6e30e32))
+* **examples:** update Claude Code config for 2.x gateway integration ([cdf3a6f](https://github.com/ankitcharolia/kiro-gateway/commit/cdf3a6f771e3f6e27647032b250d26a6ea72c9f7))
+* remove static KIRO_MODELS value — catalogue is auto-discovered at startup ([37fb676](https://github.com/ankitcharolia/kiro-gateway/commit/37fb6760c0177ec29c12c28dcd9316497fb50b71))
+* **mcp:** clarify native kiro-cli MCP config auto-loads over ACP ([35631a0](https://github.com/ankitcharolia/kiro-gateway/commit/35631a04dbeee8ee1eec5e55cd99596ae220df70))
+
+### CI/CD & Build
+
+* migrate to uv package manager ([dbcf03e](https://github.com/ankitcharolia/kiro-gateway/commit/dbcf03eb58be390fef2e1beebe11b292bbfe22ec))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @github-actions[bot]
+
 ## 2.2.2 (2026-07-09)
 
 ### Documentation
