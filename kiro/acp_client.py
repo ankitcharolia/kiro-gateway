@@ -263,6 +263,33 @@ def _summarize_json_output(payload: Any) -> str:
     return ""
 
 
+# Markdown inline-formatting characters that must be escaped inside a bold label.
+# kiro-cli tool titles are prose that can embed glob patterns / paths (e.g.
+# "Finding **/* in linkedin-agent"); interpolating them raw into ``**…**`` makes
+# the embedded ``*``/`` ` ``/``~`` collide with the bold markers and leak stray
+# literal asterisks into the reasoning channel. ``_`` is deliberately NOT escaped
+# — it is not intraword emphasis in CommonMark and escaping it would mangle the
+# many identifier-style titles/paths (``use_aws``, ``operation_name``).
+_MD_ESCAPE = str.maketrans({c: f"\\{c}" for c in ("\\", "*", "`", "~")})
+
+
+def _escape_md(text: str) -> str:
+    """Escape markdown inline-formatting characters in a label.
+
+    Backslash-escapes ``* ` ~`` (and the backslash itself) so a tool title
+    containing glob/markdown characters cannot break the surrounding ``**…**``
+    bold wrapping when rendered by a harness's markdown renderer. ``_`` is left
+    as-is to avoid mangling identifier-style titles (``use_aws``).
+
+    Args:
+        text: The raw label text (a kiro-cli tool title).
+
+    Returns:
+        The text with markdown-special characters backslash-escaped.
+    """
+    return text.translate(_MD_ESCAPE)
+
+
 def render_tool_activity(event: dict) -> str:
     """Render a streamed tool_call / tool_call_update event as reasoning text.
 
@@ -284,7 +311,7 @@ def render_tool_activity(event: dict) -> str:
         parts: list[str] = []
         name = (event.get("name") or "").strip()
         if name:
-            parts.append(f"**⚙ {name}**")
+            parts.append(f"**⚙ {_escape_md(name)}**")
         args = _format_tool_args(event.get("arguments") or {})
         if args:
             parts.append(args)
@@ -320,7 +347,7 @@ def render_tool_call_summary(tool_call: dict) -> str:
     parts: list[str] = []
     name = (tool_call.get("name") or "").strip()
     if name:
-        parts.append(f"**⚙ {name}**")
+        parts.append(f"**⚙ {_escape_md(name)}**")
     args = _format_tool_args(tool_call.get("arguments") or {})
     if args:
         parts.append(args)

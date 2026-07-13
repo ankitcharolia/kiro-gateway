@@ -1707,6 +1707,24 @@ class TestStructuredToolRendering:
                                     "arguments": {}, "content": []})
         assert "**⚙ use_aws**" in out
 
+    def test_glob_pattern_in_title_escaped(self):
+        # A kiro-cli search title can embed a glob/markdown pattern (e.g.
+        # "Finding **/* in linkedin-agent"); the special chars must be escaped
+        # so they don't break the surrounding **…** bold and leak stray
+        # asterisks into the reasoning channel (see the "* *" screenshot bug).
+        out = render_tool_activity({"type": "tool_call", "name": "Finding **/* in linkedin-agent",
+                                    "kind": "search", "arguments": {}, "content": []})
+        assert "**⚙ Finding \\*\\*/\\* in linkedin-agent**" in out
+        # The raw, unescaped glob must not appear inside the label.
+        assert "Finding **/*" not in out
+
+    def test_title_with_underscores_and_backticks_escaped(self):
+        # Backticks are escaped (they'd start inline code); underscores are left
+        # intact so identifier-style titles/paths aren't mangled with backslashes.
+        out = render_tool_call_summary({"name": "Reading a_b.py `snippet`", "kind": "read",
+                                        "arguments": {}, "content": []})
+        assert "a_b.py \\`snippet\\`" in out
+
     def test_grep_args_highlight_path_and_pattern(self):
         out = render_tool_activity({"type": "tool_call", "name": "Searching", "kind": "search",
                                     "arguments": {"__tool_use_purpose": "x", "pattern": "Shim",
