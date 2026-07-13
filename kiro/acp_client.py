@@ -368,6 +368,8 @@ class ACPClient:
         effort: Optional[str] = None,
         engine: str = "v2",
         extra_args: Optional[list[str]] = None,
+        mcp_servers: Optional[list[dict]] = None,
+        mcp_init_timeout: int = 30,
     ):
         self._command = command
         self._trust_tools = trust_tools
@@ -383,6 +385,17 @@ class ACPClient:
         self._effort = (effort or "").strip() or None
         self._engine = (engine or "v2").strip() or "v2"
         self._extra_args = list(extra_args or [])
+        # Default MCP servers registered on every session/new (issue: MCP never
+        # registered). kiro-cli executes these itself (mcpCapabilities.http) —
+        # the only external-tool channel over ACP. Empty leaves the historical
+        # behaviour (``mcpServers: []``) unchanged; a per-call override is still
+        # accepted by :meth:`new_session` (used by the warm-up session, which
+        # skips MCP setup so it can never block startup).
+        self._mcp_servers = [dict(s) for s in (mcp_servers or []) if isinstance(s, dict)]
+        # Bounded timeout for session/new when MCP servers are registered, so a
+        # malformed/unreachable server fails fast instead of stalling every
+        # request for the full ACP_TIMEOUT (see config.MCP_INIT_TIMEOUT).
+        self._mcp_init_timeout = mcp_init_timeout
         # Max bytes per JSON-RPC line read from kiro-cli stdout (see config).
         self._stdio_limit = stdio_limit
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -535,6 +548,7 @@ class ACPClient:
         cwd: Optional[str] = None,
         model: Optional[str] = None,
         mode: Optional[str] = None,
+        mcp_servers: Optional[list[dict]] = None,
     ) -> str:
         """
         Create a fresh ACP session and return its id.
@@ -552,13 +566,33 @@ class ACPClient:
                 (forwarded via ``session/set_mode``). When omitted, the
                 client's configured default mode (``KIRO_ACP_MODE``) is used,
                 and when that is unset too the session keeps kiro-cli's default.
+            mcp_servers: Optional list of MCP server configs to register for
+                this session (``session/new``'s ``mcpServers``). ``None`` uses
+                the client's configured default (``KIRO_MCP_SERVERS`` /
+                ``KIRO_MCP_CONFIG``); pass an explicit ``[]`` to register none
+                regardless of config (used by the warm-up session so a
+                misconfigured/unreachable server cannot block startup). kiro-cli
+                executes these tools itself (``mcpCapabilities.http``).
 
         Returns:
             The agent-assigned ``sessionId``.
         """
         workdir = cwd or self._derive_cwd(capabilities)
-        params = {"cwd": workdir, "mcpServers": []}
-        result = await self._call("session/new", params)
+        servers = self._mcp_servers if mcp_servers is None else mcp_servers
+        params = {"cwd": workdir, "mcpServers": servers}
+        if servers:
+            logger.info(
+                f"session/new registering {len(servers)} MCP server(s): "
+                f"{[s.get('name') for s in servers if isinstance(s, dict)]}"
+            )
+            # A malformed/unreachable MCP server makes kiro-cli's session/new
+            # block with no error; cap it so the request fails fast instead of
+            # stalling for the full ACP_TIMEOUT.
+            result = await self._call(
+                "session/new", params, timeout=self._mcp_init_timeout
+            )
+        else:
+            result = await self._call("session/new", params)
         if not isinstance(result, dict) or "sessionId" not in result:
             raise ACPError(-32603, f"session/new returned no sessionId: {result!r}")
         session_id = str(result["sessionId"])

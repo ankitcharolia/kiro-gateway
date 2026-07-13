@@ -610,3 +610,108 @@ async def test_complete_folds_tool_activity_into_reasoning_when_off():
     assert result["tool_calls"] == []
     assert "Fetching web content" in result["reasoning"]
     assert result["content"] == "Berlin is sunny."
+
+
+# ---------------------------------------------------------------------------
+# Fix #2: kiro built-in tool-call → caller schema mapping (map_kiro_tool_call)
+# ---------------------------------------------------------------------------
+
+from kiro.shim_service import map_kiro_tool_call
+
+
+class TestMapKiroToolCall:
+    """kiro's prose-titled built-in tool calls map onto recognisable names."""
+
+    def test_read_kind_maps_to_declared_read(self):
+        tc = {"id": "t1", "name": "Reading README.md:1-5", "kind": "read",
+              "arguments": {"__tool_use_purpose": "x", "operations": [{"path": "README.md"}]}}
+        declared = [{"name": "Read", "description": "", "input_schema": {}}]
+        mapped = map_kiro_tool_call(tc, declared)
+        assert mapped["name"] == "Read"
+        # internal purpose key stripped from surfaced arguments
+        assert "__tool_use_purpose" not in mapped["arguments"]
+        assert mapped["arguments"]["operations"] == [{"path": "README.md"}]
+
+    def test_execute_kind_maps_to_declared_bash(self):
+        tc = {"id": "t2", "name": "Running: echo hi", "kind": "execute",
+              "arguments": {"command": "echo hi"}}
+        declared = [{"name": "Bash", "description": "", "input_schema": {}}]
+        assert map_kiro_tool_call(tc, declared)["name"] == "Bash"
+
+    def test_fuzzy_match_underscore_and_case(self):
+        tc = {"id": "t3", "name": "Fetching url", "kind": "fetch", "arguments": {}}
+        declared = [{"name": "WebFetch", "description": "", "input_schema": {}}]
+        # web_fetch candidate normalises to "webfetch" == "webfetch"
+        assert map_kiro_tool_call(tc, declared)["name"] == "WebFetch"
+
+    def test_no_declared_tool_uses_canonical_fallback(self):
+        tc = {"id": "t4", "name": "Running: ls", "kind": "execute", "arguments": {}}
+        assert map_kiro_tool_call(tc, [])["name"] == "bash"
+
+    def test_unknown_kind_leaves_name_untouched(self):
+        tc = {"id": "t5", "name": "Fetching web content", "kind": "", "arguments": {}}
+        # No stable kind → route sanitiser handles the prose title later.
+        assert map_kiro_tool_call(tc, [])["name"] == "Fetching web content"
+
+    def test_containment_match_read_file(self):
+        tc = {"id": "t6", "name": "Reading x", "kind": "read", "arguments": {}}
+        declared = [{"name": "read_file", "description": "", "input_schema": {}}]
+        assert map_kiro_tool_call(tc, declared)["name"] == "read_file"
+
+    def test_original_dict_not_mutated(self):
+        tc = {"id": "t7", "name": "Running: ls", "kind": "execute",
+              "arguments": {"__tool_use_purpose": "x", "command": "ls"}}
+        map_kiro_tool_call(tc, [])
+        assert tc["name"] == "Running: ls"
+        assert "__tool_use_purpose" in tc["arguments"]
+
+
+class TestSurfaceToolCallsMapping:
+    """complete()/stream_tokens() apply the mapping only when surfacing."""
+
+    _READ_CALL = {"id": "c1", "name": "Reading README.md:1-5", "kind": "read",
+                  "arguments": {"__tool_use_purpose": "p", "operations": []}}
+    _DECLARED = [{"type": "function",
+                  "function": {"name": "Read", "parameters": {}}}]
+
+    @pytest.mark.asyncio
+    async def test_complete_maps_when_surfacing(self):
+        acp = StubACP(
+            [],
+            prompt_result={"content": "", "finish_reason": "tool_calls",
+                           "tool_calls": [dict(self._READ_CALL)], "usage": {}},
+        )
+        svc = ShimService(acp)
+        result = await svc.complete(
+            [{"role": "user", "content": "hi"}],
+            tools=self._DECLARED, surface_tool_calls=True,
+        )
+        assert result["tool_calls"][0]["name"] == "Read"
+
+    @pytest.mark.asyncio
+    async def test_complete_suppresses_when_not_surfacing(self):
+        acp = StubACP(
+            [],
+            prompt_result={"content": "answer", "finish_reason": "stop",
+                           "tool_calls": [dict(self._READ_CALL)], "usage": {}},
+        )
+        svc = ShimService(acp)
+        result = await svc.complete(
+            [{"role": "user", "content": "hi"}],
+            tools=self._DECLARED, surface_tool_calls=False,
+        )
+        assert result["tool_calls"] == []
+
+    @pytest.mark.asyncio
+    async def test_stream_maps_when_surfacing(self):
+        acp = StubACP([
+            dict(self._READ_CALL, **{"type": "tool_call"}),
+            {"type": "done", "finish_reason": "stop"},
+        ])
+        svc = ShimService(acp)
+        events = await collect_stream(svc.stream_tokens(
+            [{"role": "user", "content": "hi"}],
+            tools=self._DECLARED, surface_tool_calls=True,
+        ))
+        tool_events = [e for e in events if e.get("type") == "tool_call"]
+        assert tool_events and tool_events[0]["name"] == "Read"

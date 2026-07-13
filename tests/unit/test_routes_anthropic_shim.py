@@ -1575,3 +1575,57 @@ class TestAnthropicMetadataSurfacing:
         message_deltas = [d for d in deltas if d.get("type") == "message_delta"]
         assert message_deltas, "expected a message_delta event"
         assert message_deltas[-1]["usage"]["kiro_metadata"]["credits"] == pytest.approx(0.17)
+
+
+# ---------------------------------------------------------------------------
+# Fix #2: kiro built-in tool call mapped onto the caller's declared tool name
+# when surfacing (ACP_SURFACE_TOOL_CALLS=true) — Anthropic shim, both modes.
+# ---------------------------------------------------------------------------
+
+class _KindToolACP:
+    """Stub whose turn includes a kiro built-in tool call with a stable kind."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [{"id": "c1", "name": "Running: echo hi", "kind": "execute",
+                            "arguments": {"__tool_use_purpose": "p", "command": "echo hi"}}],
+            "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "tool_call", "id": "c1", "name": "Running: echo hi",
+               "kind": "execute", "arguments": {"__tool_use_purpose": "p", "command": "echo hi"}}
+        yield {"type": "done", "finish_reason": "tool_calls"}
+
+
+class TestAnthropicToolCallSchemaMapping:
+    """A declared 'Bash' tool receives kiro's execute-kind call under that name."""
+
+    _MSG = {
+        "model": "claude-sonnet-4.6", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "run echo"}],
+        "tools": [{"name": "Bash", "description": "Run a shell command", "input_schema": {"type": "object", "properties": {}}}],
+    }
+
+    def test_non_stream_maps_to_declared_name(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_KindToolACP())
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        body = resp.json()
+        tool_block = next(b for b in body["content"] if b["type"] == "tool_use")
+        assert tool_block["name"] == "Bash"
+        assert "__tool_use_purpose" not in tool_block["input"]
+
+    def test_stream_maps_to_declared_name(self, sync_client, anthropic_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_KindToolACP())
+        resp = sync_client.post("/v1/messages",
+                                json={**self._MSG, "stream": True}, headers=anthropic_headers)
+        assert '"Bash"' in resp.text

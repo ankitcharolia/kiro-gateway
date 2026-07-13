@@ -113,6 +113,116 @@ def normalize_tool_definitions(tools: Optional[list[Any]]) -> list[dict]:
     return normalized
 
 
+# Canonical tool-name candidates keyed by the ACP tool ``kind``. Ordered by
+# preference; the first is used as the surfaced name when the caller declared no
+# matching tool. Verified against a live kiro-cli 2.12.1 probe: kiro surfaces
+# its built-in tools with a prose ``title`` ("Running: echo …", "Reading
+# README.md:1-5") — useless as an OpenAI/Anthropic function name — and a stable
+# ``kind`` (``execute``/``read``/``edit``/``search``/``fetch``/…). ``kind`` is
+# therefore the reliable signal for mapping onto a recognisable tool name.
+_KIND_TO_CANONICAL: dict[str, tuple[str, ...]] = {
+    "read": ("read",),
+    "edit": ("edit", "write", "apply_patch"),
+    "delete": ("delete", "remove"),
+    "move": ("move", "rename"),
+    "execute": ("bash", "shell", "execute_command", "run_command"),
+    "search": ("grep", "search", "glob"),
+    "fetch": ("web_fetch", "web_search", "fetch"),
+    "think": ("think",),
+}
+
+
+def _norm_ident(name: str) -> str:
+    """Reduce a tool name to lowercase alphanumerics for fuzzy comparison.
+
+    ``WebFetch`` / ``web_fetch`` / ``web-fetch`` all normalise to ``webfetch``
+    so a caller's tool name matches a canonical candidate regardless of case or
+    separator style.
+
+    Args:
+        name: A tool name.
+
+    Returns:
+        The lowercase alphanumeric-only form.
+    """
+    import re as _re
+    return _re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def map_kiro_tool_call(tool_call: dict, declared_tools: Optional[list[dict]]) -> dict:
+    """Map a kiro-cli built-in tool call onto the caller's declared tool schema.
+
+    kiro-cli runs its own built-in tools and surfaces each as a tool-call event
+    whose ``name`` is a prose ``title`` (e.g. ``"Reading README.md:1-5"``) and
+    whose ``kind`` is a stable verb (``read``/``edit``/``execute``/``search``/
+    ``fetch``/…). When the shims surface tool activity as executable
+    ``tool_calls``/``tool_use`` (``ACP_SURFACE_TOOL_CALLS=true``), that prose
+    title is not a name a harness recognises. This maps the call onto a clean,
+    recognisable tool name — preferring the caller's own declared tool when one
+    matches the call's ``kind`` (so a harness that declared ``Read``/``Bash``
+    sees those names), otherwise a canonical fallback (``read``/``bash``/…).
+
+    The internal ``__tool_use_purpose`` argument kiro-cli adds is stripped so
+    the surfaced ``arguments`` match a normal tool-call payload.
+
+    Best-effort and non-authoritative: kiro's tool taxonomy does not line up
+    1:1 with an arbitrary harness's, and these calls are already executed by
+    kiro-cli within the turn (the turn still finishes with
+    ``finish_reason=stop`` when text follows), so this is a display/naming
+    normalisation, not a client-side function-calling round-trip (issue #31).
+    When the call carries no usable ``kind`` (e.g. a bare update), the original
+    name is left untouched for the route's own sanitiser to handle.
+
+    Args:
+        tool_call: A normalised ``tool_call``/``tool_call_update`` event (dict).
+        declared_tools: The caller's declared tools in the ``{"name", …}`` shape
+            produced by :func:`normalize_tool_definitions` (may be empty/None).
+
+    Returns:
+        A shallow copy of ``tool_call`` with ``name`` remapped (when a mapping
+        applies) and the internal purpose key removed from ``arguments``.
+    """
+    mapped = dict(tool_call)
+
+    # Strip kiro's internal purpose key from the surfaced arguments.
+    args = mapped.get("arguments")
+    if isinstance(args, dict) and "__tool_use_purpose" in args:
+        mapped["arguments"] = {
+            key: value for key, value in args.items() if key != "__tool_use_purpose"
+        }
+
+    kind = str(mapped.get("kind") or "").strip().lower()
+    candidates = _KIND_TO_CANONICAL.get(kind)
+    if not candidates:
+        # No stable kind to map on — leave the name for the route sanitiser.
+        return mapped
+
+    declared_norm: dict[str, str] = {}
+    for tool in declared_tools or []:
+        raw_name = tool.get("name") if isinstance(tool, dict) else None
+        if raw_name:
+            declared_norm.setdefault(_norm_ident(str(raw_name)), str(raw_name))
+
+    # 1. Prefer an exact (normalised) match against a declared tool name.
+    for cand in candidates:
+        hit = declared_norm.get(_norm_ident(cand))
+        if hit:
+            mapped["name"] = hit
+            return mapped
+    # 2. Then a guarded containment match (e.g. declared "read_file" ⊇ "read").
+    for cand in candidates:
+        cnorm = _norm_ident(cand)
+        if len(cnorm) < 3:
+            continue
+        for dnorm, orig in declared_norm.items():
+            if cnorm in dnorm or dnorm in cnorm:
+                mapped["name"] = orig
+                return mapped
+    # 3. No declared match: surface the canonical fallback name.
+    mapped["name"] = candidates[0]
+    return mapped
+
+
 class ShimService:
     """Stateless orchestration layer shared by all route families."""
 
@@ -198,6 +308,15 @@ class ShimService:
                 if labels:
                     normalized["reasoning"] = (normalized.get("reasoning") or "") + labels
             normalized["tool_calls"] = []
+        else:
+            # Surfacing on: map kiro-cli's built-in tool calls onto the caller's
+            # declared tool schema (or a canonical name) so a harness sees a
+            # recognisable name instead of kiro's prose title.
+            declared = normalize_tool_definitions(tools)
+            normalized["tool_calls"] = [
+                map_kiro_tool_call(tc, declared)
+                for tc in (normalized.get("tool_calls") or [])
+            ]
         return normalized
 
     # ------------------------------------------------------------------
@@ -247,6 +366,7 @@ class ShimService:
                 folded tool activity) is surfaced.
         """
         session_id = await self._new_session(filesystem_roots, terminal, model)
+        declared_tools = normalize_tool_definitions(tools)
         params = PromptParams(
             session_id=session_id,
             messages=messages,
@@ -269,6 +389,11 @@ class ShimService:
                     label = render_tool_activity(event)
                     if label:
                         yield {"type": "thinking", "content": label}
+                continue
+            if etype in ("tool_call", "tool_call_update") and surface_tool_calls:
+                # Map kiro-cli's built-in tool call onto the caller's declared
+                # tool schema (or a canonical name) before surfacing it.
+                yield map_kiro_tool_call(event, declared_tools)
                 continue
             yield event
 

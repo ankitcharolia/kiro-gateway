@@ -429,6 +429,107 @@ class TestModeDiscoveryAndForwarding:
         assert client._current_mode_id is None
 
 
+# ---------------------------------------------------------------------------
+# MCP server registration (session/new "mcpServers")
+# ---------------------------------------------------------------------------
+
+class TestMcpServerRegistration:
+    """new_session forwards configured MCP servers instead of a hardcoded []."""
+
+    @pytest.mark.asyncio
+    async def test_default_mcp_servers_forwarded(self):
+        """Servers passed to the constructor are sent on every session/new."""
+        servers = [{"type": "http", "name": "svc", "url": "http://127.0.0.1:9/mcp"}]
+        client = ACPClient(mcp_servers=servers)
+        captured: dict = {}
+
+        async def fake_call(method, params, timeout=120.0):
+            captured[method] = params
+            if method == "session/new":
+                return {"sessionId": "s1"}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client)
+
+        assert captured["session/new"]["mcpServers"] == servers
+
+    @pytest.mark.asyncio
+    async def test_default_empty_mcp_servers(self):
+        """No configured servers → an empty mcpServers list (unchanged behaviour)."""
+        client = ACPClient()
+        captured: dict = {}
+
+        async def fake_call(method, params, timeout=120.0):
+            captured[method] = params
+            if method == "session/new":
+                return {"sessionId": "s2"}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client)
+
+        assert captured["session/new"]["mcpServers"] == []
+
+    @pytest.mark.asyncio
+    async def test_per_call_override_beats_default(self):
+        """An explicit mcp_servers=[] overrides the configured default (warm-up)."""
+        client = ACPClient(mcp_servers=[{"type": "http", "name": "svc", "url": "u"}])
+        captured: dict = {}
+
+        async def fake_call(method, params, timeout=120.0):
+            captured[method] = params
+            if method == "session/new":
+                return {"sessionId": "s3"}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client, mcp_servers=[])
+
+        assert captured["session/new"]["mcpServers"] == []
+
+    @pytest.mark.asyncio
+    async def test_non_dict_servers_filtered_at_construction(self):
+        """Non-dict entries passed to the constructor are dropped."""
+        client = ACPClient(mcp_servers=[{"name": "ok", "url": "u"}, "bogus", 42])
+        assert client._mcp_servers == [{"name": "ok", "url": "u"}]
+
+    @pytest.mark.asyncio
+    async def test_mcp_session_uses_bounded_timeout(self):
+        """With MCP servers, session/new is called with mcp_init_timeout."""
+        client = ACPClient(mcp_servers=[{"type": "http", "name": "s", "url": "u", "headers": []}],
+                           mcp_init_timeout=7)
+        seen: dict = {}
+
+        async def fake_call(method, params, timeout=120.0):
+            if method == "session/new":
+                seen["timeout"] = timeout
+                return {"sessionId": "s1"}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client)
+
+        assert seen["timeout"] == 7
+
+    @pytest.mark.asyncio
+    async def test_no_mcp_uses_default_timeout(self):
+        """Without MCP servers, session/new keeps the default (unbounded) timeout."""
+        client = ACPClient(mcp_init_timeout=7)
+        seen: dict = {}
+
+        async def fake_call(method, params, timeout=120.0):
+            if method == "session/new":
+                seen["timeout"] = timeout
+                return {"sessionId": "s2"}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        await _REAL_NEW_SESSION(client)
+
+        assert seen["timeout"] == 120.0
+
+
 class TestStdioBufferLimit:
     """The stdio read buffer must be large enough for big ACP lines."""
 

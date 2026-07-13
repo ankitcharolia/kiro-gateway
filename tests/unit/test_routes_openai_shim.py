@@ -1736,3 +1736,56 @@ class TestOpenAIMetadataSurfacing:
         ]
         assert usage_chunks, "expected a usage-only chunk"
         assert usage_chunks[-1]["usage"]["kiro_metadata"]["credits"] == pytest.approx(0.17)
+
+
+# ---------------------------------------------------------------------------
+# Fix #2: kiro built-in tool call mapped onto the caller's declared tool name
+# when surfacing (ACP_SURFACE_TOOL_CALLS=true) — OpenAI shim, both modes.
+# ---------------------------------------------------------------------------
+
+class _KindToolACP:
+    """Stub whose turn includes a kiro built-in tool call with a stable kind."""
+
+    available_models: list = []
+
+    async def new_session(self, capabilities=None, cwd=None, model=None):
+        return "s"
+
+    async def prompt(self, params):
+        return {
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [{"id": "c1", "name": "Running: echo hi", "kind": "execute",
+                            "arguments": {"__tool_use_purpose": "p", "command": "echo hi"}}],
+            "usage": {},
+        }
+
+    async def prompt_stream(self, params):
+        yield {"type": "tool_call", "id": "c1", "name": "Running: echo hi",
+               "kind": "execute", "arguments": {"__tool_use_purpose": "p", "command": "echo hi"}}
+        yield {"type": "done", "finish_reason": "tool_calls"}
+
+
+class TestOpenAIToolCallSchemaMapping:
+    """A declared 'Bash' tool receives kiro's execute-kind call under that name."""
+
+    _CHAT = {
+        "model": "claude-sonnet-4.6",
+        "messages": [{"role": "user", "content": "run echo"}],
+        "tools": [{"type": "function", "function": {"name": "Bash", "description": "Run a shell command", "parameters": {}}}],
+    }
+
+    def test_non_stream_maps_to_declared_name(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_KindToolACP())
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        tc = resp.json()["choices"][0]["message"]["tool_calls"][0]
+        assert tc["function"]["name"] == "Bash"
+        assert "__tool_use_purpose" not in tc["function"]["arguments"]
+
+    def test_stream_maps_to_declared_name(self, sync_client, openai_headers, monkeypatch):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_KindToolACP())
+        resp = sync_client.post("/v1/chat/completions",
+                                json={**self._CHAT, "stream": True}, headers=openai_headers)
+        assert '"Bash"' in resp.text

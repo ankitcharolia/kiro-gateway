@@ -129,10 +129,14 @@ matter — a malformed `initialize` makes the agent exit immediately.
    `{"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}}`
    → `{protocolVersion, agentCapabilities, authMethods, agentInfo}`. **No session id.**
 2. **`session/new`** — once per gateway request.
-   `{"cwd": "<abs path>", "mcpServers": []}` →
+   `{"cwd": "<abs path>", "mcpServers": [...]}` →
    `{sessionId, modes, models: {currentModelId, availableModels}}`. The
    `models` block is cached so `GET /v1/models` can advertise the live
-   catalogue; model ids are dotted (e.g. `claude-sonnet-4.6`).
+   catalogue; model ids are dotted (e.g. `claude-sonnet-4.6`). `mcpServers` is
+   the operator-configured MCP server list (`settings.MCP_SERVERS`, default
+   `[]`) forwarded verbatim — see the MCP section below. Verified against a live
+   kiro-cli 2.12.1 probe: a non-empty list is **processed** (drives MCP setup)
+   vs an instant return with `[]`, so the field is honored.
 3. **`session/set_model`** — optional, right after `session/new`, only when the
    request's model differs from `currentModelId`.
    `{"sessionId", "modelId": "<id>"}` → `{}`. kiro-cli does not validate the id
@@ -176,13 +180,65 @@ Two distinct cases — do not conflate them:
 - **Client-declared tools (the harness's own functions): NOT honored by
   kiro-cli.** Tool defs on `session/prompt` (top-level `tools` **and**
   `_meta.tools`) are accepted but ignored — the probe model said it had no such
-  tool. The only external-tool channel is **MCP servers** at `session/new`
-  (`mcpCapabilities.http: true`), executed by the MCP server, not the harness.
+  tool. The only external-tool channel is **MCP servers** registered at
+  `session/new` (`mcpCapabilities.http: true`), executed by the MCP server, not
+  the harness. The gateway now **forwards operator-configured MCP servers**
+  (`settings.MCP_SERVERS` ← `KIRO_MCP_SERVERS`/`KIRO_MCP_CONFIG`) on every
+  session instead of the old hardcoded `[]` — see the MCP section.
   `ACPClient._tool_meta` still forwards normalized client tools under
   `_meta.tools` (schema-safe, forward-compatible, merged with
   `generationConfig`) so they reach kiro-cli if a future version ingests them —
   but OpenAI/Anthropic-style client-side function calling does **not** round-trip
   today (issue #31). Do not claim it does.
+- **Surfaced built-in tool calls are name-mapped (`ACP_SURFACE_TOOL_CALLS=true`).**
+  Verified against a live kiro-cli 2.12.1 probe, a built-in `tool_call` carries a
+  prose `title` ("Running: echo …", "Reading README.md:1-5") as its name and a
+  stable `kind` (`execute`/`read`/`edit`/`search`/`fetch`). When surfacing is on,
+  `ShimService.map_kiro_tool_call` maps each call onto the caller's declared tool
+  name by `kind` (preferring an exact/fuzzy match against the request's `tools`,
+  else a canonical fallback like `bash`/`read`) and strips kiro's internal
+  `__tool_use_purpose` arg. This is display/naming normalisation only — the tool
+  already ran inside the turn (the turn still finishes `finish_reason=stop` when
+  text follows), **not** a client-side function-calling round-trip (issue #31).
+  An unmappable/kind-less call keeps its name for the route's `_sanitize_tool_name`.
+
+## MCP servers (external tools kiro-cli runs itself)
+
+MCP servers registered on `session/new`'s `mcpServers` are the **only**
+external-tool channel kiro-cli honors over ACP (`mcpCapabilities.http: true`,
+`sse: false`); kiro-cli executes them itself, so **compliance is preserved** —
+the gateway never runs the tools. `config._load_mcp_servers` reads
+`KIRO_MCP_SERVERS` (inline JSON) or `KIRO_MCP_CONFIG` (file path); each accepts
+an ACP `mcpServers` array or the `mcp.json` object form (`{"mcpServers":
+{"<name>": {...}}}` / bare `{"<name>": {...}}`) normalised to the array shape.
+`main.py` passes `settings.MCP_SERVERS` to `ACPClient(mcp_servers=…)`, which
+stores them as the per-session default; `new_session(mcp_servers=…)` accepts a
+per-call override, and the **warm-up session passes `[]`** so a
+misconfigured/unreachable server can't block startup. Default is `[]` —
+behaviour is unchanged unless configured.
+
+**Required wire shape (verified against a live kiro-cli 2.12.1 round-trip).** An
+HTTP MCP entry MUST be `{"type": "http", "name": …, "url": …, "headers":
+[{"name","value"}, …]}`. Both `type` **and** a `headers` **array** are
+mandatory: omitting `headers`, sending it as an object, or omitting `type` makes
+kiro-cli's `session/new` **silently block** (deserialize failure, no error) —
+not return an error. `config._normalize_mcp_entry` therefore coerces every
+remote entry to this shape: `type` defaults to `http`, and `headers` is coerced
+from the common `mcp.json` object form (`{"Authorization": "Bearer …"}`) to the
+ACP `[{"name","value"}]` array (stdio entries get `env` map→array + `args`
+defaulted). A correctly shaped, reachable server returns `session/new` in ~0.5s
+and a `tools/call` round-trips end-to-end (probe returned the tool's text). MCP
+tool calls surface as `tool_call` events with `kind: "other"`/`null` and a
+`title` like `Running: @<server>/<tool>`.
+
+**Bounded `session/new` timeout (`MCP_INIT_TIMEOUT`, default 30s).** Because the
+gateway opens a fresh session per request, a truly unresponsive MCP server (a
+TCP black-hole) would otherwise stall **every** request for the full
+`ACP_TIMEOUT` (120s). When MCP servers are registered, `new_session` caps
+`session/new` at `MCP_INIT_TIMEOUT` and raises a timeout `ACPError` (classified
+`504` by `error_mapping`) instead of hanging; sessions with no MCP servers keep
+using `ACP_TIMEOUT` unchanged. Verified live: a black-hole server fails in ~5s
+with `MCP_INIT_TIMEOUT=5`.
 
 ## Internal Event Contract
 
@@ -454,8 +510,11 @@ take precedence over `.env`).
 | `MODEL_ALIASES` | `` (none) | Comma-separated `alias=target` pairs rewriting a requested model id to a real kiro-cli model before validation/`set_model` (e.g. `gpt-4o=claude-sonnet-4.6`). |
 | `ENFORCE_MAX_TOKENS` | `false` | When `true`, the gateway caps output at `max_tokens` (`finish_reason=length`). `stop` sequences are always enforced when sent. kiro-cli honors neither over ACP (issue #32). |
 | `ACP_TRUST_TOOLS` | `true` | Auto-approve (`true`) or reject (`false`) tool permission requests |
-| `ACP_SURFACE_TOOL_CALLS` | `false` | How the shims present kiro-cli's built-in tool activity: `false` (default) = inline non-executable reasoning text (interleaved, needs `ACP_SURFACE_THINKING`); `true` = executable `tool_calls`/`tool_use`. ACP-native route always emits a structured `acp_tool_call`. |
+| `ACP_SURFACE_TOOL_CALLS` | `false` | How the shims present kiro-cli's built-in tool activity: `false` (default) = inline non-executable reasoning text (interleaved, needs `ACP_SURFACE_THINKING`); `true` = executable `tool_calls`/`tool_use`, name-mapped onto the caller's declared tools by `kind` (`map_kiro_tool_call`). ACP-native route always emits a structured `acp_tool_call`. |
 | `ACP_SURFACE_THINKING` | `true` | Surface kiro-cli reasoning in each API's native shape (OpenAI `reasoning_content` / Responses reasoning items; Anthropic `thinking` blocks). Additive — final answer unchanged. `false` emits only the answer. |
+| `KIRO_MCP_SERVERS` | `` (none) | Inline JSON of MCP servers registered on every `session/new` (ACP `mcpServers` array or `mcp.json` object form). kiro-cli runs them itself (`mcpCapabilities.http`). The only external-tool channel over ACP. |
+| `KIRO_MCP_CONFIG` | `` (none) | Path to a JSON file with the same MCP-server content as `KIRO_MCP_SERVERS` (used only when `KIRO_MCP_SERVERS` is unset). |
+| `MCP_INIT_TIMEOUT` | `30` | Seconds cap for `session/new` **when MCP servers are registered**, so a malformed/unreachable server fails fast (timeout → `504`) instead of stalling every request for `ACP_TIMEOUT`. Sessions without MCP servers use `ACP_TIMEOUT`. |
 | `ACP_WORKSPACE_DIR` | process cwd | Default session `cwd` |
 | `KIRO_ACP_MODE` | `` (kiro-cli default) | Agent persona selected per session via `session/set_mode` (`kiro_default`, `code`, `kiro_planner`, `kiro_guide`). Unknown value accepted silently (keeps default). Distinct from `KIRO_ACP_MODEL`. |
 | `KIRO_ACP_ENGINE` | `v2` | `--agent-engine` (`v1`/`v2`/`v3`), pinned explicitly so a future default-engine flip can't change behaviour. `v3` needs host-mediated auth the gateway lacks (issue #52) — generation fails; keep `v2`. Invalid value falls back to `v2`. |

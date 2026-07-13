@@ -224,6 +224,23 @@ KIRO_ACP_MODEL=                  # --model: initial session model (per-request m
 KIRO_ACP_EFFORT=                 # --effort: low | medium | high | xhigh | max
 KIRO_ACP_EXTRA_ARGS=             # extra raw args appended verbatim (shell-quoted)
 
+# ── MCP servers (external tools kiro-cli runs itself) ─────────────────
+# The only external-tool channel kiro-cli honors over ACP: registered on every
+# session/new and executed by kiro-cli (mcpCapabilities.http=true, sse=false) —
+# the gateway never runs them, so compliance is preserved. Empty = none.
+# Provide inline JSON via KIRO_MCP_SERVERS OR a file path via KIRO_MCP_CONFIG;
+# each accepts an ACP mcpServers array or the mcp.json object form. An HTTP
+# entry MUST carry type:"http" and headers as an ARRAY — the gateway normalises
+# the common object form ({"Authorization":"Bearer …"}) to [{"name","value"}]
+# automatically (a wrong shape makes kiro-cli's session/new silently block).
+# KIRO_MCP_SERVERS=[{"type":"http","name":"docs","url":"http://127.0.0.1:9000/mcp","headers":[]}]
+KIRO_MCP_SERVERS=
+KIRO_MCP_CONFIG=
+# Seconds cap for session/new WHEN MCP servers are registered, so a
+# malformed/unreachable server fails fast instead of stalling every request for
+# ACP_TIMEOUT (a fresh session is opened per request). Default 30.
+MCP_INIT_TIMEOUT=30
+
 # ── Feature flags ─────────────────────────────────────────────────────
 ACP_ENABLED=true
 OPENAI_SHIM_ENABLED=true
@@ -530,9 +547,11 @@ model. Two distinct cases:
    kiro-cli today.** Definitions on `session/prompt` (top-level `tools` or
    `_meta.tools`) are accepted but ignored; ACP's only external-tool channel is
    **MCP servers** registered at `session/new` (executed by the MCP server, not
-   the harness). The gateway still forwards client tool defs under `_meta.tools`
-   for forward-compatibility, but OpenAI/Anthropic-style client-side function
-   calling does **not** round-trip today. See
+   the harness). The gateway now **forwards operator-configured MCP servers**
+   (`KIRO_MCP_SERVERS` / `KIRO_MCP_CONFIG`) on every session — see
+   [Configuration](#configuration) — and still forwards client tool defs under
+   `_meta.tools` for forward-compatibility, but OpenAI/Anthropic-style
+   client-side function calling does **not** round-trip today. See
    [issue #31](https://github.com/ankitcharolia/kiro-gateway/issues/31).
 
 **By default (`ACP_SURFACE_TOOL_CALLS=false`) the shims surface kiro-cli's
@@ -546,8 +565,15 @@ shell commands render the command + a fenced output block; file reads show only
 the label.
 
 When `ACP_SURFACE_TOOL_CALLS=true` (opt-in, for ACP-aware UIs), the activity is
-instead emitted as executable-shaped `tool_calls`/`tool_use` events. The native
-`/acp/chat` route always surfaces a structured tool call. Either way, tool
+instead emitted as executable-shaped `tool_calls`/`tool_use` events. Because
+kiro-cli names each built-in call with a prose title ("Running: echo …",
+"Reading README.md:1-5"), the gateway **maps it onto a recognisable tool name
+by `kind`** — preferring the caller's own declared tool (e.g. kiro's
+`execute`→`Bash`, `read`→`Read`) and falling back to a canonical name — and
+strips kiro's internal `__tool_use_purpose` arg. This is display/naming
+normalisation, not a client-side function-calling round-trip (kiro-cli already
+ran the tool inside the turn). The native `/acp/chat` route always surfaces a
+structured tool call. Either way, tool
 execution happens entirely inside `kiro-cli` within one turn — callers never
 execute tools themselves.
 

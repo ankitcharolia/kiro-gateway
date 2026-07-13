@@ -252,7 +252,8 @@ def test_client():
     async def _noop_initialize(self, capabilities=None) -> None:
         pass
 
-    async def _mock_new_session(self, capabilities=None, cwd=None, model=None) -> str:
+    async def _mock_new_session(self, capabilities=None, cwd=None, model=None,
+                                mode=None, mcp_servers=None) -> str:
         return "test-session-id"
 
     async def _mock_prompt(self, params) -> dict:

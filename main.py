@@ -93,6 +93,11 @@ async def lifespan(app: FastAPI):
         logger.info(f"ACP initial effort: {settings.ACP_EFFORT}")
     if extra_args:
         logger.info(f"ACP extra args: {extra_args}")
+    if settings.MCP_SERVERS:
+        logger.info(
+            f"MCP servers configured for every session: "
+            f"{[s.get('name') for s in settings.MCP_SERVERS]}"
+        )
 
     acp_client = ACPClient(
         command=settings.KIRO_CLI_PATH,
@@ -103,6 +108,8 @@ async def lifespan(app: FastAPI):
         effort=settings.ACP_EFFORT or None,
         engine=settings.ACP_ENGINE,
         extra_args=extra_args,
+        mcp_servers=settings.MCP_SERVERS,
+        mcp_init_timeout=settings.MCP_INIT_TIMEOUT,
     )
     await acp_client.start()
     await acp_client.initialize()
@@ -112,7 +119,10 @@ async def lifespan(app: FastAPI):
     # fallback (only needed if kiro-cli fails to start) rather than a required
     # static list.
     try:
-        warmup_session_id = await acp_client.new_session()
+        # Skip MCP registration for the warm-up (mcp_servers=[]): it exists only
+        # to discover the model catalogue, and a misconfigured/unreachable MCP
+        # server would otherwise block startup up to ACP_TIMEOUT.
+        warmup_session_id = await acp_client.new_session(mcp_servers=[])
         logger.info(
             f"Model catalogue populated from kiro-cli: "
             f"{[m['id'] for m in acp_client.available_models]}"

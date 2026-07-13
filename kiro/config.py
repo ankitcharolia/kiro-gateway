@@ -161,6 +161,167 @@ ACP_SURFACE_THINKING: bool = (
     os.environ.get("ACP_SURFACE_THINKING", "true").lower() != "false"
 )
 
+# MCP servers registered on every ACP session via ``session/new``'s
+# ``mcpServers`` field. This is the ONLY external-tool channel kiro-cli honors
+# over ACP: it advertises ``mcpCapabilities.http: true`` and executes the MCP
+# tools itself (the gateway never runs them — compliance is preserved). Verified
+# against a live kiro-cli 2.12.1 probe: ``session/new`` accepts and processes a
+# non-empty ``mcpServers`` list (an empty list returns instantly; a populated
+# one drives kiro-cli's MCP setup), so the field is honored — the gateway must
+# forward operator-configured servers instead of the hardcoded ``[]``.
+#
+# Two sources (checked in order; first non-empty wins):
+#   * ``KIRO_MCP_SERVERS`` — inline JSON.
+#   * ``KIRO_MCP_CONFIG``  — path to a JSON file.
+# Each accepts either an ACP ``mcpServers`` array (used verbatim) or the common
+# ``mcp.json`` object form (``{"mcpServers": {"<name>": {...}}}`` or a bare
+# ``{"<name>": {...}}`` map), which is normalised to the array shape with the
+# key injected as each entry's ``name``. Empty (default) leaves sessions with
+# no MCP servers — behaviour is unchanged unless configured.
+#
+# HTTP transport is expected (``mcpCapabilities.http: true``, ``sse: false``);
+# an HTTP entry looks like ``{"type": "http", "name": "...", "url": "...",
+# "headers": [{"name": "...", "value": "..."}]}``. Entries are forwarded
+# verbatim (faithful translation) — the gateway does not validate transport
+# semantics; a misconfigured/unreachable server can make ``session/new`` block
+# up to ``ACP_TIMEOUT``, so only configure reachable servers.
+def _normalize_mcp_headers(headers: object) -> List[dict]:
+    """Coerce MCP ``headers`` into the ACP ``[{"name","value"}]`` array shape.
+
+    Verified against a live kiro-cli 2.12.1 probe: an HTTP MCP entry MUST carry
+    ``headers`` as an **array** — omitting it, or sending the ``mcp.json`` object
+    form (``{"Authorization": "Bearer …"}``), makes kiro-cli's ``session/new``
+    silently **block** (deserialize failure, no error) up to the session
+    timeout. Normalising here means an operator's object-style headers actually
+    work instead of hanging.
+
+    Args:
+        headers: ``None``, a mapping (name→value), or an already-ACP array.
+
+    Returns:
+        A list of ``{"name", "value"}`` dicts (possibly empty).
+    """
+    if isinstance(headers, dict):
+        return [{"name": str(k), "value": str(v)} for k, v in headers.items()]
+    if isinstance(headers, list):
+        out: List[dict] = []
+        for item in headers:
+            if isinstance(item, dict) and "name" in item:
+                out.append({"name": str(item["name"]), "value": str(item.get("value", ""))})
+        return out
+    return []
+
+
+def _normalize_mcp_entry(entry: dict) -> dict:
+    """Normalise one MCP server entry into the shape kiro-cli accepts.
+
+    A remote (``url``) entry is coerced to the ACP HTTP shape kiro-cli's
+    ``session/new`` requires: ``type`` defaults to ``"http"`` (kiro-cli
+    advertises ``mcpCapabilities.http: true``, ``sse: false``) and ``headers``
+    is coerced to an ACP array (see :func:`_normalize_mcp_headers`) — both are
+    mandatory or ``session/new`` blocks. A stdio (``command``) entry has its
+    ``env`` map coerced to the ACP ``[{"name","value"}]`` array and ``args``
+    defaulted; it is otherwise left intact (forward-compatible, though kiro-cli
+    advertises no stdio transport today).
+
+    Args:
+        entry: A single server-config dict (already carries ``name``).
+
+    Returns:
+        The normalised entry.
+    """
+    normalized = dict(entry)
+    if normalized.get("url"):
+        transport = str(normalized.get("type") or "http").strip().lower()
+        normalized["type"] = transport if transport in ("http", "sse") else "http"
+        normalized["headers"] = _normalize_mcp_headers(normalized.get("headers"))
+    elif normalized.get("command"):
+        env = normalized.get("env")
+        if isinstance(env, dict):
+            normalized["env"] = [
+                {"name": str(k), "value": str(v)} for k, v in env.items()
+            ]
+        elif not isinstance(env, list):
+            normalized["env"] = []
+        if not isinstance(normalized.get("args"), list):
+            normalized["args"] = []
+    return normalized
+
+
+def _normalize_mcp_servers(parsed: object) -> List[dict]:
+    """Normalise a parsed MCP config into an ACP ``mcpServers`` array.
+
+    Args:
+        parsed: The JSON-decoded config: an array of server dicts, an object
+            with a top-level ``mcpServers`` key (array or name→config map), or a
+            bare name→config map.
+
+    Returns:
+        A list of server-config dicts (each guaranteed to carry a ``name`` and
+        the transport-specific fields kiro-cli requires), skipping malformed
+        entries.
+    """
+    # Unwrap a {"mcpServers": ...} wrapper if present.
+    if isinstance(parsed, dict) and "mcpServers" in parsed:
+        parsed = parsed["mcpServers"]
+
+    raw: List[dict] = []
+    if isinstance(parsed, list):
+        for entry in parsed:
+            if isinstance(entry, dict) and entry.get("name"):
+                raw.append(dict(entry))
+    elif isinstance(parsed, dict):
+        # name -> config map (mcp.json style).
+        for name, cfg in parsed.items():
+            if isinstance(cfg, dict):
+                raw.append({"name": str(name), **cfg})
+    return [_normalize_mcp_entry(entry) for entry in raw]
+
+
+def _load_mcp_servers() -> List[dict]:
+    """Load and normalise MCP server configs from env (inline JSON or a file).
+
+    ``KIRO_MCP_SERVERS`` (inline JSON) takes precedence over ``KIRO_MCP_CONFIG``
+    (a path to a JSON file). A parse/IO error is logged-safe (returns an empty
+    list) so a bad config never prevents the gateway from starting.
+
+    Returns:
+        The normalised ``mcpServers`` array (possibly empty).
+    """
+    import json as _json
+
+    inline = os.environ.get("KIRO_MCP_SERVERS", "").strip()
+    if inline:
+        try:
+            return _normalize_mcp_servers(_json.loads(inline))
+        except (ValueError, TypeError):
+            return []
+
+    path = os.environ.get("KIRO_MCP_CONFIG", "").strip()
+    if path:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return _normalize_mcp_servers(_json.load(handle))
+        except (OSError, ValueError, TypeError):
+            return []
+
+    return []
+
+
+MCP_SERVERS: List[dict] = _load_mcp_servers()
+
+# Bounded timeout (seconds) for ``session/new`` **when MCP servers are
+# registered**. Verified against a live kiro-cli 2.12.1 probe: a correctly
+# shaped, reachable MCP server makes ``session/new`` return in well under a
+# second, but a malformed entry or an unreachable/slow server makes it **block**
+# with no error. Since the gateway opens a fresh session per request, that would
+# otherwise stall every request for the full ``ACP_TIMEOUT`` (default 120s).
+# This shorter, dedicated cap makes a bad MCP setup fail fast with a clear
+# timeout error instead. Sessions without MCP servers keep using ``ACP_TIMEOUT``
+# unchanged. Raise it if a legitimate remote MCP server needs longer to
+# initialise.
+MCP_INIT_TIMEOUT: int = int(os.environ.get("MCP_INIT_TIMEOUT", "30"))
+
 # Default working directory for ACP sessions. Coding agents may override this
 # per-request via filesystem_roots; otherwise the gateway process cwd is used.
 ACP_WORKSPACE_DIR: str = os.environ.get("ACP_WORKSPACE_DIR", os.getcwd())
@@ -245,6 +406,8 @@ class _Settings:
     ACP_TRUST_TOOLS: bool = field(default_factory=lambda: ACP_TRUST_TOOLS)
     ACP_SURFACE_TOOL_CALLS: bool = field(default_factory=lambda: ACP_SURFACE_TOOL_CALLS)
     ACP_SURFACE_THINKING: bool = field(default_factory=lambda: ACP_SURFACE_THINKING)
+    MCP_SERVERS: List[dict] = field(default_factory=lambda: [dict(s) for s in MCP_SERVERS])
+    MCP_INIT_TIMEOUT: int = field(default_factory=lambda: MCP_INIT_TIMEOUT)
     ACP_WORKSPACE_DIR: str = field(default_factory=lambda: ACP_WORKSPACE_DIR)
     ACP_MODE: str = field(default_factory=lambda: ACP_MODE)
     ACP_AGENT: str = field(default_factory=lambda: ACP_AGENT)
