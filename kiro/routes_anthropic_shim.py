@@ -43,6 +43,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalCapability
+from kiro.workspace import build_filesystem_roots, WORKSPACE_HEADER
 from kiro.acp_client import format_plan_text
 from kiro.auth import verify_anthropic_key
 from kiro.config import DEFAULT_KIRO_MODELS, settings
@@ -364,6 +365,7 @@ async def retrieve_model(model_id: str, shim: ShimService = Depends(_get_shim)):
 @router.post("/messages", dependencies=[Depends(verify_anthropic_key)])
 async def create_message(
     body: AnthropicRequest,
+    request: Request,
     shim: ShimService = Depends(_get_shim),
 ):
     # Resolve any configured model alias, then validate up front (issues #42,
@@ -375,7 +377,9 @@ async def create_message(
         return _anthropic_model_not_found(exc)
     messages = _anthropic_messages_to_acp(body.messages, body.system)
     tools = _anthropic_tools_to_acp(body.tools or [])
-    fs_roots = [FilesystemRoot(**r) for r in body.filesystem_roots] if body.filesystem_roots else []
+    fs_roots = build_filesystem_roots(
+        request.headers.get(WORKSPACE_HEADER), body.filesystem_roots, messages
+    )
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
     stop = body.stop_sequences or None
 

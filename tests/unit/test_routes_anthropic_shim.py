@@ -1629,3 +1629,56 @@ class TestAnthropicToolCallSchemaMapping:
         resp = sync_client.post("/v1/messages",
                                 json={**self._MSG, "stream": True}, headers=anthropic_headers)
         assert '"Bash"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Harness working-directory resolution (kiro.workspace) — Anthropic shim.
+# Asserted via the filesystem_roots the route forwards to ShimService.
+# ---------------------------------------------------------------------------
+
+class TestAnthropicWorkspaceCwd:
+    """The resolved harness cwd is forwarded as filesystem_roots."""
+
+    def test_env_block_working_directory_forwarded(self, sync_client, anthropic_headers, tmp_path):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "system": f"<env>\n  Working directory: {tmp_path}\n</env>",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        roots = rec.complete_kwargs[0]["filesystem_roots"]
+        assert [r.path for r in roots] == [str(tmp_path)]
+
+    def test_header_overrides_prompt_directory(self, sync_client, anthropic_headers, tmp_path):
+        header_dir = tmp_path / "hdr"
+        header_dir.mkdir()
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "system": f"<env>\n  Working directory: {tmp_path}\n</env>",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        headers = {**anthropic_headers, "X-Kiro-Workspace": str(header_dir)}
+        resp = sync_client.post("/v1/messages", json=payload, headers=headers)
+        assert resp.status_code == 200
+        roots = rec.complete_kwargs[0]["filesystem_roots"]
+        assert [r.path for r in roots] == [str(header_dir)]
+
+    def test_no_directory_leaves_roots_empty(self, sync_client, anthropic_headers):
+        rec = _RecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200
+        assert rec.complete_kwargs[0]["filesystem_roots"] == []
+

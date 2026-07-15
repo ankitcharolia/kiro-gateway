@@ -33,6 +33,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalCapability
+from kiro.workspace import build_filesystem_roots, WORKSPACE_HEADER
 from kiro.acp_client import format_plan_text
 from kiro.auth import verify_openai_key
 from kiro.config import DEFAULT_KIRO_MODELS, settings
@@ -380,6 +381,7 @@ async def retrieve_model(model_id: str, shim: ShimService = Depends(_get_shim)):
 @router.post("/chat/completions", dependencies=[Depends(verify_openai_key)])
 async def chat_completions(
     body: OAIChatRequest,
+    request: Request,
     shim: ShimService = Depends(_get_shim),
 ):
     # Resolve any configured model alias (e.g. gpt-4o -> claude-sonnet-4.6) and
@@ -392,7 +394,9 @@ async def chat_completions(
         return _openai_model_not_found(exc)
     messages = _oai_messages_to_acp(body.messages)
     tools = [t.model_dump() for t in (body.tools or [])]
-    fs_roots = [FilesystemRoot(**r) for r in body.filesystem_roots] if body.filesystem_roots else []
+    fs_roots = build_filesystem_roots(
+        request.headers.get(WORKSPACE_HEADER), body.filesystem_roots, messages
+    )
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
     stop = _normalize_stop(body.stop)
 
@@ -864,6 +868,7 @@ def _build_response_object(
 @router.post("/responses", dependencies=[Depends(verify_openai_key)])
 async def create_response(
     body: OAIResponsesRequest,
+    request: Request,
     shim: ShimService = Depends(_get_shim),
 ):
     """OpenAI Responses API endpoint, backed by ACP via ShimService."""
@@ -898,7 +903,9 @@ async def create_response(
         )
     messages = _responses_input_to_acp(body.input, body.instructions)
     tools = list(body.tools or [])
-    fs_roots = [FilesystemRoot(**r) for r in body.filesystem_roots] if body.filesystem_roots else []
+    fs_roots = build_filesystem_roots(
+        request.headers.get(WORKSPACE_HEADER), body.filesystem_roots, messages
+    )
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
     # The Responses API carries structured outputs under ``text.format``;
     # ``response_format`` is also accepted for lenient clients. Either is

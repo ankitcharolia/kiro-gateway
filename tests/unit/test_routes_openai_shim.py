@@ -1789,3 +1789,71 @@ class TestOpenAIToolCallSchemaMapping:
         resp = sync_client.post("/v1/chat/completions",
                                 json={**self._CHAT, "stream": True}, headers=openai_headers)
         assert '"Bash"' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Harness working-directory resolution (kiro.workspace) — the session cwd is
+# anchored in the harness's directory, recovered from the prompt <env> block or
+# the X-Kiro-Workspace header, instead of the gateway process cwd. Asserted via
+# the filesystem_roots the route forwards to ShimService.
+# ---------------------------------------------------------------------------
+
+class _WsRecordingShim:
+    """ShimService stand-in recording the kwargs the route forwards."""
+
+    def __init__(self):
+        self.complete_kwargs: list[dict] = []
+
+    def available_models(self):
+        return []
+
+    async def complete(self, **kwargs):
+        self.complete_kwargs.append(kwargs)
+        return {"content": "ok", "reasoning": "", "tool_calls": [],
+                "finish_reason": "stop", "usage": {}, "metadata": {}}
+
+
+class TestOpenAIWorkspaceCwd:
+    """The resolved harness cwd is forwarded as filesystem_roots."""
+
+    def test_env_block_working_directory_forwarded(self, sync_client, openai_headers, tmp_path):
+        rec = _WsRecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [
+                {"role": "system", "content": f"<env>\n  Working directory: {tmp_path}\n</env>"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        roots = rec.complete_kwargs[0]["filesystem_roots"]
+        assert [r.path for r in roots] == [str(tmp_path)]
+
+    def test_header_overrides_prompt_directory(self, sync_client, openai_headers, tmp_path):
+        header_dir = tmp_path / "hdr"
+        header_dir.mkdir()
+        rec = _WsRecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {
+            "model": "claude-sonnet-4.6",
+            "messages": [
+                {"role": "system", "content": f"<env>\n  Working directory: {tmp_path}\n</env>"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        headers = {**openai_headers, "X-Kiro-Workspace": str(header_dir)}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=headers)
+        assert resp.status_code == 200
+        roots = rec.complete_kwargs[0]["filesystem_roots"]
+        assert [r.path for r in roots] == [str(header_dir)]
+
+    def test_no_directory_leaves_roots_empty(self, sync_client, openai_headers):
+        rec = _WsRecordingShim()
+        sync_client.app.state.shim_service = rec
+        payload = {"model": "claude-sonnet-4.6", "messages": [{"role": "user", "content": "hi"}]}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200
+        assert rec.complete_kwargs[0]["filesystem_roots"] == []
+

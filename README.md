@@ -205,7 +205,11 @@ ACP_SURFACE_TOOL_CALLS=false
 # blocks). Default true — reasoning is additive and never changes the final
 # answer. Set false to emit only the final answer.
 ACP_SURFACE_THINKING=true
-ACP_WORKSPACE_DIR=               # Default session cwd (defaults to process cwd)
+ACP_WORKSPACE_DIR=               # Fallback session cwd. By default the harness
+                                 # cwd is auto-detected per request (X-Kiro-Workspace
+                                 # header, filesystem_roots, or the prompt's <env>
+                                 # "Working directory:" line); this is only used when
+                                 # none is present (else the process cwd).
 ACP_TIMEOUT=120                  # Seconds to await a JSON-RPC response
 ACP_STDIO_MAX_BYTES=16777216     # Max bytes per ACP stdout line (16 MiB) — raise
                                  # for very large tool outputs in long agent turns
@@ -615,9 +619,6 @@ ACP_WORKSPACE_DIR=/path  # working directory kiro-cli operates in (default: proc
 > commands in `ACP_WORKSPACE_DIR` without human confirmation. Use `false` for a
 > read/answer-only deployment, and scope `ACP_WORKSPACE_DIR` to a project
 > directory.
-
-A request may also pass `filesystem_roots` to set the session's working
-directory; the first root's path is used as the `cwd` for `session/new`.
 
 ---
 
