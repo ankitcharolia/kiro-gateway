@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.3.1 (2026-07-15)
+
+### Features
+
+* **workspace:** anchor ACP session in the harness cwd by default ([b455f8a](https://github.com/ankitcharolia/kiro-gateway/commit/b455f8a414c91fe1cf0461e9ff3bdffb51a40f8e))
+
+### Bug Fixes
+
+* **acp:** escape markdown in tool-activity labels so glob titles don't leak asterisks ([278bdfe](https://github.com/ankitcharolia/kiro-gateway/commit/278bdfe7954b2eeec2bdf5d053a3a4e68aba6a89))
+
+### Documentation
+
+* **changelog:** update for v2.3.0 [skip ci] ([90f865d](https://github.com/ankitcharolia/kiro-gateway/commit/90f865d98cb4190ff9a5b078c996d419aecb8bae))
+
+### Dependencies
+
+* **deps:** update astral-sh/setup-uv action to v8 ([5f531df](https://github.com/ankitcharolia/kiro-gateway/commit/5f531df037a9ca7eefcb23eeb473213d6f3589af))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @github-actions[bot]
+* @renovate[bot]
+
 ## 2.3.0 (2026-07-13)
 
 ### Features
