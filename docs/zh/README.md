@@ -119,10 +119,6 @@ ACP_TRUST_TOOLS=true        # kiro-cli 运行其自带工具并请求许可；tr
 ACP_WORKSPACE_DIR=          # 会话工作目录（默认：进程 cwd）
 ACP_TIMEOUT=120             # 等待 JSON-RPC 响应的秒数
 
-# 功能标志
-ACP_ENABLED=true
-OPENAI_SHIM_ENABLED=true
-ANTHROPIC_SHIM_ENABLED=true
 
 # 服务器
 SERVER_HOST=0.0.0.0

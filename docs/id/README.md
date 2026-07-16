@@ -116,9 +116,6 @@ KIRO_CLI_PATH=kiro-cli
 ACP_TRUST_TOOLS=true        # kiro-cli menjalankan alatnya sendiri dan meminta izin; true = setujui, false = tolak
 ACP_WORKSPACE_DIR=          # Direktori kerja sesi (default: cwd proses)
 ACP_TIMEOUT=120             # Detik menunggu respons JSON-RPC
-ACP_ENABLED=true
-OPENAI_SHIM_ENABLED=true
-ANTHROPIC_SHIM_ENABLED=true
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
 COMPLIANCE_MODE=true

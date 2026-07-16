@@ -119,10 +119,6 @@ ACP_TRUST_TOOLS=true        # kiro-cli 가 자체 내장 도구를 실행하며 
 ACP_WORKSPACE_DIR=          # 세션 작업 디렉터리 (기본값: 프로세스 cwd)
 ACP_TIMEOUT=120             # JSON-RPC 응답 대기 초
 
-# 기능 플래그
-ACP_ENABLED=true
-OPENAI_SHIM_ENABLED=true
-ANTHROPIC_SHIM_ENABLED=true
 
 # 서버
 SERVER_HOST=0.0.0.0

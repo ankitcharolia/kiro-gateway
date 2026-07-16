@@ -151,11 +151,6 @@ KIRO_GATEWAY_API_KEY=change-me
 # CLI path (override if kiro-cli is not on $PATH)
 KIRO_CLI_PATH=kiro-cli
 
-# Models — fallback list for GET /v1/models until the live catalogue is
-# discovered from kiro-cli. The requested model is forwarded via
-# session/set_model, so clients can select any model kiro-cli supports.
-KIRO_MODELS=auto,claude-opus-4.8,claude-sonnet-4.6
-
 # Tool execution — kiro-cli runs its own built-in tools and asks the gateway
 # for permission first. true = auto-approve each request, false = reject.
 ACP_TRUST_TOOLS=true
@@ -163,11 +158,6 @@ ACP_WORKSPACE_DIR=            # Default session cwd (defaults to process cwd)
 ACP_TIMEOUT=120              # Seconds to await a JSON-RPC response
 ACP_STDIO_MAX_BYTES=16777216 # Max bytes per ACP stdout line (16 MiB) — raise
                              # for very large tool outputs in long agent turns
-
-# Feature flags
-ACP_ENABLED=true
-OPENAI_SHIM_ENABLED=true
-ANTHROPIC_SHIM_ENABLED=true
 
 # Server
 SERVER_HOST=0.0.0.0

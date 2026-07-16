@@ -119,10 +119,6 @@ ACP_TRUST_TOOLS=true        # kiro-cli ejecuta sus propias herramientas y pide p
 ACP_WORKSPACE_DIR=          # Directorio de trabajo de la sesion (por defecto: cwd del proceso)
 ACP_TIMEOUT=120             # Segundos de espera de una respuesta JSON-RPC
 
-# Indicadores de características
-ACP_ENABLED=true
-OPENAI_SHIM_ENABLED=true
-ANTHROPIC_SHIM_ENABLED=true
 
 # Servidor
 SERVER_HOST=0.0.0.0

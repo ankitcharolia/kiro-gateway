@@ -170,10 +170,6 @@ KIRO_GATEWAY_API_KEY=change-me          # Secret key clients must send as Bearer
 KIRO_CLI_PATH=kiro-cli           # Override if kiro-cli is not on $PATH
 
 # ── Models ────────────────────────────────────────────────────────────
-# The gateway opens a warm-up session at startup to discover the live model
-# catalogue from kiro-cli automatically — KIRO_MODELS is an emergency fallback
-# only. Leave it unset (the default) unless kiro-cli is unavailable at startup.
-# KIRO_MODELS=auto,claude-opus-4-8,claude-sonnet-4-6
 # How to handle a requested model that isn't in kiro-cli's live catalogue.
 #   warn (default) = log a warning and fall back to the session default;
 #   strict         = reject with a 404 (native error shape);
@@ -250,11 +246,6 @@ KIRO_MCP_CONFIG=
 # malformed/unreachable server fails fast instead of stalling every request for
 # ACP_TIMEOUT (a fresh session is opened per request). Default 30.
 MCP_INIT_TIMEOUT=30
-
-# ── Feature flags ─────────────────────────────────────────────────────
-ACP_ENABLED=true
-OPENAI_SHIM_ENABLED=true
-ANTHROPIC_SHIM_ENABLED=true
 
 # ── Server ────────────────────────────────────────────────────────────
 SERVER_HOST=0.0.0.0
