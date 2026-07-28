@@ -1434,6 +1434,15 @@ class TestAnthropicShimReasoning:
 class _ReasoningOnlyACP(_ThinkingACP):
     """GPT-family regression fixture: ACP emits reasoning and no answer text."""
 
+    async def prompt(self, params):
+        return {
+            "content": "",
+            "reasoning": "Plan the investigation.",
+            "tool_calls": [],
+            "finish_reason": "stop",
+            "usage": {},
+        }
+
     async def prompt_stream(self, params):
         yield {"type": "thinking", "content": "Plan the investigation."}
         yield {"type": "done", "finish_reason": "stop", "usage": {}}
