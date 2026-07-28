@@ -161,6 +161,16 @@ ACP_SURFACE_THINKING: bool = (
     os.environ.get("ACP_SURFACE_THINKING", "true").lower() != "false"
 )
 
+# Strip harness identity-override and concealment instructions from system
+# messages before serialising into the ACP prompt. Default true: harnesses like
+# Claude Code inject ~30KB of metadata including "You are Claude Code" identity
+# assertions that can trigger kiro-cli's built-in prompt-injection detection
+# (issue #73). Useful context (coding standards, memory, tool descriptions) is
+# preserved. Set false to forward system prompts verbatim (pre-v2.3 behaviour).
+SANITIZE_SYSTEM_PROMPTS: bool = (
+    os.environ.get("SANITIZE_SYSTEM_PROMPTS", "true").lower() != "false"
+)
+
 # MCP servers registered on every ACP session via ``session/new``'s
 # ``mcpServers`` field. This is the ONLY external-tool channel kiro-cli honors
 # over ACP: it advertises ``mcpCapabilities.http: true`` and executes the MCP
@@ -406,6 +416,7 @@ class _Settings:
     ACP_TRUST_TOOLS: bool = field(default_factory=lambda: ACP_TRUST_TOOLS)
     ACP_SURFACE_TOOL_CALLS: bool = field(default_factory=lambda: ACP_SURFACE_TOOL_CALLS)
     ACP_SURFACE_THINKING: bool = field(default_factory=lambda: ACP_SURFACE_THINKING)
+    SANITIZE_SYSTEM_PROMPTS: bool = field(default_factory=lambda: SANITIZE_SYSTEM_PROMPTS)
     MCP_SERVERS: List[dict] = field(default_factory=lambda: [dict(s) for s in MCP_SERVERS])
     MCP_INIT_TIMEOUT: int = field(default_factory=lambda: MCP_INIT_TIMEOUT)
     ACP_WORKSPACE_DIR: str = field(default_factory=lambda: ACP_WORKSPACE_DIR)

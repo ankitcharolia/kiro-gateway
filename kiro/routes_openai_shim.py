@@ -43,6 +43,7 @@ from kiro.multimodal import (
     append_text, collapse_blocks, openai_part_to_blocks, prepend_text,
 )
 from kiro.shim_service import ShimService
+from kiro.system_sanitizer import sanitize_system_prompt
 from kiro.tokenizer import normalize_usage
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Shim"])
@@ -167,6 +168,12 @@ def _oai_messages_to_acp(messages: list[OAIMessage]) -> list[PromptMessage]:
             content = collapse_blocks(blocks)
         else:
             content = m.content or ""
+
+        # Strip identity-override / concealment patterns from system messages
+        # so kiro-cli's model doesn't flag them as prompt injection (issue #73).
+        if acp_role in ("system", "developer") and settings.SANITIZE_SYSTEM_PROMPTS:
+            if isinstance(content, str):
+                content = sanitize_system_prompt(content) or ""
 
         # tool role: wrap with tool_call_id context
         if m.role == "tool" and m.tool_call_id:
