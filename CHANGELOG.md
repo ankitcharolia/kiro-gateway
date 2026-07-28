@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.3.2 (2026-07-28)
+
+### Features
+
+* **shim:** accept per-request MCP servers via header and body ([#75](https://github.com/ankitcharolia/kiro-gateway/pull/75)) ([1828cb7](https://github.com/ankitcharolia/kiro-gateway/commit/1828cb75d01297245212de1deb497684c2c9d5fb))
+
+### Bug Fixes
+
+* **shim:** resolve 'Content block not found' for GPT-family models ([#74](https://github.com/ankitcharolia/kiro-gateway/pull/74)) ([315319a](https://github.com/ankitcharolia/kiro-gateway/commit/315319a7f8f3d2719e4e21aac635e132b8c4c896))
+* **shim:** strip harness identity overrides from system prompts ([#73](https://github.com/ankitcharolia/kiro-gateway/pull/73)) ([ede2867](https://github.com/ankitcharolia/kiro-gateway/commit/ede2867a05da50d4447f59814d11f6e89ded7c1c))
+* **test:** add mcp_servers param to test stub new_session() signatures ([7beee77](https://github.com/ankitcharolia/kiro-gateway/commit/7beee777fbefe7582f2fd0d3641dc92a63a3d3ed))
+* **test:** override prompt() in _ReasoningOnlyACP for non-stream test ([89705be](https://github.com/ankitcharolia/kiro-gateway/commit/89705be754bffc97c9f95957372840f647f3ec92))
+
+### Documentation
+
+* **changelog:** update for v2.3.1 [skip ci] ([aefac10](https://github.com/ankitcharolia/kiro-gateway/commit/aefac102cd2132c036bd5ae2233acd18e6cd9b67))
+* drop redundant default env vars from config examples ([63a2878](https://github.com/ankitcharolia/kiro-gateway/commit/63a2878c615adc325c090c5278f8471d12c8bdc8))
+
+### Dependencies
+
+* **deps:** update astral-sh/setup-uv action to v9 ([b811d0e](https://github.com/ankitcharolia/kiro-gateway/commit/b811d0e4c15784e5f031cd203367fae0206cb14f))
+* **deps:** update actions/checkout action to v7.0.1 ([b5cf58d](https://github.com/ankitcharolia/kiro-gateway/commit/b5cf58d597dc5b358ef38d76c50e9f83d666923b))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @renovate[bot]
+* @github-actions[bot]
+
 ## 2.3.1 (2026-07-15)
 
 ### Features
