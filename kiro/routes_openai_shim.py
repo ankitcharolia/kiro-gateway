@@ -458,9 +458,17 @@ async def chat_completions(
     reasoning = result.get("reasoning") or ""
     message: dict[str, Any] = {
         "role": "assistant",
+        # Always include content (empty string when no text produced) so SDK
+        # accumulators can build a valid assistant message. GPT-family models
+        # may produce reasoning-only turns (issue #74). When tool_calls are
+        # present, content is null per OpenAI spec.
         "content": result["content"] if not tool_calls else None,
         "tool_calls": tool_calls if tool_calls else None,
     }
+    # Ensure content is never None when there are no tool_calls — an empty
+    # string is valid and prevents SDK errors on reasoning-only turns.
+    if message["content"] is None and not tool_calls:
+        message["content"] = ""
     if settings.ACP_SURFACE_THINKING and reasoning:
         # DeepSeek/OpenAI-compatible reasoning convention; final ``content`` is
         # unchanged. Clients that don't read it simply ignore the field.
@@ -811,8 +819,16 @@ def _build_response_object(
     status: str = "completed",
     reasoning: str = "",
     metadata: Optional[dict] = None,
+    include_empty_message: bool = False,
 ) -> dict:
-    """Assemble a Responses API ``response`` object from aggregated output."""
+    """Assemble a Responses API ``response`` object from aggregated output.
+
+    Args:
+        include_empty_message: Emit an empty assistant ``message`` item even when
+            *text* is empty. Used by the streaming path so ``response.completed``
+            matches the items that were actually streamed for a reasoning-only
+            turn (issue #74).
+    """
     output: list[dict] = []
     if reasoning and settings.ACP_SURFACE_THINKING:
         # Reasoning item comes first, mirroring the OpenAI Responses ordering.
@@ -821,7 +837,7 @@ def _build_response_object(
             "id": f"rs_{uuid.uuid4().hex[:24]}",
             "summary": [{"type": "summary_text", "text": reasoning}],
         })
-    if text:
+    if text or include_empty_message:
         output.append({
             "type": "message",
             "id": f"msg_{uuid.uuid4().hex[:24]}",
@@ -961,6 +977,9 @@ async def create_response(
         usage=usage,
         reasoning=result.get("reasoning") or "",
         metadata=result.get("metadata") or {},
+        # Ensure a message item is present even for reasoning-only turns so
+        # clients can construct a valid response object (issue #74).
+        include_empty_message=not text and not result.get("tool_calls"),
     )
 
 
@@ -986,20 +1005,27 @@ async def _responses_stream(
     """
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
     created = int(time.time())
-    message_item_id = f"msg_{uuid.uuid4().hex[:24]}"
     seq = 0
+    # Full output text / reasoning for the terminal response object.
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[dict] = []
+    # Output-item bookkeeping. ACP interleaves text, reasoning and tool activity
+    # in any order, so every item gets its own id and an ``output_index`` that is
+    # never reused: Responses clients index streamed deltas by them and reject an
+    # event whose item was never opened or is already done (issue #74).
+    next_output_index = 0
+    message_item_id = ""
+    message_oidx = 0
+    message_text: list[str] = []
     text_item_open = False
-    output_index = 0
+    message_item_emitted = False
+    reasoning_item_id = ""
+    reasoning_oidx = 0
+    reasoning_text: list[str] = []
+    reasoning_item_open = False
     # tool_call_id -> output_index
     tool_output_index: dict[str, int] = {}
-    # Reasoning ("thinking") item state — emitted first, at output_index 0.
-    reasoning_item_id = f"rs_{uuid.uuid4().hex[:24]}"
-    reasoning_parts: list[str] = []
-    reasoning_item_open = False
-    reasoning_used = False
-    reasoning_oidx = 0
 
     def sse(event: str, data: dict) -> str:
         nonlocal seq
@@ -1023,7 +1049,7 @@ async def _responses_stream(
         nonlocal reasoning_item_open
         if not reasoning_item_open:
             return
-        full = "".join(reasoning_parts)
+        full = "".join(reasoning_text)
         yield sse("response.reasoning_summary_text.done", {
             "item_id": reasoning_item_id, "output_index": reasoning_oidx,
             "summary_index": 0, "text": full,
@@ -1038,6 +1064,32 @@ async def _responses_stream(
                      "summary": [{"type": "summary_text", "text": full}]},
         })
         reasoning_item_open = False
+
+    async def close_text():
+        """Emit the terminal message-item events if the text item is open."""
+        nonlocal text_item_open
+        if not text_item_open:
+            return
+        full_text = "".join(message_text)
+        yield sse("response.output_text.done", {
+            "item_id": message_item_id, "output_index": message_oidx,
+            "content_index": 0, "text": full_text,
+        })
+        yield sse("response.content_part.done", {
+            "item_id": message_item_id, "output_index": message_oidx,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": full_text, "annotations": []},
+        })
+        yield sse("response.output_item.done", {
+            "output_index": message_oidx,
+            "item": {
+                "type": "message", "id": message_item_id, "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": full_text,
+                             "annotations": []}],
+            },
+        })
+        text_item_open = False
 
     # response.created + in_progress
     yield sse("response.created", {"response": base_response("in_progress")})
@@ -1072,26 +1124,28 @@ async def _responses_stream(
                 if not text_item_open:
                     async for _ev in close_reasoning():
                         yield _ev
-                    if reasoning_used:
-                        # Reasoning occupied output_index 0; the message item
-                        # takes the next index.
-                        output_index += 1
+                    message_item_id = f"msg_{uuid.uuid4().hex[:24]}"
+                    message_oidx = next_output_index
+                    next_output_index += 1
+                    message_text = []
+                    text_item_open = True
+                    message_item_emitted = True
                     yield sse("response.output_item.added", {
-                        "output_index": output_index,
+                        "output_index": message_oidx,
                         "item": {
                             "type": "message", "id": message_item_id,
                             "status": "in_progress", "role": "assistant", "content": [],
                         },
                     })
                     yield sse("response.content_part.added", {
-                        "item_id": message_item_id, "output_index": output_index,
+                        "item_id": message_item_id, "output_index": message_oidx,
                         "content_index": 0,
                         "part": {"type": "output_text", "text": "", "annotations": []},
                     })
-                    text_item_open = True
                 text_parts.append(delta)
+                message_text.append(delta)
                 yield sse("response.output_text.delta", {
-                    "item_id": message_item_id, "output_index": output_index,
+                    "item_id": message_item_id, "output_index": message_oidx,
                     "content_index": 0, "delta": delta,
                 })
 
@@ -1103,8 +1157,14 @@ async def _responses_stream(
                     delta = event.get("content", "")
                     if delta:
                         if not reasoning_item_open:
-                            reasoning_oidx = output_index
-                            reasoning_used = True
+                            # Close an open message item first: a reasoning item
+                            # must not share its output_index (issue #74).
+                            async for _ev in close_text():
+                                yield _ev
+                            reasoning_item_id = f"rs_{uuid.uuid4().hex[:24]}"
+                            reasoning_oidx = next_output_index
+                            next_output_index += 1
+                            reasoning_text = []
                             reasoning_item_open = True
                             yield sse("response.output_item.added", {
                                 "output_index": reasoning_oidx,
@@ -1117,6 +1177,7 @@ async def _responses_stream(
                                 "part": {"type": "summary_text", "text": ""},
                             })
                         reasoning_parts.append(delta)
+                        reasoning_text.append(delta)
                         yield sse("response.reasoning_summary_text.delta", {
                             "item_id": reasoning_item_id, "output_index": reasoning_oidx,
                             "summary_index": 0, "delta": delta,
@@ -1124,42 +1185,24 @@ async def _responses_stream(
                 continue
 
             elif etype == "tool_call":
-                # Close any open reasoning item before tool output.
+                # Close any open reasoning/message item before tool output.
                 async for _ev in close_reasoning():
                     yield _ev
-                # Close the text item first if it is open.
-                if text_item_open:
-                    full_text = "".join(text_parts)
-                    yield sse("response.output_text.done", {
-                        "item_id": message_item_id, "output_index": output_index,
-                        "content_index": 0, "text": full_text,
-                    })
-                    yield sse("response.content_part.done", {
-                        "item_id": message_item_id, "output_index": output_index,
-                        "content_index": 0,
-                        "part": {"type": "output_text", "text": full_text, "annotations": []},
-                    })
-                    yield sse("response.output_item.done", {
-                        "output_index": output_index,
-                        "item": {
-                            "type": "message", "id": message_item_id, "status": "completed",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": full_text, "annotations": []}],
-                        },
-                    })
-                    text_item_open = False
+                async for _ev in close_text():
+                    yield _ev
 
                 tc_id = event.get("id", f"call_{uuid.uuid4().hex[:24]}")
                 name = _sanitize_tool_name(event.get("name", ""))
                 arguments = event.get("arguments", {})
                 if tc_id not in tool_output_index:
-                    output_index += 1
-                    tool_output_index[tc_id] = output_index
+                    tool_oidx = next_output_index
+                    next_output_index += 1
+                    tool_output_index[tc_id] = tool_oidx
                     fc_item_id = f"fc_{uuid.uuid4().hex[:24]}"
                     tool_calls.append({"id": tc_id, "name": name, "arguments": arguments,
                                        "item_id": fc_item_id})
                     yield sse("response.output_item.added", {
-                        "output_index": output_index,
+                        "output_index": tool_oidx,
                         "item": {
                             "type": "function_call", "id": fc_item_id, "call_id": tc_id,
                             "name": name, "arguments": "", "status": "in_progress",
@@ -1168,13 +1211,13 @@ async def _responses_stream(
                     args_str = json.dumps(arguments) if arguments else ""
                     if args_str:
                         yield sse("response.function_call_arguments.delta", {
-                            "item_id": fc_item_id, "output_index": output_index, "delta": args_str,
+                            "item_id": fc_item_id, "output_index": tool_oidx, "delta": args_str,
                         })
                     yield sse("response.function_call_arguments.done", {
-                        "item_id": fc_item_id, "output_index": output_index, "arguments": args_str,
+                        "item_id": fc_item_id, "output_index": tool_oidx, "arguments": args_str,
                     })
                     yield sse("response.output_item.done", {
-                        "output_index": output_index,
+                        "output_index": tool_oidx,
                         "item": {
                             "type": "function_call", "id": fc_item_id, "call_id": tc_id,
                             "name": name, "arguments": args_str, "status": "completed",
@@ -1186,26 +1229,32 @@ async def _responses_stream(
                 async for _ev in close_reasoning():
                     yield _ev
                 # Close a still-open text item.
-                if text_item_open:
-                    full_text = "".join(text_parts)
-                    yield sse("response.output_text.done", {
-                        "item_id": message_item_id, "output_index": output_index,
-                        "content_index": 0, "text": full_text,
-                    })
-                    yield sse("response.content_part.done", {
-                        "item_id": message_item_id, "output_index": output_index,
-                        "content_index": 0,
-                        "part": {"type": "output_text", "text": full_text, "annotations": []},
-                    })
-                    yield sse("response.output_item.done", {
-                        "output_index": output_index,
+                async for _ev in close_text():
+                    yield _ev
+                if not message_item_emitted and not tool_calls:
+                    # Reasoning-only turn (seen live with GPT-family models):
+                    # add an empty message item so Responses clients can still
+                    # build a final assistant message (issue #74).
+                    message_item_id = f"msg_{uuid.uuid4().hex[:24]}"
+                    message_oidx = next_output_index
+                    next_output_index += 1
+                    message_text = []
+                    text_item_open = True
+                    message_item_emitted = True
+                    yield sse("response.output_item.added", {
+                        "output_index": message_oidx,
                         "item": {
-                            "type": "message", "id": message_item_id, "status": "completed",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                            "type": "message", "id": message_item_id,
+                            "status": "in_progress", "role": "assistant", "content": [],
                         },
                     })
-                    text_item_open = False
+                    yield sse("response.content_part.added", {
+                        "item_id": message_item_id, "output_index": message_oidx,
+                        "content_index": 0,
+                        "part": {"type": "output_text", "text": "", "annotations": []},
+                    })
+                    async for _ev in close_text():
+                        yield _ev
 
                 final_text = "".join(text_parts)
                 final_tool_calls = [
@@ -1226,6 +1275,9 @@ async def _responses_stream(
                     usage=usage,
                     reasoning="".join(reasoning_parts),
                     metadata=event.get("metadata") or {},
+                    # Keep response.completed consistent with the streamed items
+                    # when only an empty message item was emitted (issue #74).
+                    include_empty_message=message_item_emitted and not final_text,
                 )
                 yield sse("response.completed", {"response": final})
                 break

@@ -80,6 +80,75 @@ def _sanitize_tool_name(name: str) -> str:
     return sanitized or "kiro_tool"
 
 
+class _AnthropicContentBlockState:
+    """Track one valid, monotonically indexed Anthropic content-block stream.
+
+    Anthropic clients accumulate deltas by block index and reject a delta when
+    its matching ``content_block_start`` was omitted or already stopped. ACP
+    may freely interleave text, thinking, and tool activity, so route-level
+    booleans are not sufficient: every block-type change must close the current
+    block before opening the next index.
+    """
+
+    def __init__(self) -> None:
+        self._next_index = 0
+        self._open_index: int | None = None
+        self._open_type: str | None = None
+        self.emitted_types: set[str] = set()
+
+    @property
+    def open_index(self) -> int | None:
+        """Return the currently open block index, if any."""
+        return self._open_index
+
+    def close(self) -> list[tuple[str, dict[str, Any]]]:
+        """Close the current block, returning its SSE event payload."""
+        if self._open_index is None:
+            return []
+        payload = {"type": "content_block_stop", "index": self._open_index}
+        self._open_index = None
+        self._open_type = None
+        return [("content_block_stop", payload)]
+
+    def start(
+        self,
+        block_type: str,
+        content_block: dict[str, Any],
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Transition to ``block_type``, closing any unlike open block."""
+        if self._open_type == block_type:
+            return []
+        events = self.close()
+        index = self._next_index
+        self._next_index += 1
+        self._open_index = index
+        self._open_type = block_type
+        self.emitted_types.add(block_type)
+        events.append(("content_block_start", {
+            "type": "content_block_start",
+            "index": index,
+            "content_block": content_block,
+        }))
+        return events
+
+    def delta(
+        self,
+        block_type: str,
+        content_block: dict[str, Any],
+        delta: dict[str, Any],
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Open the requested block type if needed, then append its delta."""
+        events = self.start(block_type, content_block)
+        if self._open_index is None:  # pragma: no cover - guarded by start()
+            raise RuntimeError("Anthropic content block failed to open")
+        events.append(("content_block_delta", {
+            "type": "content_block_delta",
+            "index": self._open_index,
+            "delta": delta,
+        }))
+        return events
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -420,8 +489,10 @@ async def create_message(
     if settings.ACP_SURFACE_THINKING and reasoning:
         # Anthropic extended-thinking block, emitted before the text block.
         content_blocks.append({"type": "thinking", "thinking": reasoning})
-    if result["content"]:
-        content_blocks.append({"type": "text", "text": result["content"]})
+    # Always include a text block — even when empty — so Anthropic SDK
+    # accumulators can construct a valid assistant message. GPT-family models
+    # may produce reasoning without any answer text (issue #74).
+    content_blocks.append({"type": "text", "text": result["content"] or ""})
     for tc in result.get("tool_calls", []):
         content_blocks.append({
             "type": "tool_use",
@@ -517,9 +588,7 @@ async def _stream_response(
         [{"role": m.role, "content": m.content} for m in messages],
         tools=tools or None,
     )
-    block_idx = 0
-    in_text_block = False
-    in_thinking_block = False
+    blocks = _AnthropicContentBlockState()
     active_tool_blocks: dict[str, int] = {}  # tool_call_id -> block_index
     # Accumulators for the output-token estimate emitted at message_delta.
     text_acc: list[str] = []
@@ -581,23 +650,12 @@ async def _stream_response(
                 delta = event.get("content", "")
                 if not delta:
                     continue
-                if in_thinking_block:
-                    # Close the thinking block before the text block opens.
-                    yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
-                    block_idx += 1
-                    in_thinking_block = False
-                if not in_text_block:
-                    yield sse("content_block_start", {
-                        "type": "content_block_start",
-                        "index": block_idx,
-                        "content_block": {"type": "text", "text": ""},
-                    })
-                    in_text_block = True
-                yield sse("content_block_delta", {
-                    "type": "content_block_delta",
-                    "index": block_idx,
-                    "delta": {"type": "text_delta", "text": delta},
-                })
+                for event_name, payload in blocks.delta(
+                    "text",
+                    {"type": "text", "text": ""},
+                    {"type": "text_delta", "text": delta},
+                ):
+                    yield sse(event_name, payload)
                 text_acc.append(delta)
 
             elif etype == "thinking":
@@ -606,18 +664,12 @@ async def _stream_response(
                 if settings.ACP_SURFACE_THINKING:
                     delta = event.get("content", "")
                     if delta:
-                        if not in_thinking_block:
-                            yield sse("content_block_start", {
-                                "type": "content_block_start",
-                                "index": block_idx,
-                                "content_block": {"type": "thinking", "thinking": ""},
-                            })
-                            in_thinking_block = True
-                        yield sse("content_block_delta", {
-                            "type": "content_block_delta",
-                            "index": block_idx,
-                            "delta": {"type": "thinking_delta", "thinking": delta},
-                        })
+                        for event_name, payload in blocks.delta(
+                            "thinking",
+                            {"type": "thinking", "thinking": ""},
+                            {"type": "thinking_delta", "thinking": delta},
+                        ):
+                            yield sse(event_name, payload)
                 continue
 
             elif etype == "tool_call":
@@ -627,49 +679,49 @@ async def _stream_response(
                 collected_tool_calls[tc_id] = {"name": name, "arguments": arguments}
 
                 if tc_id not in active_tool_blocks:
-                    # Close the thinking block if open
-                    if in_thinking_block:
-                        yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
-                        block_idx += 1
-                        in_thinking_block = False
-                    # Close the text block if open
-                    if in_text_block:
-                        yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
-                        block_idx += 1
-                        in_text_block = False
-
-                    active_tool_blocks[tc_id] = block_idx
-                    yield sse("content_block_start", {
-                        "type": "content_block_start",
-                        "index": block_idx,
-                        "content_block": {
+                    for event_name, payload in blocks.start(
+                        "tool_use",
+                        {
                             "type": "tool_use",
                             "id": tc_id,
                             "name": name,
                             "input": {},
                         },
-                    })
+                    ):
+                        yield sse(event_name, payload)
+                    tool_index = blocks.open_index
+                    if tool_index is None:  # pragma: no cover - guarded by start()
+                        raise RuntimeError("Anthropic tool block failed to open")
+                    active_tool_blocks[tc_id] = tool_index
 
                     # Stream arguments as input_json_delta
                     if arguments:
                         yield sse("content_block_delta", {
                             "type": "content_block_delta",
-                            "index": block_idx,
+                            "index": tool_index,
                             "delta": {
                                 "type": "input_json_delta",
                                 "partial_json": json.dumps(arguments),
                             },
                         })
 
-                    yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
-                    block_idx += 1
+                    for event_name, payload in blocks.close():
+                        yield sse(event_name, payload)
 
             elif etype == "done":
-                # Close open thinking or text block.
-                if in_thinking_block:
-                    yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
-                if in_text_block:
-                    yield sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
+                for event_name, payload in blocks.close():
+                    yield sse(event_name, payload)
+                if not ({"text", "tool_use"} & blocks.emitted_types):
+                    # Some GPT-family turns end after ACP reasoning only. Add
+                    # an empty text block so Anthropic/OpenAI-compatible stream
+                    # accumulators still construct a final assistant message;
+                    # reasoning remains in its native thinking block.
+                    for event_name, payload in blocks.start(
+                        "text", {"type": "text", "text": ""}
+                    ):
+                        yield sse(event_name, payload)
+                    for event_name, payload in blocks.close():
+                        yield sse(event_name, payload)
 
                 usage = event.get("usage", {}) or {}
                 # Only use stop_reason=tool_use when tool blocks were emitted AND
@@ -712,6 +764,8 @@ async def _stream_response(
                 break
 
             elif etype == "error":
+                for event_name, payload in blocks.close():
+                    yield sse(event_name, payload)
                 mapped = classify_event(event)
                 yield sse("error", {
                     "type": "error",
@@ -723,6 +777,8 @@ async def _stream_response(
                 break
 
     except Exception as exc:
+        for event_name, payload in blocks.close():
+            yield sse(event_name, payload)
         mapped = classify_exception(exc)
         logger.error(f"Anthropic stream error (status={mapped.status_code}): {exc}")
         yield sse("error", {

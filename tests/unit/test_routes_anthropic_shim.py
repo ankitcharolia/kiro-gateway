@@ -1431,6 +1431,156 @@ class TestAnthropicShimReasoning:
         assert '"type": "text_delta"' in resp.text
 
 
+class _ReasoningOnlyACP(_ThinkingACP):
+    """GPT-family regression fixture: ACP emits reasoning and no answer text."""
+
+    async def prompt_stream(self, params):
+        yield {"type": "thinking", "content": "Plan the investigation."}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class _InterleavedContentACP(_ThinkingACP):
+    """ACP fixture exercising every content-block transition in one turn."""
+
+    async def prompt_stream(self, params):
+        yield {"type": "text", "content": "preface"}
+        yield {"type": "thinking", "content": "reasoning"}
+        yield {"type": "tool_call", "id": "tool-1", "name": "Read file", "arguments": {}}
+        yield {"type": "text", "content": "answer"}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+def _anthropic_stream_events(body: str) -> list[dict]:
+    """Parse data payloads from an Anthropic SSE response body."""
+    return [
+        json.loads(line[len("data: "):])
+        for line in body.splitlines()
+        if line.startswith("data: ")
+    ]
+
+
+def _assert_valid_content_block_lifecycle(events: list[dict]) -> None:
+    """Assert every delta/stop has one open, monotonically indexed block."""
+    open_blocks: dict[int, str] = {}
+    last_started = -1
+    matching_deltas = {
+        "text": "text_delta",
+        "thinking": "thinking_delta",
+        "tool_use": "input_json_delta",
+    }
+    for event in events:
+        etype = event.get("type")
+        if etype == "content_block_start":
+            index = event["index"]
+            block_type = event["content_block"]["type"]
+            assert not open_blocks, f"started {index=} while {open_blocks=}"
+            assert index > last_started, f"reused/out-of-order block {index=}"
+            open_blocks[index] = block_type
+            last_started = index
+        elif etype == "content_block_delta":
+            index = event["index"]
+            assert index in open_blocks, f"Content block not found: {index=}"
+            assert event["delta"]["type"] == matching_deltas[open_blocks[index]]
+        elif etype == "content_block_stop":
+            index = event["index"]
+            assert index in open_blocks, f"stopped missing block {index=}"
+            del open_blocks[index]
+        elif etype == "message_delta":
+            assert not open_blocks, f"message ended with open blocks: {open_blocks}"
+    assert not open_blocks
+
+
+class TestAnthropicContentBlockStateRegression:
+    """Regression coverage for GPT reasoning-only/interleaved streams (#74)."""
+
+    _MSG = {
+        "model": "gpt-5.6-terra", "max_tokens": 64, "stream": True,
+        "messages": [{"role": "user", "content": "investigate"}],
+    }
+
+    def test_reasoning_only_adds_empty_text_block_and_completes(
+        self, sync_client, anthropic_headers
+    ):
+        sync_client.app.state.shim_service = _ShimService(_ReasoningOnlyACP())
+        response = sync_client.post(
+            "/v1/messages", json=self._MSG, headers=anthropic_headers
+        )
+
+        assert response.status_code == 200
+        events = _anthropic_stream_events(response.text)
+        _assert_valid_content_block_lifecycle(events)
+        starts = [
+            event for event in events if event.get("type") == "content_block_start"
+        ]
+        assert [event["index"] for event in starts] == [0, 1]
+        assert [event["content_block"]["type"] for event in starts] == [
+            "thinking", "text"
+        ]
+        assert starts[1]["content_block"]["text"] == ""
+        message_delta = next(
+            event for event in events if event.get("type") == "message_delta"
+        )
+        assert message_delta["delta"]["stop_reason"] == "end_turn"
+        assert events[-1]["type"] == "message_stop"
+
+    def test_text_thinking_text_transitions_use_new_indexes(
+        self, sync_client, anthropic_headers
+    ):
+        sync_client.app.state.shim_service = _ShimService(_InterleavedContentACP())
+        response = sync_client.post(
+            "/v1/messages", json=self._MSG, headers=anthropic_headers
+        )
+
+        events = _anthropic_stream_events(response.text)
+        _assert_valid_content_block_lifecycle(events)
+        starts = [
+            event for event in events if event.get("type") == "content_block_start"
+        ]
+        # Default tool activity is folded into the existing thinking block.
+        assert [event["index"] for event in starts] == [0, 1, 2]
+        assert [event["content_block"]["type"] for event in starts] == [
+            "text", "thinking", "text"
+        ]
+
+    def test_text_thinking_tool_text_transitions_are_valid(
+        self, sync_client, anthropic_headers, monkeypatch
+    ):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_InterleavedContentACP())
+        response = sync_client.post(
+            "/v1/messages", json=self._MSG, headers=anthropic_headers
+        )
+
+        events = _anthropic_stream_events(response.text)
+        _assert_valid_content_block_lifecycle(events)
+        starts = [
+            event for event in events if event.get("type") == "content_block_start"
+        ]
+        assert [event["index"] for event in starts] == [0, 1, 2, 3]
+        assert [event["content_block"]["type"] for event in starts] == [
+            "text", "thinking", "tool_use", "text"
+        ]
+
+    def test_non_stream_reasoning_only_includes_text_block(
+        self, sync_client, anthropic_headers
+    ):
+        """Non-streaming reasoning-only response must include an empty text block."""
+        sync_client.app.state.shim_service = _ShimService(_ReasoningOnlyACP())
+        msg = {**self._MSG, "stream": False}
+        response = sync_client.post(
+            "/v1/messages", json=msg, headers=anthropic_headers
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        blocks = data["content"]
+        assert any(b["type"] == "thinking" for b in blocks)
+        text_blocks = [b for b in blocks if b["type"] == "text"]
+        assert text_blocks, "non-streaming reasoning-only must have a text block"
+        assert text_blocks[0]["text"] == ""
+        assert data["stop_reason"] == "end_turn"
+
+
 # ---------------------------------------------------------------------------
 # Task list / plan folded into the reasoning channel (thinking blocks) on the
 # Anthropic shim, gated by ACP_SURFACE_THINKING.

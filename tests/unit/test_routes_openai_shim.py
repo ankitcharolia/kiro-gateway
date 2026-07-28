@@ -1498,6 +1498,211 @@ class TestOpenAIShimReasoning:
 
 
 # ---------------------------------------------------------------------------
+# Regression coverage for GPT-family reasoning-only / interleaved turns
+# (issue #74): live probing showed kiro-cli emits text, reasoning and built-in
+# tool activity in any order, so streamed Responses items must never share or
+# reuse an output_index, and a reasoning-only turn must still produce a usable
+# assistant message.
+# ---------------------------------------------------------------------------
+
+class _ReasoningOnlyACP(_ThinkingACP):
+    """ACP stub whose turn produces reasoning and no answer text."""
+
+    async def prompt(self, params):
+        return {"content": "", "reasoning": "Plan the investigation.",
+                "tool_calls": [], "finish_reason": "stop", "usage": {}}
+
+    async def prompt_stream(self, params):
+        yield {"type": "thinking", "content": "Plan the investigation."}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class _InterleavedContentACP(_ThinkingACP):
+    """ACP stub exercising text → reasoning → tool → text in one turn."""
+
+    async def prompt_stream(self, params):
+        yield {"type": "text", "content": "preface"}
+        yield {"type": "thinking", "content": "reasoning"}
+        yield {"type": "tool_call", "id": "tool-1", "name": "Read file", "arguments": {}}
+        yield {"type": "text", "content": "answer"}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+def _sse_events(body: str) -> list[dict]:
+    """Parse ``data:`` payloads of an SSE body into dicts."""
+    return [
+        json.loads(line[len("data: "):])
+        for line in body.splitlines()
+        if line.startswith("data: ") and line[len("data: "):].strip() != "[DONE]"
+    ]
+
+
+def _assert_valid_responses_item_lifecycle(events: list[dict]) -> None:
+    """Assert every streamed Responses item opens once at a fresh index."""
+    open_items: dict[int, str] = {}
+    seen_indexes: set[int] = set()
+    item_ids: set[str] = set()
+    for event in events:
+        etype = event.get("type")
+        if etype == "response.output_item.added":
+            index = event["output_index"]
+            item = event["item"]
+            assert index not in open_items, f"{index=} already open"
+            assert index not in seen_indexes, f"{index=} reused"
+            assert item["id"] not in item_ids, f"item id reused: {item['id']}"
+            open_items[index] = item["id"]
+            seen_indexes.add(index)
+            item_ids.add(item["id"])
+        elif etype == "response.output_item.done":
+            index = event["output_index"]
+            assert index in open_items, f"item never opened: {index=}"
+            del open_items[index]
+        elif etype in (
+            "response.output_text.delta", "response.output_text.done",
+            "response.content_part.added", "response.content_part.done",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_part.done",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+        ):
+            index = event["output_index"]
+            assert index in open_items, f"delta for unopened item: {index=}"
+            assert open_items[index] == event["item_id"], (
+                f"item_id mismatch at {index=}"
+            )
+        elif etype == "response.completed":
+            assert not open_items, f"response completed with open items: {open_items}"
+    assert not open_items
+
+
+class TestOpenAIStreamContentBlockRegression:
+    """Reasoning-only and interleaved streams stay structurally valid (#74)."""
+
+    _CHAT = {"model": "gpt-5.6-terra", "messages": [{"role": "user", "content": "q"}]}
+
+    def test_chat_stream_reasoning_only_still_carries_content(
+        self, sync_client, openai_headers
+    ):
+        sync_client.app.state.shim_service = _ShimService(_ReasoningOnlyACP())
+        resp = sync_client.post(
+            "/v1/chat/completions", json={**self._CHAT, "stream": True},
+            headers=openai_headers,
+        )
+
+        assert resp.status_code == 200
+        chunks = _sse_events(resp.text)
+        deltas = [chunk["choices"][0]["delta"] for chunk in chunks if chunk.get("choices")]
+        # The opening role chunk carries content "" so SDKs accumulate a
+        # non-null assistant message even without answer text.
+        assert any(delta.get("content") == "" for delta in deltas)
+        assert any("reasoning_content" in delta for delta in deltas)
+        finish_reasons = [
+            choice["finish_reason"]
+            for chunk in chunks for choice in chunk.get("choices", [])
+            if choice.get("finish_reason")
+        ]
+        assert finish_reasons == ["stop"]
+
+    def test_responses_stream_reasoning_only_emits_message_item(
+        self, sync_client, openai_headers
+    ):
+        sync_client.app.state.shim_service = _ShimService(_ReasoningOnlyACP())
+        resp = sync_client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.6-terra", "input": "q", "stream": True},
+            headers=openai_headers,
+        )
+
+        assert resp.status_code == 200
+        events = _sse_events(resp.text)
+        _assert_valid_responses_item_lifecycle(events)
+        added = [e for e in events if e.get("type") == "response.output_item.added"]
+        assert [e["item"]["type"] for e in added] == ["reasoning", "message"]
+        assert [e["output_index"] for e in added] == [0, 1]
+        completed = next(e for e in events if e.get("type") == "response.completed")
+        assert completed["response"]["output_text"] == ""
+        assert [item["type"] for item in completed["response"]["output"]] == [
+            "reasoning", "message"
+        ]
+
+    def test_responses_stream_interleaved_items_use_fresh_indexes(
+        self, sync_client, openai_headers
+    ):
+        sync_client.app.state.shim_service = _ShimService(_InterleavedContentACP())
+        resp = sync_client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.6-terra", "input": "q", "stream": True},
+            headers=openai_headers,
+        )
+
+        events = _sse_events(resp.text)
+        _assert_valid_responses_item_lifecycle(events)
+        added = [e for e in events if e.get("type") == "response.output_item.added"]
+        # Tool activity is folded into the open reasoning item by default.
+        assert [e["item"]["type"] for e in added] == ["message", "reasoning", "message"]
+        assert [e["output_index"] for e in added] == [0, 1, 2]
+        # Each message item reports only its own text.
+        text_dones = [e for e in events if e.get("type") == "response.output_text.done"]
+        assert [e["text"] for e in text_dones] == ["preface", "answer"]
+
+    def test_responses_stream_interleaved_with_tool_items(
+        self, sync_client, openai_headers, monkeypatch
+    ):
+        monkeypatch.setattr(_settings, "ACP_SURFACE_TOOL_CALLS", True)
+        sync_client.app.state.shim_service = _ShimService(_InterleavedContentACP())
+        resp = sync_client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.6-terra", "input": "q", "stream": True},
+            headers=openai_headers,
+        )
+
+        events = _sse_events(resp.text)
+        _assert_valid_responses_item_lifecycle(events)
+        added = [e for e in events if e.get("type") == "response.output_item.added"]
+        assert [e["item"]["type"] for e in added] == [
+            "message", "reasoning", "function_call", "message"
+        ]
+        assert [e["output_index"] for e in added] == [0, 1, 2, 3]
+
+    def test_chat_non_stream_reasoning_only_has_content(
+        self, sync_client, openai_headers
+    ):
+        """Non-streaming chat: reasoning-only turn must have content (empty str)."""
+        sync_client.app.state.shim_service = _ShimService(_ReasoningOnlyACP())
+        resp = sync_client.post(
+            "/v1/chat/completions", json=self._CHAT, headers=openai_headers
+        )
+
+        assert resp.status_code == 200
+        msg = resp.json()["choices"][0]["message"]
+        assert msg["content"] == ""
+        assert msg["reasoning_content"] == "Plan the investigation."
+        assert resp.json()["choices"][0]["finish_reason"] == "stop"
+
+    def test_responses_non_stream_reasoning_only_has_message_item(
+        self, sync_client, openai_headers
+    ):
+        """Non-streaming Responses: reasoning-only turn includes empty message item."""
+        sync_client.app.state.shim_service = _ShimService(_ReasoningOnlyACP())
+        resp = sync_client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.6-terra", "input": "q"},
+            headers=openai_headers,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        output = data["output"]
+        assert any(o["type"] == "reasoning" for o in output)
+        msg_items = [o for o in output if o["type"] == "message"]
+        assert msg_items, "reasoning-only Responses must include a message item"
+        assert msg_items[0]["content"][0]["text"] == ""
+        assert data["output_text"] == ""
+
+
+# ---------------------------------------------------------------------------
 # Task list / plan folded into the reasoning channel (gated by
 # ACP_SURFACE_THINKING) on the OpenAI shim.
 # ---------------------------------------------------------------------------
