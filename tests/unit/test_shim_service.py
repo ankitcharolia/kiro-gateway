@@ -42,7 +42,7 @@ class StubACP:
         self.last_params = None
         self.available_models: list[dict] = []
 
-    async def new_session(self, capabilities=None, cwd=None, model=None) -> str:
+    async def new_session(self, capabilities=None, cwd=None, model=None, mcp_servers=None) -> str:
         self.last_model = model
         return "stub-session-id"
 
@@ -392,7 +392,7 @@ async def test_stream_tokens_early_close_cancels_acp_session():
     async def fake_write_line(line: str) -> None:
         written.append(line)
 
-    async def fake_new_session(capabilities=None, cwd=None, model=None) -> str:
+    async def fake_new_session(capabilities=None, cwd=None, model=None, mcp_servers=None) -> str:
         return "svc-sess"
 
     client._write_line = fake_write_line  # type: ignore[assignment]

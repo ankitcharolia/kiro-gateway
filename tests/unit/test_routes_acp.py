@@ -87,7 +87,7 @@ class _PlanACP:
 
     available_models: list = []
 
-    async def new_session(self, capabilities=None, cwd=None, model=None):
+    async def new_session(self, capabilities=None, cwd=None, model=None, mcp_servers=None):
         return "s"
 
     async def prompt(self, params):

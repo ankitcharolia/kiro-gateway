@@ -1224,7 +1224,7 @@ class _ToolEmittingACP:
 
     available_models: list = []
 
-    async def new_session(self, capabilities=None, cwd=None, model=None):
+    async def new_session(self, capabilities=None, cwd=None, model=None, mcp_servers=None):
         return "s"
 
     async def prompt(self, params):
@@ -1301,7 +1301,7 @@ class _PureToolCallACP:
 
     available_models: list = []
 
-    async def new_session(self, capabilities=None, cwd=None, model=None):
+    async def new_session(self, capabilities=None, cwd=None, model=None, mcp_servers=None):
         return "s"
 
     async def prompt(self, params):
@@ -1322,7 +1322,7 @@ class _DirtyNameToolACP:
 
     available_models: list = []
 
-    async def new_session(self, capabilities=None, cwd=None, model=None):
+    async def new_session(self, capabilities=None, cwd=None, model=None, mcp_servers=None):
         return "s"
 
     async def prompt(self, params):
@@ -1420,7 +1420,7 @@ class _ThinkingACP:
 
     available_models: list = []
 
-    async def new_session(self, capabilities=None, cwd=None, model=None):
+    async def new_session(self, capabilities=None, cwd=None, model=None, mcp_servers=None):
         return "s"
 
     async def prompt(self, params):
@@ -1712,7 +1712,7 @@ class _PlanACP:
 
     available_models: list = []
 
-    async def new_session(self, capabilities=None, cwd=None, model=None):
+    async def new_session(self, capabilities=None, cwd=None, model=None, mcp_servers=None):
         return "s"
 
     async def prompt(self, params):
@@ -1804,7 +1804,7 @@ class _ActivityACP:
 
     available_models: list = []
 
-    async def new_session(self, capabilities=None, cwd=None, model=None):
+    async def new_session(self, capabilities=None, cwd=None, model=None, mcp_servers=None):
         return "s"
 
     async def prompt(self, params):
@@ -1953,7 +1953,7 @@ class _KindToolACP:
 
     available_models: list = []
 
-    async def new_session(self, capabilities=None, cwd=None, model=None):
+    async def new_session(self, capabilities=None, cwd=None, model=None, mcp_servers=None):
         return "s"
 
     async def prompt(self, params):
