@@ -46,7 +46,7 @@ from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalC
 from kiro.workspace import build_filesystem_roots, WORKSPACE_HEADER
 from kiro.acp_client import format_plan_text
 from kiro.auth import verify_anthropic_key
-from kiro.config import DEFAULT_KIRO_MODELS, settings
+from kiro.config import DEFAULT_KIRO_MODELS, settings, parse_mcp_servers
 from kiro.error_mapping import MappedError, classify_event, classify_exception
 from kiro.model_validation import ModelNotAvailableError, resolve_alias, validate_model
 from kiro.multimodal import anthropic_block_to_blocks, collapse_blocks
@@ -55,6 +55,8 @@ from kiro.system_sanitizer import sanitize_system_prompt
 from kiro.tokenizer import estimate_request_tokens, normalize_usage
 
 router = APIRouter(tags=["Anthropic Shim"])
+
+MCP_SERVERS_HEADER = "x-kiro-mcp-servers"
 
 _INVALID_TOOL_NAME_CHARS = _re.compile(r"[^a-zA-Z0-9_-]")
 
@@ -200,6 +202,7 @@ class AnthropicRequest(BaseModel):
     # Gateway extensions
     filesystem_roots: list[dict] = Field(default_factory=list)
     terminal: Optional[dict] = None
+    mcp_servers: Optional[list[dict]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -457,12 +460,15 @@ async def create_message(
     )
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
     stop = body.stop_sequences or None
+    mcp = parse_mcp_servers(
+        request.headers.get(MCP_SERVERS_HEADER) or body.mcp_servers or []
+    ) or None
 
     if body.stream:
         return StreamingResponse(
             _stream_response(shim, messages, body.model, body.max_tokens,
                              body.temperature, body.top_p, body.top_k, stop,
-                             tools, fs_roots, terminal, body.tool_choice),
+                             tools, fs_roots, terminal, body.tool_choice, mcp),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -482,6 +488,7 @@ async def create_message(
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
             surface_thinking=settings.ACP_SURFACE_THINKING,
+            mcp_servers=mcp,
         )
     except Exception as exc:
         mapped = classify_exception(exc)
@@ -571,6 +578,7 @@ async def _stream_response(
     fs_roots: list[FilesystemRoot],
     terminal: Optional[TerminalCapability],
     tool_choice: Optional[Any] = None,
+    mcp_servers: Optional[list[dict]] = None,
 ) -> AsyncIterator[str]:
     """
     Translate ACP progress events to Anthropic SSE event taxonomy.
@@ -644,6 +652,7 @@ async def _stream_response(
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
             surface_thinking=settings.ACP_SURFACE_THINKING,
+            mcp_servers=mcp_servers,
         ):
             etype = event.get("type")
             if etype == "plan":

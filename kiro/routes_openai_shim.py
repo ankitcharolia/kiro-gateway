@@ -36,7 +36,7 @@ from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalC
 from kiro.workspace import build_filesystem_roots, WORKSPACE_HEADER
 from kiro.acp_client import format_plan_text
 from kiro.auth import verify_openai_key
-from kiro.config import DEFAULT_KIRO_MODELS, settings
+from kiro.config import DEFAULT_KIRO_MODELS, settings, parse_mcp_servers
 from kiro.error_mapping import MappedError, classify_event, classify_exception
 from kiro.model_validation import ModelNotAvailableError, resolve_alias, validate_model
 from kiro.multimodal import (
@@ -47,6 +47,8 @@ from kiro.system_sanitizer import sanitize_system_prompt
 from kiro.tokenizer import normalize_usage
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Shim"])
+
+MCP_SERVERS_HEADER = "x-kiro-mcp-servers"
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +110,7 @@ class OAIChatRequest(BaseModel):
     # Gateway extensions (optional, ignored by standard clients)
     filesystem_roots: list[dict] = Field(default_factory=list)
     terminal: Optional[dict] = None
+    mcp_servers: Optional[list[dict]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +409,9 @@ async def chat_completions(
     )
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
     stop = _normalize_stop(body.stop)
+    mcp = parse_mcp_servers(
+        request.headers.get(MCP_SERVERS_HEADER) or body.mcp_servers or []
+    ) or None
 
     if body.stream:
         include_usage = bool((body.stream_options or {}).get("include_usage"))
@@ -413,7 +419,7 @@ async def chat_completions(
             _stream_response(shim, messages, body.model, body.max_tokens,
                              body.temperature, body.top_p, stop, tools, fs_roots,
                              terminal, include_usage, body.response_format,
-                             body.tool_choice),
+                             body.tool_choice, mcp),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -434,6 +440,7 @@ async def chat_completions(
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
             surface_thinking=settings.ACP_SURFACE_THINKING,
+            mcp_servers=mcp,
         )
     except Exception as exc:
         mapped = classify_exception(exc)
@@ -529,6 +536,7 @@ async def _stream_response(
     include_usage: bool = False,
     response_format: Optional[dict] = None,
     tool_choice: Optional[Any] = None,
+    mcp_servers: Optional[list[dict]] = None,
 ) -> AsyncIterator[str]:
     """
     Translate ACP progress events to OpenAI streaming SSE format.
@@ -580,6 +588,7 @@ async def _stream_response(
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
             surface_thinking=settings.ACP_SURFACE_THINKING,
+            mcp_servers=mcp_servers,
         ):
             etype = event.get("type")
             if etype == "plan":
@@ -760,6 +769,7 @@ class OAIResponsesRequest(BaseModel):
     # Gateway extensions (optional, ignored by standard clients)
     filesystem_roots: list[dict] = Field(default_factory=list)
     terminal: Optional[dict] = None
+    mcp_servers: Optional[list[dict]] = None
 
 
 def _responses_input_to_acp(
@@ -930,6 +940,9 @@ async def create_response(
         request.headers.get(WORKSPACE_HEADER), body.filesystem_roots, messages
     )
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
+    mcp = parse_mcp_servers(
+        request.headers.get(MCP_SERVERS_HEADER) or body.mcp_servers or []
+    ) or None
     # The Responses API carries structured outputs under ``text.format``;
     # ``response_format`` is also accepted for lenient clients. Either is
     # forwarded under _meta (inert on kiro-cli today — issue #35).
@@ -939,7 +952,7 @@ async def create_response(
         return StreamingResponse(
             _responses_stream(shim, messages, body.model, body.max_output_tokens,
                               body.temperature, body.top_p, tools, fs_roots, terminal,
-                              response_format, body.tool_choice),
+                              response_format, body.tool_choice, mcp),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -958,6 +971,7 @@ async def create_response(
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
             surface_thinking=settings.ACP_SURFACE_THINKING,
+            mcp_servers=mcp,
         )
     except Exception as exc:
         mapped = classify_exception(exc)
@@ -1002,6 +1016,7 @@ async def _responses_stream(
     terminal: Optional[TerminalCapability],
     response_format: Optional[dict] = None,
     tool_choice: Optional[Any] = None,
+    mcp_servers: Optional[list[dict]] = None,
 ) -> AsyncIterator[str]:
     """Translate ACP events into Responses API SSE semantic events.
 
@@ -1116,6 +1131,7 @@ async def _responses_stream(
             terminal=terminal,
             surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
             surface_thinking=settings.ACP_SURFACE_THINKING,
+            mcp_servers=mcp_servers,
         ):
             etype = event.get("type")
             if etype == "plan":

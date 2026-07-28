@@ -1,6 +1,7 @@
 """Gateway configuration — all settings read from environment variables."""
 from __future__ import annotations
 
+import json as _json
 import os
 from dataclasses import dataclass, field
 from typing import List
@@ -298,8 +299,6 @@ def _load_mcp_servers() -> List[dict]:
     Returns:
         The normalised ``mcpServers`` array (possibly empty).
     """
-    import json as _json
-
     inline = os.environ.get("KIRO_MCP_SERVERS", "").strip()
     if inline:
         try:
@@ -319,6 +318,33 @@ def _load_mcp_servers() -> List[dict]:
 
 
 MCP_SERVERS: List[dict] = _load_mcp_servers()
+
+
+def parse_mcp_servers(value: object) -> List[dict]:
+    """Parse and normalize MCP server configs from an arbitrary JSON value.
+
+    Accepts the same formats as ``KIRO_MCP_SERVERS``: an ACP ``mcpServers``
+    array, a ``{"mcpServers": {...}}`` wrapper, or a bare name→config map.
+    Used to parse per-request MCP servers from an ``X-Kiro-MCP-Servers`` header
+    or a request body ``mcp_servers`` field (issue #75).
+
+    Args:
+        value: A parsed JSON value (list, dict, or string to JSON-decode).
+
+    Returns:
+        A normalized list of MCP server dicts ready for ``session/new``.
+    """
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+        try:
+            value = _json.loads(value)
+        except (ValueError, _json.JSONDecodeError):
+            return []
+    if not value:
+        return []
+    return _normalize_mcp_servers(value)
 
 # Bounded timeout (seconds) for ``session/new`` **when MCP servers are
 # registered**. Verified against a live kiro-cli 2.12.1 probe: a correctly

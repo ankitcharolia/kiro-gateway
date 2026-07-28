@@ -256,6 +256,7 @@ class ShimService:
         terminal: Optional[TerminalCapability] = None,
         surface_tool_calls: bool = True,
         surface_thinking: bool = True,
+        mcp_servers: Optional[list[dict]] = None,
     ) -> dict[str, Any]:
         """
         Run a full non-streaming completion.
@@ -281,7 +282,7 @@ class ShimService:
             {"content": str, "reasoning": str, "tool_calls": list[dict],
              "finish_reason": str, "usage": dict}
         """
-        session_id = await self._new_session(filesystem_roots, terminal, model)
+        session_id = await self._new_session(filesystem_roots, terminal, model, mcp_servers)
         params = PromptParams(
             session_id=session_id,
             messages=messages,
@@ -339,6 +340,7 @@ class ShimService:
         terminal: Optional[TerminalCapability] = None,
         surface_tool_calls: bool = True,
         surface_thinking: bool = True,
+        mcp_servers: Optional[list[dict]] = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """
         Stream normalised ACP events to the caller as they arrive.
@@ -365,7 +367,7 @@ class ShimService:
             surface_thinking: Whether kiro-cli's reasoning channel (thinking +
                 folded tool activity) is surfaced.
         """
-        session_id = await self._new_session(filesystem_roots, terminal, model)
+        session_id = await self._new_session(filesystem_roots, terminal, model, mcp_servers)
         declared_tools = normalize_tool_definitions(tools)
         params = PromptParams(
             session_id=session_id,
@@ -445,12 +447,13 @@ class ShimService:
         fs_roots: Optional[list[FilesystemRoot]] = None,
         terminal: Optional[TerminalCapability] = None,
         model: Optional[str] = None,
+        mcp_servers: Optional[list[dict]] = None,
     ) -> str:
         caps = GatewayCapabilities(
             filesystem=fs_roots or self._default_fs_roots or [],
             terminal=terminal or self._default_terminal,
         )
-        return await self._acp.new_session(caps, model=model)
+        return await self._acp.new_session(caps, model=model, mcp_servers=mcp_servers)
 
     def available_models(self) -> list[dict]:
         """Return the live model catalogue discovered from kiro-cli sessions.
