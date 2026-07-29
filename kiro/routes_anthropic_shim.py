@@ -292,6 +292,20 @@ def _anthropic_messages_to_acp(
             result.append(PromptMessage(role="system", content=system_text))
 
     for m in messages:
+        # Claude Code 2.1.215+ can embed ``role: "system"`` messages inside the
+        # messages array (runtime reminders with cache_control). These must be
+        # preserved as system/developer-role instructions, not misclassified as
+        # assistant. ``developer`` is an OpenAI convention but may appear from
+        # cross-API clients; treat it the same as system (issue #190).
+        if m.role in ("system", "developer"):
+            embedded_text = _system_to_text(
+                m.content if isinstance(m.content, (list, str)) else [m.content]
+            )
+            if embedded_text:
+                acp_role = "system" if m.role == "system" else "developer"
+                result.append(PromptMessage(role=acp_role, content=embedded_text))
+            continue
+
         role = "user" if m.role == "user" else "assistant"
 
         if isinstance(m.content, str):
@@ -827,17 +841,34 @@ async def count_message_tokens(body: AnthropicCountTokensRequest):
         ``{"input_tokens": int}`` — a local tokenizer estimate (not an exact
         server-side count, which kiro-cli/ACP does not expose).
     """
-    messages = [
-        {"role": m.role, "content": m.content}
-        for m in body.messages
-    ]
+    # Claude Code 2.1.215+ may embed role:"system" messages in the array.
+    # Extract them and merge into the system field for accurate counting.
+    conversation_messages: list[dict] = []
+    embedded_system_parts: list[str] = []
+    for m in body.messages:
+        if m.role == "system":
+            text = _system_to_text(
+                m.content if isinstance(m.content, (list, str)) else [m.content]
+            )
+            if text:
+                embedded_system_parts.append(text)
+        else:
+            conversation_messages.append({"role": m.role, "content": m.content})
+
+    # Merge embedded system content with the top-level system field.
+    merged_system: str | list | None = body.system
+    if embedded_system_parts:
+        base_text = _system_to_text(body.system) or ""
+        all_system = "\n".join(filter(None, [base_text] + embedded_system_parts))
+        merged_system = all_system or None
+
     tools = [
         {"name": t.name, "description": t.description or "", "input_schema": t.input_schema}
         for t in (body.tools or [])
     ]
     input_tokens = estimate_request_tokens(
-        messages=messages,
+        messages=conversation_messages,
         tools=tools or None,
-        system=body.system,
+        system=merged_system,
     )
     return {"input_tokens": input_tokens}

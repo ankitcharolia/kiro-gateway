@@ -185,6 +185,35 @@ def test_anthropic_count_tokens_content_blocks(sync_client, anthropic_headers):
     assert response.json()["input_tokens"] > 0
 
 
+def test_anthropic_count_tokens_embedded_system_messages(sync_client, anthropic_headers):
+    """Embedded role:'system' messages in messages[] are counted as system tokens."""
+    # Baseline: only user message, no system
+    base_payload = {
+        "model": "claude-sonnet-4.6",
+        "messages": [{"role": "user", "content": "Hi"}],
+    }
+    base = sync_client.post(
+        "/v1/messages/count_tokens", json=base_payload, headers=anthropic_headers
+    ).json()["input_tokens"]
+
+    # With embedded system message — should increase tokens
+    embedded_payload = {
+        "model": "claude-sonnet-4.6",
+        "messages": [
+            {"role": "user", "content": "Hi"},
+            {"role": "system", "content": [
+                {"type": "text", "text": "You are a meticulous and very verbose assistant that always explains in detail.",
+                 "cache_control": {"type": "ephemeral"}},
+            ]},
+        ],
+    }
+    embedded = sync_client.post(
+        "/v1/messages/count_tokens", json=embedded_payload, headers=anthropic_headers
+    )
+    assert embedded.status_code == 200
+    assert embedded.json()["input_tokens"] > base
+
+
 # ---------------------------------------------------------------------------
 # Base-URL path mounts — the Anthropic shim must answer on every common
 # base-URL convention (regression: clients hitting /messages and
@@ -394,6 +423,55 @@ class TestAnthropicMessagesToACP:
         ], system="sys")
         assert [m.role for m in msgs] == ["system", "user", "assistant", "user"]
         assert [m.content for m in msgs] == ["sys", "q1", "a1", "q2"]
+
+    # -- Embedded system messages (Claude Code 2.1.215+, issue #255) ---------
+
+    def test_embedded_system_message_gets_system_role(self):
+        """A role:'system' message in messages[] should become a system PromptMessage."""
+        from kiro.routes_anthropic_shim import _anthropic_messages_to_acp, AnthropicMessage
+        msgs = _anthropic_messages_to_acp([
+            AnthropicMessage(role="user", content="hello"),
+            AnthropicMessage(role="system", content=[
+                {"type": "text", "text": "Be careful", "cache_control": {"type": "ephemeral"}},
+            ]),
+            AnthropicMessage(role="user", content="what is 2+2?"),
+        ], system=None)
+        assert [m.role for m in msgs] == ["user", "system", "user"]
+        assert msgs[1].content == "Be careful"
+
+    def test_embedded_system_message_coexists_with_top_level_system(self):
+        """Both top-level system and embedded system messages are preserved."""
+        from kiro.routes_anthropic_shim import _anthropic_messages_to_acp, AnthropicMessage
+        msgs = _anthropic_messages_to_acp([
+            AnthropicMessage(role="user", content="hi"),
+            AnthropicMessage(role="system", content=[
+                {"type": "text", "text": "runtime reminder"},
+            ]),
+        ], system="top-level system")
+        assert msgs[0].role == "system"
+        assert msgs[0].content == "top-level system"
+        assert msgs[2].role == "system"
+        assert msgs[2].content == "runtime reminder"
+
+    def test_embedded_system_message_string_content(self):
+        """An embedded system message with plain string content is handled."""
+        from kiro.routes_anthropic_shim import _anthropic_messages_to_acp, AnthropicMessage
+        msgs = _anthropic_messages_to_acp([
+            AnthropicMessage(role="system", content="be concise"),
+            AnthropicMessage(role="user", content="hi"),
+        ], system=None)
+        assert msgs[0].role == "system"
+        assert msgs[0].content == "be concise"
+        assert msgs[1].role == "user"
+
+    def test_embedded_system_message_not_misclassified_as_assistant(self):
+        """Regression: system role must NOT fall through to the else='assistant' branch."""
+        from kiro.routes_anthropic_shim import _anthropic_messages_to_acp, AnthropicMessage
+        msgs = _anthropic_messages_to_acp([
+            AnthropicMessage(role="system", content="instruction"),
+        ], system=None)
+        assert msgs[0].role == "system"
+        assert msgs[0].role != "assistant"
 
 
 
