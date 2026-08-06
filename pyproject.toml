@@ -19,6 +19,9 @@ dependencies = [
     "pypdf>=4",
 ]
 
+[project.scripts]
+kiro-gateway = "kiro.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8",
