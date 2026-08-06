@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.3.3 (2026-08-06)
+
+### Features
+
+* **acp:** add ACP stdio mode for registry compatibility ([3ecbe58](https://github.com/ankitcharolia/kiro-gateway/commit/3ecbe581097c9e1aa2214af71d6cbccaf10e14f3))
+
+### Bug Fixes
+
+* **anthropic:** handle embedded system/developer messages in messages array ([600c999](https://github.com/ankitcharolia/kiro-gateway/commit/600c99955758f9c43c48b4a39bdd56800b373295))
+
+### Documentation
+
+* **changelog:** update for v2.3.2 [skip ci] ([0581783](https://github.com/ankitcharolia/kiro-gateway/commit/05817835f9f7b3f09e6bceacc9b50c6b2e7660a6))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @github-actions[bot]
+
 ## 2.3.2 (2026-07-28)
 
 ### Features
