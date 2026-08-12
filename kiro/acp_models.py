@@ -282,6 +282,11 @@ class ACPChatRequest(BaseModel):
     stream: bool = False
     thinking: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, Any]] = None
+    # Per-request MCP servers (issue #75), matching the OpenAI/Anthropic shims.
+    # Accepts an ACP ``mcpServers`` array or the ``mcp.json`` object form; also
+    # settable via the ``X-Kiro-MCP-Servers`` header. Additive on top of the
+    # operator config and any discovered harness servers.
+    mcp_servers: Optional[List[Dict[str, Any]]] = None
 
 
 class ACPChatResponse(BaseModel):

@@ -106,6 +106,7 @@ kiro-gateway/
 │   ├── routes_openai_shim.py   # /v1/chat/completions, /v1/models
 │   ├── routes_anthropic_shim.py# /v1/messages, /v1/models
 │   ├── routes_acp.py           # /acp/chat, /acp/chat/stream
+│   ├── harness_mcp.py          # Discover the harness's own MCP servers (issue #75)
 │   ├── config.py               # Env-driven settings (settings object + module constants)
 │   ├── compliance.py           # Single-account enforcement at startup
 │   └── capability_executor.py  # Stub capability dispatch (retained; not in the live path)
@@ -153,7 +154,38 @@ matter — a malformed `initialize` makes the agent exit immediately.
 `kiro-cli` runs its **own** built-in tools. The gateway advertises no
 client-side `fs`/`terminal` capabilities, so it only answers permission
 requests (auto-approve `allow_once` when `ACP_TRUST_TOOLS=true`, else
-`reject_once`).
+`reject_once`) — refined by an optional rule policy, below.
+
+### Tool permission policy (`kiro/tool_permissions.py`)
+
+`ACP_TRUST_TOOLS` alone is all-or-nothing, which blocked harnesses that do their
+own permission gating (issue #31 comment). **ACP imposes no limitation here** —
+verified against a live kiro-cli 2.17.0 probe:
+
+- `session/request_permission` carries `toolCall.title` (`"Running: echo hi"`,
+  `"Reading README.md:1-5"`, `"Running: @server/tool"`), an `options` array
+  (`allow_once`/`allow_always`/`reject_once`), and `_meta.trustOptions` whose
+  `display` holds a clean command form plus regex `patterns`.
+- Answering `reject_once` **genuinely blocks execution** (a denied `touch` never
+  created its file; the agent reported the denial and continued the turn).
+- Decisions are **per call**: one session allowed one command and denied the
+  next, with exactly the allowed one taking effect.
+
+`ToolPermissionPolicy` turns that into deny/allow rules consulted by
+`ACPClient._select_permission_option`. Precedence is **deny → allow →
+`ACP_TRUST_TOOLS`**. Rules use the Claude Code `permissions` spelling so a
+harness's existing rules paste in verbatim: `Bash(git status*)`, `Read(/etc/*)`,
+`Edit`, `mcp__server__tool`, `@server/tool`, or a bare glob (`rm -rf *`). Tool
+names are aliased (`Bash`/`shell`/`execute`/`run` → `execute`), and matching also
+considers kiro-cli's own `trustOptions.display`.
+
+Configured via `ACP_TOOL_DENY` / `ACP_TOOL_ALLOW` (JSON array or
+comma/newline-separated). **Both default empty, so every tool in every harness is
+allowed out of the box** — with no rules the policy defers and behaviour is
+byte-identical to before. Deliberately **not** in `.env.example`/README: it is an
+opt-in hardening knob, not required configuration. When touching this, keep
+`select_option_id` fail-safe (refusing must never fall back to an allow option)
+and assert the default-allows-everything case in tests.
 
 ### Tools & function calling (verified against a live kiro-cli 2.8.0 probe)
 
@@ -204,26 +236,69 @@ Two distinct cases — do not conflate them:
 
 ## MCP servers (external tools kiro-cli runs itself)
 
-There are **two** ways an MCP server reaches a session, and they **compose**:
+There are **four** ways an MCP server reaches a session, and they **compose**
+(deduplicated by name, in this precedence order):
 
-1. **kiro-cli's own native config (recommended, zero gateway config).** Servers
-   added via `kiro-cli mcp add` (global `~/.kiro/settings/mcp.json` or a
-   per-agent `~/.kiro/agents/<name>.json` `mcpServers` map) are **auto-loaded by
+1. **Per-request (issue #75).** The `X-Kiro-MCP-Servers` header or an
+   `mcp_servers` body field, on **every** route — both shims (chat, messages,
+   Responses) and `/acp/chat[/stream]`.
+2. **Discovered from the harness's own config (issue #75, on by default).**
+   `kiro.harness_mcp.discover_harness_mcp_servers` reads the config files of the
+   harness that made the request and forwards the **same** servers. This exists
+   because a harness never transmits its MCP config: verified against live
+   captures, Claude Code's `/v1/messages` body has **no** MCP field or header
+   (its own MCP client does `initialize`/`tools/list` directly), and OpenCode
+   flattens its MCP tool into an ordinary `tools` function entry
+   (`probe75_kiro_probe_magic`) — which kiro-cli ignores (issue #31). Before
+   this, an OpenCode session with an MCP server configured answered
+   `TOOL_NOT_VISIBLE` through the gateway.
+3. **Operator-injected list.** `settings.MCP_SERVERS` (`KIRO_MCP_SERVERS` inline
+   JSON / `KIRO_MCP_CONFIG` file).
+4. **kiro-cli's own native config.** Servers added via `kiro-cli mcp add`
+   (global `~/.kiro/settings/mcp.json` or a per-agent
+   `~/.kiro/agents/<name>.json` `mcpServers` map) are **auto-loaded by
    `kiro-cli acp` on every session** — verified against a live kiro-cli 2.12.1
    probe: a globally-added server's tool was callable even when the gateway sent
-   `session/new mcpServers: []`. So the default (`settings.MCP_SERVERS == []`)
-   is **not** "no MCP" — it's "whatever the operator configured in kiro-cli."
-2. **Gateway-injected list (optional supplement).** `settings.MCP_SERVERS`
-   (`KIRO_MCP_SERVERS` inline JSON / `KIRO_MCP_CONFIG` file) is forwarded on
-   `session/new`'s `mcpServers` and is **additive** on top of the native config
-   (the empty client list did not suppress native servers). Use it for servers
-   you want scoped to the gateway rather than kiro-cli's global/agent config.
+   `session/new mcpServers: []`. So an empty gateway list is **not** "no MCP".
 
 Either way kiro-cli executes the tools itself, so **compliance is preserved** —
-the gateway never runs them. The gateway **cannot** ingest a *harness's* own MCP
-config: the OpenAI/Anthropic wire APIs have no MCP channel, and harness-side MCP
-tools arrive as client-declared `tools`, which kiro-cli ignores over ACP
-(issue #31).
+the gateway never runs them, and no server-side state is added.
+
+**stdio MCP servers DO work over ACP** (verified against a live kiro-cli 2.17.0
+probe, correcting an earlier note here): registering
+`{"name","command","args","env":[]}` on `session/new` produced
+`_kiro.dev/mcp/server_initialized`, and **both `tools/list` and `tools/call`
+reached the server process** (the tool's marker came back in the answer). The
+turn does require answering `session/request_permission` — a probe that ignored
+it saw the `tool_call` event but no execution. This matters because most harness
+MCP servers are stdio (`npx -y some-mcp@latest`); `mcpCapabilities` advertising
+only `{http: true, sse: false}` describes the *additional* transports, not a lack
+of stdio support.
+
+### `kiro/harness_mcp.py`
+
+- `discover_harness_mcp_servers(workspace, scope)` — reads Claude Code
+  (`~/.claude/settings.json`, `~/.claude.json` `projects.<abs path>.mcpServers`,
+  `<ws>/.mcp.json`), OpenCode (`mcp` block; `type: "local"` puts the whole argv
+  in `command` as an **array**, `type: "remote"` uses `url`), Oh My Pi
+  (`~/.omp/agent/mcp.json`, `<ws>/.omp/mcp.json`, `<ws>/mcp.json`) and VS
+  Code/Cursor/Kilo (`servers` or `mcpServers` key). Skips `enabled: false` /
+  `disabled: true`, expands `${VAR}` / `${env:VAR}` / `$VAR` from the gateway
+  env, tolerates `//`+`/* */` comments and trailing commas, and **never raises** —
+  a malformed harness config is logged and skipped.
+- `resolve_session_mcp_servers(header, body_field, fs_roots)` — the single
+  helper every route calls. Returns `None` when there is neither a per-request
+  list nor a discovered server, so `new_session` keeps its configured default and
+  behaviour is byte-identical to before this feature when discovery is `off`.
+- `MCP_DISCOVERY` (`settings.MCP_DISCOVERY`) — `all` (**default**, user +
+  workspace), `user` (user-level only), `off`. Unset/`true`/`on`/unrecognised →
+  the default; `off`/`false`/`0`/`no`/`none`/`disabled` → off. Deliberately **not**
+  in `.env.example`: it works out of the box and is only needed to restrict.
+  Workspace-level files are repo-controlled, so `user` is the hardening knob when
+  harnesses open untrusted repositories.
+- Discovery is anchored on the workspace `kiro.workspace` already resolved for
+  the request (`X-Kiro-Workspace` → `filesystem_roots` → `<env>` `Working
+  directory:`), so each harness gets its own project's servers.
 
 `config._load_mcp_servers` reads `KIRO_MCP_SERVERS` (inline JSON) or
 `KIRO_MCP_CONFIG` (file path); each accepts an ACP `mcpServers` array or the
@@ -531,6 +606,7 @@ take precedence over `.env`).
 | `KIRO_MCP_SERVERS` | `` (none) | Inline JSON of MCP servers registered on every `session/new` (ACP `mcpServers` array or `mcp.json` object form). kiro-cli runs them itself (`mcpCapabilities.http`). The only external-tool channel over ACP. |
 | `KIRO_MCP_CONFIG` | `` (none) | Path to a JSON file with the same MCP-server content as `KIRO_MCP_SERVERS` (used only when `KIRO_MCP_SERVERS` is unset). |
 | `MCP_INIT_TIMEOUT` | `30` | Seconds cap for `session/new` **when MCP servers are registered**, so a malformed/unreachable server fails fast (timeout → `504`) instead of stalling every request for `ACP_TIMEOUT`. Sessions without MCP servers use `ACP_TIMEOUT`. |
+| `MCP_DISCOVERY` | `all` | Scope for discovering the **harness's own** MCP servers (`kiro.harness_mcp`) and forwarding them on `session/new` — on by default, no config needed. `all` = user + workspace configs; `user` = user-level only (hardening for untrusted repos); `off` = disable. Not in `.env.example` by design. |
 | `ACP_WORKSPACE_DIR` | process cwd | **Fallback** session `cwd`. The cwd is resolved per request (`X-Kiro-Workspace` header → `filesystem_roots` → the prompt `<env>` `Working directory:` line, parsed by `kiro.workspace`) so kiro-cli anchors in the harness's directory by default; this is used only when none is present. cwd is an anchor, not a jail (verified live) — tools still reach absolute paths elsewhere. |
 | `KIRO_ACP_MODE` | `` (kiro-cli default) | Agent persona selected per session via `session/set_mode` (`kiro_default`, `code`, `kiro_planner`, `kiro_guide`). Unknown value accepted silently (keeps default). Distinct from `KIRO_ACP_MODEL`. |
 | `KIRO_ACP_ENGINE` | `v2` | `--agent-engine` (`v1`/`v2`/`v3`), pinned explicitly so a future default-engine flip can't change behaviour. `v3` needs host-mediated auth the gateway lacks (issue #52) — generation fails; keep `v2`. Invalid value falls back to `v2`. |

@@ -33,10 +33,11 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from kiro.acp_models import PromptMessage, ToolResult, FilesystemRoot, TerminalCapability
+from kiro.harness_mcp import resolve_session_mcp_servers
 from kiro.workspace import build_filesystem_roots, WORKSPACE_HEADER
 from kiro.acp_client import format_plan_text
 from kiro.auth import verify_openai_key
-from kiro.config import DEFAULT_KIRO_MODELS, settings, parse_mcp_servers
+from kiro.config import DEFAULT_KIRO_MODELS, settings
 from kiro.error_mapping import MappedError, classify_event, classify_exception
 from kiro.model_validation import ModelNotAvailableError, resolve_alias, validate_model
 from kiro.multimodal import (
@@ -409,9 +410,9 @@ async def chat_completions(
     )
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
     stop = _normalize_stop(body.stop)
-    mcp = parse_mcp_servers(
-        request.headers.get(MCP_SERVERS_HEADER) or body.mcp_servers or []
-    ) or None
+    mcp = resolve_session_mcp_servers(
+        request.headers.get(MCP_SERVERS_HEADER), body.mcp_servers, fs_roots
+    )
 
     if body.stream:
         include_usage = bool((body.stream_options or {}).get("include_usage"))
@@ -940,9 +941,9 @@ async def create_response(
         request.headers.get(WORKSPACE_HEADER), body.filesystem_roots, messages
     )
     terminal = TerminalCapability(**body.terminal) if body.terminal else None
-    mcp = parse_mcp_servers(
-        request.headers.get(MCP_SERVERS_HEADER) or body.mcp_servers or []
-    ) or None
+    mcp = resolve_session_mcp_servers(
+        request.headers.get(MCP_SERVERS_HEADER), body.mcp_servers, fs_roots
+    )
     # The Responses API carries structured outputs under ``text.format``;
     # ``response_format`` is also accepted for lenient clients. Either is
     # forwarded under _meta (inert on kiro-cli today — issue #35).

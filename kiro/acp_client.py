@@ -61,8 +61,14 @@ from kiro.acp_models import (
     PromptParams,
     GatewayCapabilities,
 )
-from kiro.config import ACP_STDIO_MAX_BYTES
+from kiro.config import ACP_STDIO_MAX_BYTES, settings
 from kiro.output_limits import StreamLimiter
+from kiro.tool_permissions import (
+    DECISION_ALLOW,
+    DECISION_DENY,
+    ToolPermissionPolicy,
+    select_option_id,
+)
 
 
 # Map ACP stopReason values to the gateway's normalised finish_reason.
@@ -397,9 +403,27 @@ class ACPClient:
         extra_args: Optional[list[str]] = None,
         mcp_servers: Optional[list[dict]] = None,
         mcp_init_timeout: int = 30,
+        permission_policy: Optional[ToolPermissionPolicy] = None,
     ):
         self._command = command
         self._trust_tools = trust_tools
+        # Declarative allow/deny rules consulted on every
+        # session/request_permission (issue #31 comment). ``None`` or an empty
+        # policy means only ``trust_tools`` applies, so behaviour is unchanged
+        # unless rules are configured. Defaults to the env-configured policy.
+        if permission_policy is None:
+            permission_policy = ToolPermissionPolicy.from_config(
+                settings.ACP_TOOL_ALLOW, settings.ACP_TOOL_DENY,
+                default_allow=trust_tools,
+            )
+        self._permission_policy = permission_policy
+        if self._permission_policy.has_rules:
+            logger.info(
+                f"Tool permission policy active: "
+                f"{len(self._permission_policy.deny)} deny rule(s), "
+                f"{len(self._permission_policy.allow)} allow rule(s); "
+                f"default={'allow' if trust_tools else 'deny'}"
+            )
         # Optional ACP session "mode" (agent persona) selected on every session
         # via session/set_mode. Empty/None leaves the session on kiro-cli's
         # default mode (behaviour unchanged).
@@ -1825,7 +1849,9 @@ class ACPClient:
         params = msg.get("params", {})
 
         if method == "session/request_permission":
-            option_id = self._select_permission_option(params.get("options", []))
+            option_id = self._select_permission_option(
+                params.get("options", []), params
+            )
             await self._respond(req_id, {"outcome": {"outcome": "selected", "optionId": option_id}})
             return
 
@@ -1833,29 +1859,37 @@ class ACPClient:
         # ask us to perform them. If it does, decline cleanly.
         await self._respond_error(req_id, -32601, f"{method} not supported by gateway")
 
-    def _select_permission_option(self, options: list[dict]) -> str:
-        """
-        Choose a permission option.
+    def _select_permission_option(self, options: list[dict],
+                                  params: Optional[dict] = None) -> str:
+        """Choose how to answer a ``session/request_permission`` request.
 
-        When ``trust_tools`` is enabled the gateway auto-approves a single
-        invocation (``allow_once``); otherwise it rejects (``reject_once``).
-        Falls back to matching by ``kind`` then to the first option.
+        A configured :class:`~kiro.tool_permissions.ToolPermissionPolicy` is
+        consulted first, so an operator (or a harness's own rules) can allow some
+        tool runs and refuse others instead of the all-or-nothing
+        ``ACP_TRUST_TOOLS`` switch. Precedence is deny → allow → ``trust_tools``.
+
+        Verified against a live kiro-cli 2.17.0 probe: a ``reject_once`` answer
+        genuinely prevents the tool from running, and per-call decisions are
+        honoured within a single session.
+
+        Args:
+            options: The request's ``options`` array.
+            params: The full request ``params`` (carrying ``toolCall.title`` and
+                ``_meta.trustOptions``). When omitted, only ``trust_tools``
+                applies — preserving the previous behaviour.
+
+        Returns:
+            The ``optionId`` to answer with.
         """
-        wanted_kinds = (
-            ("allow_once", "allow_always", "allow")
-            if self._trust_tools
-            else ("reject_once", "reject_always", "reject")
-        )
-        for kind in wanted_kinds:
-            for opt in options:
-                if opt.get("kind") == kind or opt.get("optionId") == kind:
-                    return opt.get("optionId", kind)
-        # Fall back: any option whose kind/id contains the desired verb.
-        verb = "allow" if self._trust_tools else "reject"
-        for opt in options:
-            if verb in str(opt.get("kind", "")) or verb in str(opt.get("optionId", "")):
-                return opt.get("optionId", verb)
-        return options[0].get("optionId", "allow_once") if options else "allow_once"
+        approve = self._trust_tools
+        if params and self._permission_policy is not None \
+                and self._permission_policy.has_rules:
+            decision = self._permission_policy.decide(params)
+            if decision == DECISION_DENY:
+                approve = False
+            elif decision == DECISION_ALLOW:
+                approve = True
+        return select_option_id(options, approve)
 
     async def _respond(self, req_id: Any, result: Any) -> None:
         await self._write_line(JsonRpcResponse(id=req_id, result=result).model_dump_json())

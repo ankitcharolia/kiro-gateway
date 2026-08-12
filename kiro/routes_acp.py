@@ -30,8 +30,13 @@ from kiro.acp_models import (
 )
 from kiro.shim_service import ShimService
 from kiro.config import settings
+from kiro.harness_mcp import resolve_session_mcp_servers
 
 router = APIRouter(prefix="/acp", tags=["ACP"])
+
+# Per-request MCP servers may also arrive as a header (issue #75), matching the
+# OpenAI/Anthropic shims so every route accepts the same extension.
+MCP_SERVERS_HEADER = "x-kiro-mcp-servers"
 
 
 def _get_shim(request: Request) -> ShimService:
@@ -45,9 +50,15 @@ def _get_shim(request: Request) -> ShimService:
 @router.post("/chat", response_model=ACPChatResponse)
 async def acp_chat(
     body: ACPChatRequest,
+    request: Request,
     shim: ShimService = Depends(_get_shim),
 ) -> ACPChatResponse:
     """Non-streaming ACP chat completion."""
+    mcp = resolve_session_mcp_servers(
+        request.headers.get(MCP_SERVERS_HEADER),
+        body.mcp_servers,
+        body.filesystem_roots or [],
+    )
     try:
         result = await shim.complete(
             messages=body.messages,
@@ -57,6 +68,7 @@ async def acp_chat(
             tools=body.tools or [],
             filesystem_roots=body.filesystem_roots or [],
             terminal=body.terminal,
+            mcp_servers=mcp,
         )
     except Exception as exc:
         logger.error(f"ACP chat error: {exc}")
@@ -92,6 +104,7 @@ async def acp_chat(
 @router.post("/chat/stream")
 async def acp_chat_stream(
     body: ACPChatRequest,
+    request: Request,
     shim: ShimService = Depends(_get_shim),
 ) -> StreamingResponse:
     """
@@ -107,6 +120,11 @@ async def acp_chat_stream(
       event: acp_capability — capability request forwarded to caller
     """
     async def generate() -> AsyncIterator[str]:
+        mcp = resolve_session_mcp_servers(
+            request.headers.get(MCP_SERVERS_HEADER),
+            body.mcp_servers,
+            body.filesystem_roots or [],
+        )
         try:
             async for event in shim.stream_tokens(
                 messages=body.messages,
@@ -116,6 +134,7 @@ async def acp_chat_stream(
                 tools=body.tools or [],
                 filesystem_roots=body.filesystem_roots or [],
                 terminal=body.terminal,
+                mcp_servers=mcp,
             ):
                 etype = event.get("type", "text")
                 if etype == "plan" and not settings.ACP_SURFACE_THINKING:

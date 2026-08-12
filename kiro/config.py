@@ -358,6 +358,48 @@ def parse_mcp_servers(value: object) -> List[dict]:
 # initialise.
 MCP_INIT_TIMEOUT: int = int(os.environ.get("MCP_INIT_TIMEOUT", "30"))
 
+# Scope for discovering a *harness's own* MCP servers from its config files
+# (issue #75). A harness never sends its MCP config over the OpenAI/Anthropic
+# wire — it connects to MCP itself and flattens the tools into ``tools``, which
+# kiro-cli ignores (issue #31) — so those tools are otherwise unavailable
+# through the gateway. ``kiro.harness_mcp`` reads the harness's own config and
+# registers the same servers on ``session/new``, so **kiro-cli** connects to
+# them and runs the tools (compliance preserved, design stays stateless).
+#
+# **Enabled by default** (``all``) so a harness's own MCP servers work out of
+# the box with no configuration. Set this only to *restrict* the behaviour:
+#
+#   all  (default) — user-level configs (``~/.claude/settings.json``,
+#                    ``~/.config/opencode/opencode.json``,
+#                    ``~/.omp/agent/mcp.json``, …) **and** workspace-level files
+#                    (``<ws>/.mcp.json``, ``<ws>/opencode.json``, …).
+#   user           — user-level configs only. Prefer this when harnesses open
+#                    untrusted repositories: a workspace file is controlled by
+#                    whoever wrote the repo, and kiro-cli will spawn/connect to
+#                    whatever it names.
+#   off            — no discovery (only ``KIRO_MCP_SERVERS`` and kiro-cli's own
+#                    native config, as before this feature).
+MCP_DISCOVERY: str = os.environ.get("MCP_DISCOVERY", "all").strip().lower()
+
+# Declarative tool-permission rules applied to every
+# ``session/request_permission`` (issue #31 comment). kiro-cli runs its own
+# tools and asks the gateway first; historically the gateway answered with the
+# single ``ACP_TRUST_TOOLS`` boolean, so a harness that does its own permission
+# gating had no way to express anything in between.
+#
+# Verified against a live kiro-cli 2.17.0 probe, ACP imposes no limitation here:
+# answering ``reject_once`` genuinely blocks execution, and decisions are made
+# per call (one probe allowed one command and denied the next in the same
+# session, with exactly the allowed one taking effect).
+#
+# Rules use the Claude Code ``permissions`` spelling so existing rules can be
+# pasted in: ``Bash(git status*)``, ``Read(/etc/*)``, ``Edit``,
+# ``mcp__server__tool``, or a bare glob like ``rm -rf *``. Accepts a JSON array
+# or a comma/newline-separated list. Precedence is deny → allow →
+# ``ACP_TRUST_TOOLS``.
+ACP_TOOL_DENY: str = os.environ.get("ACP_TOOL_DENY", "").strip()
+ACP_TOOL_ALLOW: str = os.environ.get("ACP_TOOL_ALLOW", "").strip()
+
 # Default working directory for ACP sessions. Coding agents may override this
 # per-request via filesystem_roots; otherwise the gateway process cwd is used.
 ACP_WORKSPACE_DIR: str = os.environ.get("ACP_WORKSPACE_DIR", os.getcwd())
@@ -440,11 +482,14 @@ class _Settings:
     ACP_TIMEOUT: int = field(default_factory=lambda: ACP_TIMEOUT)
     ACP_STDIO_MAX_BYTES: int = field(default_factory=lambda: ACP_STDIO_MAX_BYTES)
     ACP_TRUST_TOOLS: bool = field(default_factory=lambda: ACP_TRUST_TOOLS)
+    ACP_TOOL_DENY: str = field(default_factory=lambda: ACP_TOOL_DENY)
+    ACP_TOOL_ALLOW: str = field(default_factory=lambda: ACP_TOOL_ALLOW)
     ACP_SURFACE_TOOL_CALLS: bool = field(default_factory=lambda: ACP_SURFACE_TOOL_CALLS)
     ACP_SURFACE_THINKING: bool = field(default_factory=lambda: ACP_SURFACE_THINKING)
     SANITIZE_SYSTEM_PROMPTS: bool = field(default_factory=lambda: SANITIZE_SYSTEM_PROMPTS)
     MCP_SERVERS: List[dict] = field(default_factory=lambda: [dict(s) for s in MCP_SERVERS])
     MCP_INIT_TIMEOUT: int = field(default_factory=lambda: MCP_INIT_TIMEOUT)
+    MCP_DISCOVERY: str = field(default_factory=lambda: MCP_DISCOVERY)
     ACP_WORKSPACE_DIR: str = field(default_factory=lambda: ACP_WORKSPACE_DIR)
     ACP_MODE: str = field(default_factory=lambda: ACP_MODE)
     ACP_AGENT: str = field(default_factory=lambda: ACP_AGENT)

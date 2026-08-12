@@ -227,13 +227,14 @@ KIRO_ACP_EXTRA_ARGS=             # extra raw args appended verbatim (shell-quote
 # ── MCP servers (external tools kiro-cli runs itself) ─────────────────
 # MCP is the only external-tool channel kiro-cli honors over ACP (the gateway
 # never runs the tools, so compliance is preserved). USUALLY YOU DON'T NEED
-# THESE: servers added with `kiro-cli mcp add` (global ~/.kiro/settings/mcp.json
-# or a per-agent config) are auto-loaded by kiro-cli on every ACP session — even
-# when the gateway sends an empty list — so that is the recommended path. The
-# vars below are an OPTIONAL SUPPLEMENT: a list the gateway injects on every
-# session/new, ADDED on top of kiro-cli's own config. Empty (default) = rely on
-# kiro-cli's config. (The gateway cannot read a harness's own MCP config — the
-# OpenAI/Anthropic APIs have no MCP channel.)
+# THESE — there are two zero-config paths already:
+#   1. Your HARNESS's own MCP servers (Claude Code, OpenCode, Oh My Pi, Cursor,
+#      Kilo Code) are AUTO-DISCOVERED from its config files and forwarded on
+#      every session/new. On by default; see MCP_DISCOVERY below.
+#   2. Servers added with `kiro-cli mcp add` (global ~/.kiro/settings/mcp.json
+#      or a per-agent config) are auto-loaded by kiro-cli itself.
+# The vars below are an OPTIONAL SUPPLEMENT: a list the gateway injects on every
+# session/new, ADDED on top of discovered + kiro-cli's own config.
 # Provide inline JSON via KIRO_MCP_SERVERS OR a file path via KIRO_MCP_CONFIG;
 # each accepts an ACP mcpServers array or the mcp.json object form. An HTTP
 # entry MUST carry type:"http" and headers as an ARRAY — the gateway normalises
@@ -324,6 +325,95 @@ http://localhost:8000/acp/chat/stream  # SSE streaming
 | `plan` (task list) | folded into `reasoning_content` (Responses reasoning item) | folded into a `thinking` block |
 | `done` | `[DONE]` + `finish_reason` | `message_delta` + `message_stop` |
 | `error` | error chunk + `[DONE]` | `error` event |
+
+---
+
+## Your harness's MCP servers work automatically
+
+**If you registered MCP servers in Claude Code, OpenCode, Oh My Pi, Cursor or
+Kilo Code, they work through the gateway with no configuration.** This is on by
+default — there is nothing to set.
+
+### Why this needed fixing
+
+A harness never sends its MCP configuration over the wire: the OpenAI and
+Anthropic APIs have no MCP channel. Verified against live captures, Claude Code's
+`POST /v1/messages` body carries `model`, `messages`, `system`, `tools`,
+`thinking` — and **no** MCP field or header; OpenCode flattens its MCP tool into
+an ordinary function entry (`{"type": "function", "function": {"name":
+"myserver_mytool", …}}`). Those client-declared tools are ignored by kiro-cli
+([issue #31](https://github.com/ankitcharolia/kiro-gateway/issues/31)), so an
+OpenCode session with an MCP server configured used to answer *"that tool isn't
+available"* through the gateway
+([issue #75](https://github.com/ankitcharolia/kiro-gateway/issues/75)).
+
+### How it works
+
+kiro-cli **does** honor MCP servers registered on `session/new` — including
+**stdio** servers (verified against a live kiro-cli 2.17.0 probe: a
+`{"name","command","args","env"}` entry produced `mcp/server_initialized`, and
+both `tools/list` and `tools/call` reached the server process). That matters
+because most harness MCP servers are stdio (`npx -y some-mcp@latest`).
+
+So the gateway reads the harness's own MCP config and registers the **same**
+servers on every session. **kiro-cli** then connects to them and executes the
+tools — the gateway never runs a tool, so the compliance model is unchanged, and
+no server-side state is introduced.
+
+```
+Harness config (~/.claude/settings.json, opencode.json, .mcp.json, …)
+        │  read by the gateway, anchored on the request's workspace
+        ▼
+session/new  mcpServers: [ …the harness's own servers… ]
+        ▼
+kiro-cli connects / spawns them and runs the tools itself
+```
+
+Discovered locations (workspace-level wins over user-level; duplicates by name
+are removed):
+
+| Harness | Config read |
+|---|---|
+| Claude Code | `~/.claude/settings.json`, `~/.claude.json` (per-project), `<ws>/.mcp.json` |
+| OpenCode | `~/.config/opencode/opencode.json[c]`, `<ws>/opencode.json[c]` (`mcp` block) |
+| Oh My Pi | `~/.omp/agent/mcp.json`, `<ws>/.omp/mcp.json`, `<ws>/mcp.json` |
+| VS Code / Cursor / Kilo Code | `<ws>/.vscode/mcp.json`, `<ws>/.cursor/mcp.json`, `~/.config/kilo/mcp.json` |
+
+Both the stdio form (`command`/`args`/`env`) and the remote form
+(`type`/`url`/`headers`) are understood, `enabled: false` / `disabled: true`
+entries are skipped, `${VAR}` / `${env:VAR}` placeholders are expanded from the
+gateway's environment, and `//` comments plus trailing commas are tolerated. A
+malformed harness config is logged and skipped — it never fails your request.
+
+The workspace is the one already resolved per request (the `X-Kiro-Workspace`
+header, `filesystem_roots`, or the `<env>` `Working directory:` line), so each
+harness gets its own project's servers.
+
+### Narrowing or disabling it
+
+`MCP_DISCOVERY` is optional and only needed to **restrict** the default:
+
+| Value | Behaviour |
+|---|---|
+| unset / `all` | **Default.** User-level **and** workspace-level configs. |
+| `user` | User-level configs only. |
+| `off` | No discovery — only `KIRO_MCP_SERVERS` and kiro-cli's own config. |
+
+> [!IMPORTANT]
+> Discovery makes kiro-cli **launch or connect to whatever the config names** —
+> the same servers your harness already runs for you. The one case that widens
+> trust is a **workspace-level** file (`<ws>/.mcp.json`): it is controlled by
+> whoever wrote the repository. If your harnesses open untrusted repositories,
+> set `MCP_DISCOVERY=user`.
+
+Precedence when several sources supply servers (deduplicated by name):
+
+1. Per-request — `X-Kiro-MCP-Servers` header or an `mcp_servers` body field.
+2. Discovered harness servers.
+3. Operator-configured `KIRO_MCP_SERVERS` / `KIRO_MCP_CONFIG`.
+
+Servers added with `kiro-cli mcp add` are loaded by kiro-cli itself on top of
+all of these.
 
 ---
 
@@ -548,11 +638,14 @@ model. Two distinct cases:
    kiro-cli today.** Definitions on `session/prompt` (top-level `tools` or
    `_meta.tools`) are accepted but ignored; ACP's only external-tool channel is
    **MCP servers** registered at `session/new` (executed by the MCP server, not
-   the harness). The gateway now **forwards operator-configured MCP servers**
-   (`KIRO_MCP_SERVERS` / `KIRO_MCP_CONFIG`) on every session — see
-   [Configuration](#configuration) — and still forwards client tool defs under
-   `_meta.tools` for forward-compatibility, but OpenAI/Anthropic-style
-   client-side function calling does **not** round-trip today. See
+   the harness). This is why **your harness's MCP tools now work anyway**: the
+   gateway discovers the harness's own MCP config and registers those same
+   servers on every session — see
+   [Your harness's MCP servers](#your-harnesss-mcp-servers-work-automatically).
+   Operator-configured servers (`KIRO_MCP_SERVERS` / `KIRO_MCP_CONFIG`) are
+   forwarded too, and client tool defs are still forwarded under `_meta.tools`
+   for forward-compatibility — but OpenAI/Anthropic-style client-side function
+   calling does **not** round-trip today. See
    [issue #31](https://github.com/ankitcharolia/kiro-gateway/issues/31).
 
 **By default (`ACP_SURFACE_TOOL_CALLS=false`) the shims surface kiro-cli's
