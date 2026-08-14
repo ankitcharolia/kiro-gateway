@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.4.0 (2026-08-12)
+
+### Features
+
+* **mcp:** forward the harness's own MCP servers and gate tool permissions ([793e5b0](https://github.com/ankitcharolia/kiro-gateway/commit/793e5b0c64513cbdb0862b2be355693c67493e43))
+
+### Documentation
+
+* **changelog:** update for v2.3.3 [skip ci] ([fc43fd9](https://github.com/ankitcharolia/kiro-gateway/commit/fc43fd9949cbbbbbaa0b945cd109e7db20f306f4))
+
+### CI/CD & Build
+
+* **release:** add PyPI publish step via trusted publishing ([f556f36](https://github.com/ankitcharolia/kiro-gateway/commit/f556f36880acbc7115aa6d40d346c5e288b53cc0))
+
+### Dependencies
+
+* **deps:** update astral-sh/setup-uv action to v10 ([9225bbe](https://github.com/ankitcharolia/kiro-gateway/commit/9225bbe02ecd3affcaa15ba22d879c6bc316c8fc))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @renovate[bot]
+* @github-actions[bot]
+
 ## 2.3.3 (2026-08-06)
 
 ### Features
