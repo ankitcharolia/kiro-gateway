@@ -805,6 +805,51 @@ class TestOpenAIShimErrorMapping:
         assert '"type": "rate_limit_error"' in resp.text
         assert "data: [DONE]" in resp.text
 
+    # -- v3 auth bridge failures (issue #52) -------------------------------
+    # kiro-cli itself not being authenticated must surface as a native 401
+    # authentication_error, not a generic 502, in BOTH modes.
+
+    def test_chat_non_stream_auth_failure_returns_401(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_complete(
+            ACPError(-32000, "Auth refresh callback failed: not supported")
+        )
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.status_code == 401
+        assert resp.json()["error"]["type"] == "authentication_error"
+
+    def test_chat_stream_auth_failure_error_type(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_stream(
+            {"type": "error", "message": "Auth refresh callback failed", "code": -32000}
+        )
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200  # SSE body already started
+        assert '"type": "authentication_error"' in resp.text
+        assert "data: [DONE]" in resp.text
+
+    def test_responses_non_stream_auth_failure_returns_401(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_complete(
+            ACPError(-32000, "kiro-cli authentication failed; run `kiro-cli login`")
+        )
+        resp = sync_client.post(
+            "/v1/responses", json={"model": "claude-sonnet-4.6", "input": "hi"},
+            headers=openai_headers,
+        )
+        assert resp.status_code == 401
+        assert resp.json()["error"]["type"] == "authentication_error"
+
+    def test_responses_stream_auth_failure_error_type(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_stream(
+            {"type": "error", "message": "Auth refresh callback failed", "code": -32000}
+        )
+        resp = sync_client.post(
+            "/v1/responses",
+            json={"model": "claude-sonnet-4.6", "input": "hi", "stream": True},
+            headers=openai_headers,
+        )
+        assert resp.status_code == 200
+        assert "authentication_error" in resp.text
+
     def test_responses_non_stream_rate_limit_returns_429(self, sync_client, openai_headers):
         sync_client.app.state.shim_service = _error_shim_complete(
             ACPError(-32000, "Too Many Requests")

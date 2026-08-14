@@ -13,6 +13,7 @@ import pytest_asyncio
 
 from kiro.acp_client import ACPClient
 from kiro.acp_models import PromptMessage, PromptParams, ACPToolDefinition
+from kiro.config import settings
 
 # Capture the genuine new_session implementation at import time. The
 # session-scoped ``test_client`` fixture monkeypatches ``ACPClient.new_session``
@@ -2109,3 +2110,403 @@ class TestPromptStreamLimiting:
         await feeder
         texts = "".join(e["content"] for e in events if e["type"] == "text")
         assert texts == "one two three four five"
+
+
+# ---------------------------------------------------------------------------
+# v3 agent engine (issue #52): host-mediated auth callback, configOptions
+# catalogue, session/set_config_option and the v3 tool-output shape.
+# All shapes verified against a live kiro-cli 2.18.0 / KAS 0.38.7 probe.
+# ---------------------------------------------------------------------------
+
+class TestV3AuthCallback:
+    """``_kiro/auth/getAccessToken`` is answered only when the bridge is on."""
+
+    @staticmethod
+    def _capture_writes(client: ACPClient) -> list[str]:
+        written: list[str] = []
+
+        async def fake_write_line(line: str) -> None:
+            written.append(line)
+
+        client._write_line = fake_write_line  # type: ignore[assignment]
+        return written
+
+    @pytest.mark.asyncio
+    async def test_v3_answers_callback_with_resolver_payload(self):
+        from kiro.kiro_auth import KiroAuthResolver
+
+        resolver = MagicMock(spec=KiroAuthResolver)
+        resolver.resolve = AsyncMock(return_value={
+            "accessToken": "tok", "expiresAt": "2026-08-14T11:30:00Z",
+            "profileArn": "arn:aws:codewhisperer:us-east-1:1:profile/A",
+        })
+        client = ACPClient(engine="v3", auth_resolver=resolver)
+        written = self._capture_writes(client)
+
+        await client._handle_agent_request({
+            "jsonrpc": "2.0", "id": 0,
+            "method": "_kiro/auth/getAccessToken", "params": {},
+        })
+
+        assert len(written) == 1
+        msg = json.loads(written[0])
+        assert msg["id"] == 0
+        assert msg["result"]["accessToken"] == "tok"
+        assert "error" not in msg or msg["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_resolver_failure_is_reported_as_jsonrpc_error(self):
+        from kiro.kiro_auth import KiroAuthError, KiroAuthResolver
+
+        resolver = MagicMock(spec=KiroAuthResolver)
+        resolver.resolve = AsyncMock(
+            side_effect=KiroAuthError("kiro-cli authentication failed; run `kiro-cli login`")
+        )
+        client = ACPClient(engine="v3", auth_resolver=resolver)
+        written = self._capture_writes(client)
+
+        await client._handle_agent_request({
+            "jsonrpc": "2.0", "id": 7,
+            "method": "_kiro/auth/getAccessToken", "params": {},
+        })
+
+        msg = json.loads(written[0])
+        assert msg["error"]["code"] == -32000
+        assert "kiro-cli login" in msg["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_v2_declines_the_callback(self):
+        """On the default engine no resolver exists, so the callback is refused."""
+        client = ACPClient(engine="v2")
+        written = self._capture_writes(client)
+        assert client._auth_resolver is None
+
+        await client._handle_agent_request({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "_kiro/auth/getAccessToken", "params": {},
+        })
+
+        msg = json.loads(written[0])
+        assert msg["error"]["code"] == -32000
+        assert "ACP_AUTH_BRIDGE" in msg["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_v3_client_side_fs_requests_are_still_declined(self):
+        """v3 offers _kiro/fs/*; the gateway keeps its least-privilege posture."""
+        from kiro.kiro_auth import KiroAuthResolver
+
+        resolver = MagicMock(spec=KiroAuthResolver)
+        resolver.resolve = AsyncMock(return_value={"accessToken": "t", "expiresAt": "x"})
+        client = ACPClient(engine="v3", auth_resolver=resolver)
+        written = self._capture_writes(client)
+
+        for method in ("_kiro/fs/read", "_kiro/fs/write", "_kiro/fs/delete",
+                       "_kiro/hooks/executeHook", "_kiro/openExternalUrl"):
+            await client._handle_agent_request({
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": {},
+            })
+
+        assert len(written) == 5
+        for line in written:
+            assert json.loads(line)["error"]["code"] == -32601
+
+
+class TestV3PermissionOptionIds:
+    """v3 advertises different optionIds; matching is by ``kind``."""
+
+    V3_OPTIONS = [
+        {"optionId": "accept", "name": "Allow", "kind": "allow_once"},
+        {"optionId": "always-accept", "name": "Always allow", "kind": "allow_always"},
+        {"optionId": "reject", "name": "Deny", "kind": "reject_once"},
+        {"optionId": "always-reject", "name": "Always deny", "kind": "reject_always"},
+    ]
+
+    def test_trusting_client_picks_v3_allow_once_id(self):
+        client = ACPClient(engine="v3", trust_tools=True)
+        assert client._select_permission_option(self.V3_OPTIONS, {}) == "accept"
+
+    def test_untrusting_client_picks_v3_reject_once_id(self):
+        client = ACPClient(engine="v3", trust_tools=False)
+        assert client._select_permission_option(self.V3_OPTIONS, {}) == "reject"
+
+
+class TestV3ConfigOptionsCatalogue:
+    """v3 reports the model/mode catalogue via configOptions, not ``models``."""
+
+    SESSION_NEW_V3 = {
+        "sessionId": "sess-v3",
+        "modes": {"availableModes": [{"id": "vibe", "name": "Default"}]},
+        "configOptions": [
+            {"type": "select", "id": "mode", "category": "mode",
+             "currentValue": "vibe",
+             "options": [{"value": "vibe", "name": "Default"},
+                         {"value": "plan", "name": "Plan"}]},
+            {"type": "select", "id": "model", "category": "model",
+             "currentValue": "claude-opus-5",
+             "options": [{"value": "auto", "name": "Auto", "description": "Auto"},
+                         {"value": "claude-opus-5", "name": "Claude Opus 5"}]},
+        ],
+    }
+
+    def test_models_come_from_config_options(self):
+        client = ACPClient(engine="v3")
+        client._capture_available_models(self.SESSION_NEW_V3)
+
+        assert [m["id"] for m in client.available_models] == ["auto", "claude-opus-5"]
+        assert client.available_models[1]["name"] == "Claude Opus 5"
+        assert client._current_model_id == "claude-opus-5"
+
+    def test_modes_come_from_config_options(self):
+        client = ACPClient(engine="v3")
+        client._capture_available_models(self.SESSION_NEW_V3)
+
+        assert [m["id"] for m in client.available_modes] == ["vibe", "plan"]
+        assert client._current_mode_id == "vibe"
+
+    def test_v2_models_block_still_wins(self):
+        """v1/v2 behaviour is unchanged when a models block is present."""
+        client = ACPClient(engine="v2")
+        client._capture_available_models({
+            "models": {"currentModelId": "claude-sonnet-4.6",
+                       "availableModels": [{"modelId": "claude-sonnet-4.6",
+                                            "name": "Sonnet"}]},
+            "configOptions": [{"id": "model", "currentValue": "ignored",
+                               "options": [{"value": "ignored"}]}],
+        })
+
+        assert [m["id"] for m in client.available_models] == ["claude-sonnet-4.6"]
+        assert client._current_model_id == "claude-sonnet-4.6"
+
+    def test_config_option_update_refreshes_catalogue(self):
+        client = ACPClient(engine="v3")
+        client._handle_notification({
+            "method": "session/update",
+            "params": {"sessionId": "sess-v3", "update": {
+                "sessionUpdate": "config_option_update",
+                "configOptions": [
+                    {"id": "model", "currentValue": "gpt-5.6-sol",
+                     "options": [{"value": "gpt-5.6-sol", "name": "GPT 5.6 Sol"}]},
+                ],
+            }},
+        })
+
+        assert [m["id"] for m in client.available_models] == ["gpt-5.6-sol"]
+        assert client._current_model_id == "gpt-5.6-sol"
+
+    def test_malformed_config_options_are_ignored(self):
+        client = ACPClient(engine="v3")
+        for payload in (None, [], "nope", [None, 3, {"id": "model"}]):
+            client._capture_available_models({"configOptions": payload})
+        assert client.available_models == []
+
+
+class TestV3ModelSelectionVerb:
+    """v3 has no session/set_model — the model is a session config option."""
+
+    @pytest.mark.asyncio
+    async def test_v3_uses_set_config_option(self):
+        client = ACPClient(engine="v3")
+        client._call = AsyncMock(return_value={})
+
+        await client.set_model("sess-1", "claude-opus-5")
+
+        client._call.assert_awaited_once_with(
+            "session/set_config_option",
+            {"sessionId": "sess-1", "configId": "model", "value": "claude-opus-5"},
+        )
+        assert client._current_model_id == "claude-opus-5"
+
+    @pytest.mark.asyncio
+    async def test_v2_still_uses_set_model(self):
+        client = ACPClient(engine="v2")
+        client._call = AsyncMock(return_value={})
+
+        await client.set_model("sess-1", "claude-sonnet-4.6")
+
+        client._call.assert_awaited_once_with(
+            "session/set_model",
+            {"sessionId": "sess-1", "modelId": "claude-sonnet-4.6"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_failure_never_breaks_the_turn(self):
+        from kiro.acp_client import ACPError
+
+        client = ACPClient(engine="v3")
+        client._call = AsyncMock(side_effect=ACPError(-32000, "nope"))
+
+        await client.set_model("sess-1", "bogus-model")  # must not raise
+
+
+class TestUnservedModelGuard:
+    """An unserved model/mode is never put on the wire, on any engine.
+
+    A live kiro-cli 2.18.0 probe with an id this account is not served (the
+    widely hardcoded ``claude-sonnet-4.6``) hung the turn for ~4 minutes and then
+    failed — a 504 on v2 and a misleading "Access denied" on v3 — so the old
+    assumption that kiro-cli silently keeps its default does not hold.
+    """
+
+    @staticmethod
+    def _client(engine: str) -> ACPClient:
+        client = ACPClient(engine=engine)
+        client._available_models = [{"id": "auto"}, {"id": "claude-opus-5"}]
+        client._available_modes = [{"id": "vibe"}, {"id": "plan"}]
+        client._call = AsyncMock(return_value={})
+        return client
+
+    @pytest.mark.parametrize("engine", ["v2", "v3"])
+    @pytest.mark.asyncio
+    async def test_unserved_model_is_not_sent(self, engine):
+        client = self._client(engine)
+
+        await client.set_model("sess-1", "claude-sonnet-4.6")
+
+        client._call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_served_model_is_sent_on_v3_as_config_option(self):
+        client = self._client("v3")
+
+        await client.set_model("sess-1", "claude-opus-5")
+
+        client._call.assert_awaited_once_with(
+            "session/set_config_option",
+            {"sessionId": "sess-1", "configId": "model", "value": "claude-opus-5"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_served_model_is_sent_on_v2_as_set_model(self):
+        client = self._client("v2")
+
+        await client.set_model("sess-1", "claude-opus-5")
+
+        client._call.assert_awaited_once_with(
+            "session/set_model",
+            {"sessionId": "sess-1", "modelId": "claude-opus-5"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_catalogue_does_not_block(self):
+        """A cold client cannot verify the id, so it must not withhold it."""
+        client = ACPClient(engine="v3")
+        client._call = AsyncMock(return_value={})
+
+        await client.set_model("sess-1", "anything")
+
+        client._call.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_model_validation_off_forces_the_id(self, monkeypatch):
+        """The legacy forward-everything behaviour stays available."""
+        monkeypatch.setattr(settings, "MODEL_VALIDATION", "off", raising=False)
+        client = self._client("v2")
+
+        await client.set_model("sess-1", "claude-sonnet-4.6")
+
+        client._call.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unserved_mode_is_not_sent(self):
+        """A v2 mode id (e.g. kiro_default) must not be pushed to a v3 session."""
+        client = self._client("v3")
+
+        await client.set_mode("sess-1", "kiro_default")
+
+        client._call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_served_mode_is_sent(self):
+        client = self._client("v3")
+
+        await client.set_mode("sess-1", "plan")
+
+        client._call.assert_awaited_once_with(
+            "session/set_mode", {"sessionId": "sess-1", "modeId": "plan"},
+        )
+
+
+class TestV3ToolOutputShape:
+    """v3 reports tool output as a flat string, v2 as an items list."""
+
+    def test_v3_flat_output_string(self):
+        assert ACPClient._extract_tool_output(
+            {"output": "PROBE52_TOOL_MARKER\n", "exitStatus": 0}
+        ) == "PROBE52_TOOL_MARKER\n"
+
+    def test_v2_items_list_unchanged(self):
+        assert ACPClient._extract_tool_output(
+            {"items": [{"Text": "l1"}, {"Text": "l2"}]}
+        ) == "l1\nl2"
+
+    def test_stdout_key_is_accepted(self):
+        assert ACPClient._extract_tool_output({"stdout": "hi"}) == "hi"
+
+    def test_no_recognised_key_yields_empty(self):
+        assert ACPClient._extract_tool_output({"unrelated": {"a": 1}}) == ""
+
+    def test_v3_output_reaches_the_tool_call_update_event(self):
+        client = ACPClient(engine="v3")
+        queue = asyncio.Queue()
+        client._event_queues["s"] = queue
+
+        client._handle_notification({
+            "method": "session/update",
+            "params": {"sessionId": "s", "update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                "title": "Run Command", "kind": "execute", "status": "completed",
+                "rawOutput": {"output": "hello-v3\n"},
+            }},
+        })
+
+        event = queue.get_nowait()
+        assert event["type"] == "tool_call_update"
+        assert event["output"] == "hello-v3\n"
+
+
+class TestAuthBridgeConfig:
+    """config.ACP_AUTH_BRIDGE gates the v3 credential relay (issue #52)."""
+
+    def _reload_config(self, monkeypatch, value):
+        import importlib
+        import kiro.config as cfg
+        if value is None:
+            monkeypatch.delenv("ACP_AUTH_BRIDGE", raising=False)
+        else:
+            monkeypatch.setenv("ACP_AUTH_BRIDGE", value)
+        return importlib.reload(cfg)
+
+    def test_default_is_enabled(self, monkeypatch):
+        """On by default — but inert unless the engine is v3."""
+        cfg = self._reload_config(monkeypatch, None)
+        try:
+            assert cfg.ACP_AUTH_BRIDGE is True
+            assert cfg.settings.ACP_AUTH_BRIDGE is True
+        finally:
+            self._reload_config(monkeypatch, None)
+
+    @pytest.mark.parametrize("value,expected", [
+        ("true", True), ("TRUE", True), ("false", False), ("0", False), ("", False),
+    ])
+    def test_env_parsing(self, monkeypatch, value, expected):
+        cfg = self._reload_config(monkeypatch, value)
+        try:
+            assert cfg.ACP_AUTH_BRIDGE is expected
+        finally:
+            self._reload_config(monkeypatch, None)
+
+    def test_disabled_bridge_leaves_v3_client_without_resolver(self, monkeypatch):
+        """A v3 client fails closed rather than relaying a credential."""
+        monkeypatch.setattr(settings, "ACP_AUTH_BRIDGE", False, raising=False)
+        assert ACPClient(engine="v3")._auth_resolver is None
+
+    def test_enabled_bridge_gives_v3_client_a_resolver(self, monkeypatch):
+        from kiro.kiro_auth import KiroAuthResolver
+
+        monkeypatch.setattr(settings, "ACP_AUTH_BRIDGE", True, raising=False)
+        assert isinstance(ACPClient(engine="v3")._auth_resolver, KiroAuthResolver)
+
+    def test_v2_client_never_gets_a_resolver(self, monkeypatch):
+        """The default engine stays completely credential-free."""
+        monkeypatch.setattr(settings, "ACP_AUTH_BRIDGE", True, raising=False)
+        assert ACPClient(engine="v2")._auth_resolver is None

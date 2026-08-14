@@ -62,6 +62,13 @@ from kiro.acp_models import (
     GatewayCapabilities,
 )
 from kiro.config import ACP_STDIO_MAX_BYTES, settings
+from kiro.kiro_auth import (
+    AUTH_CALLBACK_ERROR_CODE,
+    AUTH_CALLBACK_METHOD,
+    KiroAuthError,
+    KiroAuthResolver,
+    build_resolver,
+)
 from kiro.output_limits import StreamLimiter
 from kiro.tool_permissions import (
     DECISION_ALLOW,
@@ -404,6 +411,7 @@ class ACPClient:
         mcp_servers: Optional[list[dict]] = None,
         mcp_init_timeout: int = 30,
         permission_policy: Optional[ToolPermissionPolicy] = None,
+        auth_resolver: Optional[KiroAuthResolver] = None,
     ):
         self._command = command
         self._trust_tools = trust_tools
@@ -435,6 +443,16 @@ class ACPClient:
         self._initial_model = (initial_model or "").strip() or None
         self._effort = (effort or "").strip() or None
         self._engine = (engine or "v2").strip() or "v2"
+        # v3 agent engine only: the agent server is launched with a hardcoded
+        # --auth=acp-callback and asks the gateway for an access token
+        # (_kiro/auth/getAccessToken, issue #52). The resolver relays one from
+        # kiro-cli itself; it is None on v1/v2 (callback never sent) and when
+        # ACP_AUTH_BRIDGE is disabled, in which case the callback is declined.
+        if auth_resolver is None:
+            auth_resolver = build_resolver(
+                self._command, self._engine, settings.ACP_AUTH_BRIDGE
+            )
+        self._auth_resolver = auth_resolver
         self._extra_args = list(extra_args or [])
         # Default MCP servers registered on every session/new (issue: MCP never
         # registered). kiro-cli executes these itself (mcpCapabilities.http) —
@@ -668,48 +686,111 @@ class ACPClient:
         """
         Cache the model catalogue reported by ``session/new``.
 
-        kiro-cli returns a ``models`` object on every ``session/new``::
+        Two shapes are accepted, because the engines differ:
 
-            {"models": {"currentModelId": "...",
-                        "availableModels": [{"modelId", "name", "description"}, ...]}}
+        * **v1/v2** return a ``models`` object::
 
-        The list is normalised to ``{"id", "name", "description"}`` dicts and
-        cached so ``GET /v1/models`` can advertise the live catalogue instead of
-        a static fallback.
+              {"models": {"currentModelId": "...",
+                          "availableModels": [{"modelId", "name", "description"}, …]}}
+
+        * **v3** returns no ``models`` block at all — the catalogue arrives as a
+          ``configOptions`` select (verified against a live kiro-cli 2.18.0
+          probe)::
+
+              {"configOptions": [{"id": "model", "category": "model",
+                                  "currentValue": "…",
+                                  "options": [{"value", "name", "description"}, …]}]}
+
+        Both are normalised to ``{"id", "name", "description"}`` dicts and cached
+        so ``GET /v1/models`` advertises the live catalogue on either engine.
 
         Args:
             session_result: The raw ``session/new`` result dict.
         """
         models_info = session_result.get("models")
-        if not isinstance(models_info, dict):
+        if isinstance(models_info, dict):
+            current = models_info.get("currentModelId")
+            if isinstance(current, str) and current:
+                self._current_model_id = current
+            normalised = self._normalise_catalogue(models_info.get("availableModels"))
+            if normalised:
+                self._available_models = normalised
+                return
+        self._capture_config_option_catalogue(session_result.get("configOptions"))
+
+    def _capture_config_option_catalogue(self, config_options: Any) -> None:
+        """
+        Cache the model/mode catalogues carried by a v3 ``configOptions`` array.
+
+        Used both for ``session/new`` and for the ``config_option_update``
+        notification, which pushes a **replacement** array mid-session.
+
+        Args:
+            config_options: The raw ``configOptions`` value (ignored when it is
+                not a list, so v1/v2 results are unaffected).
+        """
+        if not isinstance(config_options, list):
             return
-        current = models_info.get("currentModelId")
-        if isinstance(current, str) and current:
-            self._current_model_id = current
-        available = models_info.get("availableModels")
-        if not isinstance(available, list):
-            return
+        for option in config_options:
+            if not isinstance(option, dict):
+                continue
+            option_id = str(option.get("id") or option.get("category") or "")
+            entries = self._normalise_catalogue(option.get("options"))
+            current = option.get("currentValue")
+            if option_id == "model":
+                if isinstance(current, str) and current:
+                    self._current_model_id = current
+                if entries:
+                    self._available_models = entries
+            elif option_id == "mode":
+                if isinstance(current, str) and current:
+                    self._current_mode_id = current
+                if entries:
+                    self._available_modes = entries
+
+    @staticmethod
+    def _normalise_catalogue(entries: Any) -> list[dict]:
+        """
+        Normalise a model/mode list to ``{"id", "name", "description"}`` dicts.
+
+        Accepts every id spelling the engines use: ``modelId`` (v2 models),
+        ``value`` (v3 configOptions options) and ``id`` (modes).
+
+        Args:
+            entries: The raw list of catalogue entries.
+
+        Returns:
+            The normalised entries, or ``[]`` when there is nothing usable.
+        """
+        if not isinstance(entries, list):
+            return []
         normalised: list[dict] = []
-        for entry in available:
+        for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            model_id = entry.get("modelId")
-            if not model_id:
+            entry_id = entry.get("modelId") or entry.get("value") or entry.get("id")
+            if not entry_id:
                 continue
             normalised.append({
-                "id": str(model_id),
-                "name": str(entry.get("name") or model_id),
+                "id": str(entry_id),
+                "name": str(entry.get("name") or entry_id),
                 "description": str(entry.get("description") or ""),
             })
-        if normalised:
-            self._available_models = normalised
+        return normalised
 
     async def set_model(self, session_id: str, model_id: str) -> None:
         """
-        Select the model for an existing session via ``session/set_model``.
+        Select the model for an existing session.
 
-        kiro-cli accepts this request silently (it does not validate the id),
-        so an unknown model simply leaves the session on its default model.
+        The verb depends on the agent engine: v1/v2 use ``session/set_model``,
+        while the **v3 agent server implements no ``session/set_model``** and
+        exposes the model as a *session config option* instead — verified against
+        a live kiro-cli 2.18.0 probe (``session/new`` returns no ``models`` block,
+        only ``configOptions`` with an ``id: "model"`` select) and matching
+        first-party usage in ``kirodotdev/KiroCrew``. Same effect, different verb.
+
+        kiro-cli accepts the request silently (it does not validate the id), so
+        an unknown model simply leaves the session on its default model.
         Failures are logged and swallowed so a model-selection problem never
         breaks the completion itself.
 
@@ -718,6 +799,11 @@ class ACPClient:
             model_id: The model id requested by the caller (e.g.
                 ``claude-sonnet-4.6``).
         """
+        if not self._is_served("model", model_id, self._available_models):
+            return
+        if self._engine == "v3":
+            await self.set_config_option(session_id, "model", model_id)
+            return
         try:
             await self._call(
                 "session/set_model",
@@ -728,6 +814,88 @@ class ACPClient:
             logger.warning(
                 f"session/set_model failed for '{model_id}': {exc}; "
                 "session will use its default model"
+            )
+
+    def _is_served(self, kind: str, value: str, catalogue: list[dict]) -> bool:
+        """Whether a model/mode id is one kiro-cli actually serves.
+
+        An unserved id must not be put on the wire. The old assumption — that
+        kiro-cli silently keeps the session default for an unknown id — does not
+        hold: a live kiro-cli 2.18.0 probe with an id this account is not served
+        (the widely hardcoded ``claude-sonnet-4.6``) hung the turn for ~4 minutes
+        and then failed, as a ``504`` on v2 and as a misleading "Access denied.
+        Please check your authentication." on v3.
+
+        So when the live catalogue is known and the id is absent from it, the
+        selection is skipped and the session keeps the model ``session/new``
+        assigned. This matches what ``MODEL_VALIDATION=warn`` already reports
+        ("falling back to the session default") and mirrors first-party behaviour
+        in ``kirodotdev/KiroCrew`` ("this path never puts an unserved model on the
+        wire"). Harnesses that hardcode a foreign id keep working, and
+        ``MODEL_ALIASES`` can map one onto a served model.
+
+        Two deliberate escape hatches:
+
+        * the check is skipped while the catalogue is unknown (cold client), so a
+          selection is never withheld on a guess;
+        * ``MODEL_VALIDATION=off`` restores the legacy forward-everything
+          behaviour for operators who need to force an id.
+
+        Args:
+            kind: ``"model"`` or ``"mode"``, for logging.
+            value: The requested id.
+            catalogue: The cached catalogue to check against.
+
+        Returns:
+            ``True`` when the value may be sent.
+        """
+        if not catalogue:
+            return True
+        if str(getattr(settings, "MODEL_VALIDATION", "warn")).lower() == "off":
+            return True
+        served = {entry.get("id") for entry in catalogue}
+        if value in served:
+            return True
+        logger.warning(
+            f"{kind} '{value}' is not in kiro-cli's live catalogue "
+            f"({', '.join(sorted(str(s) for s in served))}); keeping the session "
+            f"default instead of sending an unserved {kind} "
+            f"(set MODEL_VALIDATION=off to force it)"
+        )
+        return False
+
+    async def set_config_option(
+        self, session_id: str, config_id: str, value: str
+    ) -> None:
+        """
+        Set a v3 session config option via ``session/set_config_option``.
+
+        The v3 agent server exposes the model, mode and thinking effort as
+        ``configOptions`` selects rather than dedicated ACP verbs. Failures are
+        logged and swallowed, mirroring :meth:`set_model` / :meth:`set_mode`: a
+        configuration problem must never break the completion itself.
+
+        Args:
+            session_id: The ACP session to configure.
+            config_id: The option id (``model`` / ``mode`` / ``effort``).
+            value: The option value to select.
+        """
+        try:
+            await self._call(
+                "session/set_config_option",
+                {"sessionId": session_id, "configId": config_id, "value": value},
+            )
+            if config_id == "model":
+                self._current_model_id = value
+            elif config_id == "mode":
+                self._current_mode_id = value
+            logger.info(
+                f"ACP session {session_id} config '{config_id}' set to '{value}'"
+            )
+        except ACPError as exc:
+            logger.warning(
+                f"session/set_config_option {config_id}='{value}' failed: {exc}; "
+                "session will use its default"
             )
 
     @property
@@ -744,8 +912,10 @@ class ACPClient:
             {"modes": {"currentModeId": "kiro_default",
                        "availableModes": [{"id", "name", "description"}, ...]}}
 
-        Each mode is an agent persona (``kiro_default``, ``code``,
-        ``kiro_planner``, ``kiro_guide``, …). The list is normalised to
+        Each mode is an agent persona. The ids are **engine-specific**:
+        v1/v2 use ``kiro_default``/``code``/``kiro_planner``/``kiro_guide``,
+        while v3 uses ``vibe``/``spec``/``plan``/``autonomous``/… (verified
+        against a live kiro-cli 2.18.0 probe). The list is normalised to
         ``{"id", "name", "description"}`` dicts and cached alongside the current
         mode id so the gateway can advertise/select the active agent.
 
@@ -758,21 +928,7 @@ class ACPClient:
         current = modes_info.get("currentModeId")
         if isinstance(current, str) and current:
             self._current_mode_id = current
-        available = modes_info.get("availableModes")
-        if not isinstance(available, list):
-            return
-        normalised: list[dict] = []
-        for entry in available:
-            if not isinstance(entry, dict):
-                continue
-            mode_id = entry.get("id")
-            if not mode_id:
-                continue
-            normalised.append({
-                "id": str(mode_id),
-                "name": str(entry.get("name") or mode_id),
-                "description": str(entry.get("description") or ""),
-            })
+        normalised = self._normalise_catalogue(modes_info.get("availableModes"))
         if normalised:
             self._available_modes = normalised
 
@@ -790,6 +946,8 @@ class ACPClient:
             session_id: The ACP session to configure.
             mode_id: The mode/agent id requested (e.g. ``kiro_planner``).
         """
+        if not self._is_served("mode", mode_id, self._available_modes):
+            return
         try:
             await self._call(
                 "session/set_mode",
@@ -1678,12 +1836,22 @@ class ACPClient:
             return
 
         session_id = params.get("sessionId", "")
+        update = params.get("update", {}) if isinstance(params, dict) else {}
+        if isinstance(update, dict) and update.get("sessionUpdate") == "config_option_update":
+            # v3 pushes a REPLACEMENT configOptions array when the model/mode/
+            # effort catalogue changes; keep the cached catalogue (used by
+            # GET /v1/models) in step. Handled before the queue lookup because it
+            # can arrive outside an active prompt. Not surfaced as a client event.
+            self._capture_config_option_catalogue(update.get("configOptions"))
+            return
+
         queue = self._event_queues.get(session_id)
         if not queue:
             return
 
         update = params.get("update", {})
         kind = update.get("sessionUpdate")
+
 
         # kiro-cli may attach token usage to an update or its params/_meta
         # (this is the same data its interactive /usage view shows). Capture it
@@ -1811,9 +1979,12 @@ class ACPClient:
     def _extract_tool_output(raw_output: Any) -> str:
         """Extract printable text from a tool call's ``rawOutput``.
 
-        kiro-cli returns ``rawOutput`` as ``{"items": [{"Text": "..."}, {"Json": …}]}``.
-        This concatenates the text items (and JSON-encodes structured items) into
-        a plain string for the activity/reasoning view.
+        The two engines report output differently (both verified live):
+
+        * **v1/v2** — ``{"items": [{"Text": "..."}, {"Json": …}]}``
+        * **v3** — ``{"output": "PROBE52_TOOL_MARKER\\n", …}`` (kiro-cli 2.18.0)
+
+        Both are reduced to a plain string for the activity/reasoning view.
 
         Args:
             raw_output: The ``rawOutput`` object from a ``tool_call_update``.
@@ -1825,6 +1996,13 @@ class ACPClient:
             return ""
         items = raw_output.get("items")
         if not isinstance(items, list):
+            # v3 shape: a flat string under "output" (or "stdout" on some tools).
+            for key in ("output", "stdout"):
+                value = raw_output.get(key)
+                if isinstance(value, str) and value:
+                    return value[:8000]
+                if value is not None and not isinstance(value, (dict, list)):
+                    return str(value)[:8000]
             return ""
         parts: list[str] = []
         for item in items:
@@ -1855,8 +2033,36 @@ class ACPClient:
             await self._respond(req_id, {"outcome": {"outcome": "selected", "optionId": option_id}})
             return
 
+        if method == AUTH_CALLBACK_METHOD:
+            # v3 only (issue #52): the agent server keeps no credential and asks
+            # the gateway for a short-lived access token, which the resolver
+            # obtains from kiro-cli itself. Connection-level request — it carries
+            # no sessionId, so it is answered directly. Declined when the bridge
+            # is disabled or the engine is not v3, which fails the turn with a
+            # clear auth error instead of relaying anything.
+            if self._auth_resolver is None:
+                await self._respond_error(
+                    req_id,
+                    AUTH_CALLBACK_ERROR_CODE,
+                    "kiro-cli authentication bridge is disabled; set "
+                    "ACP_AUTH_BRIDGE=true or use KIRO_ACP_ENGINE=v2",
+                )
+                return
+            try:
+                result = await self._auth_resolver.resolve()
+            except KiroAuthError as exc:
+                # The resolver guarantees a token-free message, so it is safe to
+                # log and to hand back to the agent.
+                logger.error(f"v3 auth callback failed: {exc}")
+                await self._respond_error(req_id, AUTH_CALLBACK_ERROR_CODE, str(exc))
+                return
+            await self._respond(req_id, result)
+            return
+
         # We advertise no fs/terminal capabilities, so kiro-cli should never
-        # ask us to perform them. If it does, decline cleanly.
+        # ask us to perform them. If it does, decline cleanly. This also covers
+        # v3's richer client-callback surface (_kiro/fs/*, hooks, checkpoints):
+        # declining keeps the gateway's least-privilege posture.
         await self._respond_error(req_id, -32601, f"{method} not supported by gateway")
 
     def _select_permission_option(self, options: list[dict],
@@ -1892,12 +2098,42 @@ class ACPClient:
         return select_option_id(options, approve)
 
     async def _respond(self, req_id: Any, result: Any) -> None:
-        await self._write_line(JsonRpcResponse(id=req_id, result=result).model_dump_json())
+        """Send a JSON-RPC success response to an agent request.
+
+        JSON-RPC 2.0 requires that a response carry **either** ``result`` or
+        ``error``, never both, so the unused ``error`` member is excluded. The v3
+        agent server reads ``result`` first and crashes on a ``null`` one
+        (``Cannot read properties of null``), so this is load-bearing, not
+        cosmetic.
+
+        Args:
+            req_id: The id of the request being answered.
+            result: The result payload (nested ``None`` values are preserved).
+        """
+        await self._write_line(
+            JsonRpcResponse(id=req_id, result=result).model_dump_json(
+                exclude={"error"}
+            )
+        )
 
     async def _respond_error(self, req_id: Any, code: int, message: str) -> None:
+        """Send a JSON-RPC error response to an agent request.
+
+        The ``result`` member is excluded for the same reason as in
+        :meth:`_respond`: a response carrying ``result: null`` next to ``error``
+        makes the v3 agent server take the null branch and report an opaque
+        ``-32603 Internal error`` instead of the message sent here.
+
+        Args:
+            req_id: The id of the request being answered.
+            code: The JSON-RPC error code.
+            message: A human-readable, credential-free error message.
+        """
         from kiro.acp_models import JsonRpcError
         await self._write_line(
-            JsonRpcResponse(id=req_id, error=JsonRpcError(code=code, message=message)).model_dump_json()
+            JsonRpcResponse(
+                id=req_id, error=JsonRpcError(code=code, message=message)
+            ).model_dump_json(exclude={"result"}, exclude_none=True)
         )
 
     # ------------------------------------------------------------------

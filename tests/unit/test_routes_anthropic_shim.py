@@ -916,6 +916,29 @@ class TestAnthropicShimErrorMapping:
         assert resp.status_code == 502
         assert resp.json()["error"]["type"] == "api_error"
 
+    # -- v3 auth bridge failures (issue #52) -------------------------------
+    # kiro-cli itself not being authenticated must surface as a native 401
+    # authentication_error in BOTH modes, matching the OpenAI shim.
+
+    def test_non_stream_auth_failure_returns_401(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_error_shim_complete(
+            ACPError(-32000, "Auth refresh callback failed: not supported")
+        )
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.status_code == 401
+        body = resp.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "authentication_error"
+
+    def test_stream_auth_failure_error_type(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_error_shim_stream(
+            {"type": "error", "message": "Auth refresh callback failed", "code": -32000}
+        )
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200  # SSE body already started
+        assert '"type": "authentication_error"' in resp.text
+
     def test_stream_rate_limit_error_type(self, sync_client, anthropic_headers):
         sync_client.app.state.shim_service = _anthropic_error_shim_stream(
             {"type": "error", "message": "rate limit exceeded", "code": -32000}

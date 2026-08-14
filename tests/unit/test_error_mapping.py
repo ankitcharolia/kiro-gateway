@@ -148,3 +148,71 @@ class TestClassifyExceptionAndEvent:
         mapped = classify_event({"type": "error"})
         assert mapped.status_code == 502
         assert mapped.message == "Unknown error"
+
+
+class TestAuthClassification:
+    """kiro-cli's own credentials being unusable maps to 401 (issue #52).
+
+    Distinct from the gateway's client auth: the remedy is `kiro-cli login` on
+    the gateway host. The messages below are the ones the v3 agent server and
+    the auth bridge actually produce (verified against a live kiro-cli 2.18.0
+    probe: declining the callback fails session/prompt with
+    "-32000 Auth refresh callback failed").
+    """
+
+    @pytest.mark.parametrize("message", [
+        "Auth refresh callback failed: not supported",
+        "[TokenExpiredError] Auth refresh callback failed",
+        "TokenInvalidError: host returned no access token",
+        "kiro-cli authentication failed; run `kiro-cli login`",
+        "kiro-cli authentication bridge is disabled; set ACP_AUTH_BRIDGE=true",
+        "upstream returned 401",
+    ])
+    def test_auth_failures_map_to_401(self, message):
+        assert classify_error(message).status_code == 401
+
+    def test_auth_error_types_are_native(self):
+        mapped = classify_error("Auth refresh callback failed")
+        assert mapped.openai_type == "authentication_error"
+        assert mapped.anthropic_type == "authentication_error"
+
+    def test_auth_message_names_the_remedy_when_empty(self):
+        """Signal in structured data, empty message -> the fallback names the fix."""
+        mapped = classify_error("", data={"message": "Auth refresh callback failed"})
+        assert mapped.status_code == 401
+        assert "kiro-cli login" in mapped.message
+
+    def test_auth_envelopes_render_in_both_shapes(self):
+        mapped = classify_error("Auth refresh callback failed")
+        assert mapped.to_openai_error()["error"]["type"] == "authentication_error"
+        assert mapped.to_anthropic_error()["error"]["type"] == "authentication_error"
+
+    def test_rate_limit_still_wins_over_auth(self):
+        """A throttled auth-bearing message stays retryable (429), not 401."""
+        assert classify_error(
+            "429 rate limit exceeded while refreshing token"
+        ).status_code == 429
+
+    def test_timeout_still_wins_over_auth(self):
+        assert classify_error(
+            "kiro-cli token callback timed out"
+        ).status_code == 504
+
+    def test_exception_path_classifies_auth(self):
+        """Non-streaming completions surface ACPError -> 401."""
+        exc = ACPError(-32000, "Auth refresh callback failed: not supported")
+        assert classify_exception(exc).status_code == 401
+
+    def test_event_path_classifies_auth(self):
+        """Streaming error events classify identically to the exception path."""
+        event = {"type": "error", "code": -32000,
+                 "message": "Auth refresh callback failed: not supported"}
+        assert classify_event(event).status_code == 401
+
+    def test_auth_carries_no_retry_after(self):
+        """Retrying without re-login cannot help, so no Retry-After is set."""
+        assert classify_error("Auth refresh callback failed").headers() == {}
+
+    def test_ordinary_failures_are_unaffected(self):
+        """The word 'token' alone must not trip the auth class."""
+        assert classify_error("max output tokens reached").status_code == 502
