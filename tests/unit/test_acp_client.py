@@ -26,6 +26,9 @@ _REAL_NEW_SESSION = ACPClient.new_session
 _REAL_PROMPT_STREAM = ACPClient.prompt_stream
 # Same reason — the fixture also patches ACPClient.prompt for the session.
 _REAL_PROMPT = ACPClient.prompt
+# Ditto for initialize: the capability-capture tests must exercise the real
+# handshake, not the session-scoped mock the ``test_client`` fixture installs.
+_REAL_INITIALIZE = ACPClient.initialize
 
 
 # ---------------------------------------------------------------------------
@@ -2510,3 +2513,161 @@ class TestAuthBridgeConfig:
         """The default engine stays completely credential-free."""
         monkeypatch.setattr(settings, "ACP_AUTH_BRIDGE", True, raising=False)
         assert ACPClient(engine="v2")._auth_resolver is None
+
+
+# ---------------------------------------------------------------------------
+# Embedded documents (issue #58): representation follows the negotiated
+# promptCapabilities.embeddedContext, never the engine string.
+# Live kiro-cli 2.18.0 / KAS 0.38.7 probe: v3 advertises embeddedContext=true and
+# the model READ both a `text` resource and a base64 `blob` PDF; v2 advertises
+# false and silently IGNORES a resource block (the model saw no attachment).
+# ---------------------------------------------------------------------------
+
+class TestEmbeddedContextCapability:
+    """`supports_embedded_context` is driven by the initialize handshake."""
+
+    @pytest.mark.asyncio
+    async def test_false_before_initialize(self):
+        """Unknown capability must default to the safe text-reduction path."""
+        assert ACPClient().supports_embedded_context is False
+
+    @pytest.mark.asyncio
+    async def test_captured_from_initialize_v3(self):
+        client = ACPClient(engine="v3")
+        client._call = AsyncMock(return_value={
+            "protocolVersion": 1,
+            "agentCapabilities": {"promptCapabilities": {
+                "image": True, "embeddedContext": True}},
+        })
+
+        await _REAL_INITIALIZE(client)
+
+        assert client.supports_embedded_context is True
+
+    @pytest.mark.asyncio
+    async def test_captured_from_initialize_v2(self):
+        client = ACPClient(engine="v2")
+        client._call = AsyncMock(return_value={
+            "protocolVersion": 1,
+            "agentCapabilities": {"promptCapabilities": {
+                "image": True, "audio": False, "embeddedContext": False}},
+        })
+
+        await _REAL_INITIALIZE(client)
+
+        assert client.supports_embedded_context is False
+
+    @pytest.mark.asyncio
+    async def test_missing_capabilities_block_is_safe(self):
+        client = ACPClient()
+        client._call = AsyncMock(return_value={"protocolVersion": 1})
+
+        await _REAL_INITIALIZE(client)
+
+        assert client.supports_embedded_context is False
+
+
+class TestDocumentPromptRepresentation:
+    """A document renders as text (v1/v2) or an ACP resource block (v3)."""
+
+    TEXT_DOC = {
+        "type": "document", "mimeType": "text/markdown", "data": None,
+        "text": "# Spec\nbody", "name": "spec.md",
+        "fallback": "[document: spec.md]\n# Spec\nbody",
+    }
+    BINARY_DOC = {
+        "type": "document", "mimeType": "application/pdf", "data": "QUJD",
+        "text": None, "name": "scan.pdf",
+        "fallback": "[document: scan.pdf omitted — unsupported by kiro-cli]",
+    }
+
+    def _messages(self, doc: dict) -> list:
+        return [PromptMessage(role="user", content=[
+            {"type": "text", "text": "summarise this"}, doc,
+        ])]
+
+    def test_without_capability_document_is_reduced_to_text(self):
+        blocks = ACPClient._build_prompt_blocks(self._messages(self.TEXT_DOC), False)
+
+        assert [b["type"] for b in blocks] == ["text"]
+        assert "summarise this" in blocks[0]["text"]
+        assert "[document: spec.md]" in blocks[0]["text"]
+        assert "# Spec" in blocks[0]["text"]
+
+    def test_with_capability_text_document_becomes_a_resource(self):
+        blocks = ACPClient._build_prompt_blocks(self._messages(self.TEXT_DOC), True)
+
+        assert [b["type"] for b in blocks] == ["text", "resource"]
+        # The transcript keeps a marker where the attachment appeared.
+        assert "[document]" in blocks[0]["text"]
+        assert "[document: spec.md]" not in blocks[0]["text"]
+        resource = blocks[1]["resource"]
+        assert resource["text"] == "# Spec\nbody"
+        assert resource["mimeType"] == "text/markdown"
+        assert resource["uri"] == "attachment:///spec.md"
+        assert "blob" not in resource
+
+    def test_with_capability_binary_document_becomes_a_blob(self):
+        """A PDF travels as base64 so the agent parses it itself (probe-verified)."""
+        blocks = ACPClient._build_prompt_blocks(self._messages(self.BINARY_DOC), True)
+
+        resource = blocks[1]["resource"]
+        assert resource["blob"] == "QUJD"
+        assert resource["mimeType"] == "application/pdf"
+        assert "text" not in resource
+
+    def test_binary_document_without_capability_keeps_the_placeholder(self):
+        blocks = ACPClient._build_prompt_blocks(self._messages(self.BINARY_DOC), False)
+
+        assert [b["type"] for b in blocks] == ["text"]
+        assert "[document: scan.pdf omitted" in blocks[0]["text"]
+
+    def test_payloadless_document_falls_back_even_with_capability(self):
+        """Nothing to embed → the text fallback is used rather than a bad block."""
+        empty = {"type": "document", "mimeType": "application/zip", "data": None,
+                 "text": None, "name": "a.zip",
+                 "fallback": "[document: a.zip omitted — unsupported by kiro-cli]"}
+
+        blocks = ACPClient._build_prompt_blocks(self._messages(empty), True)
+
+        assert [b["type"] for b in blocks] == ["text"]
+        assert "[document: a.zip omitted" in blocks[0]["text"]
+
+    def test_images_and_documents_coexist(self):
+        messages = [PromptMessage(role="user", content=[
+            {"type": "text", "text": "look"},
+            {"type": "image", "mimeType": "image/png", "data": "aW1n"},
+            self.TEXT_DOC,
+        ])]
+
+        blocks = ACPClient._build_prompt_blocks(messages, True)
+
+        assert [b["type"] for b in blocks] == ["text", "image", "resource"]
+        assert "[image]" in blocks[0]["text"] and "[document]" in blocks[0]["text"]
+
+    def test_text_only_content_is_unaffected(self):
+        blocks = ACPClient._build_prompt_blocks(
+            [PromptMessage(role="user", content="just text")], True
+        )
+
+        assert blocks == [{"type": "text", "text": "just text"}]
+
+    def test_document_resource_block_shape(self):
+        """The wire shape matches ACP's EmbeddedResource (uri + text|blob)."""
+        block = ACPClient._document_resource_block(self.TEXT_DOC)
+
+        assert set(block) == {"type", "resource"}
+        assert block["type"] == "resource"
+        assert set(block["resource"]) == {"uri", "mimeType", "text"}
+
+    def test_document_resource_block_none_without_payload(self):
+        assert ACPClient._document_resource_block(
+            {"type": "document", "name": "x", "data": None, "text": None}
+        ) is None
+
+    def test_unnamed_document_still_gets_a_uri(self):
+        block = ACPClient._document_resource_block(
+            {"type": "document", "text": "x", "name": ""}
+        )
+
+        assert block["resource"]["uri"] == "attachment:///attachment"

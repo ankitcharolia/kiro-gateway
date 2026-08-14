@@ -17,13 +17,27 @@ So the gateway:
   Only base64 data URLs are forwarded; a **remote URL is not fetched** (kiro-cli
   has no URL content-block capability, and fetching untrusted URLs server-side
   is an SSRF/egress risk) — it is surfaced as text instead.
-* **Documents — extracted when text, else placeholder.** kiro-cli rejects
-  embedded resources (``embeddedContext: false``), so documents are never
-  forwarded as binary. Text-like documents (``text/*``, JSON, XML, CSV, …) are
-  **decoded and injected as text** so the model actually reads them. PDFs are
-  extracted with ``pypdf`` (a standard dependency); a scanned/image-only PDF
-  that yields no text, or any other binary format, falls back to an explicit
-  ``[document: … omitted]`` placeholder — never a silent drop.
+* **Documents — embedded on v3, text-reduced otherwise (issue #58).** The
+  representation follows the negotiated ``promptCapabilities.embeddedContext``,
+  never the engine string:
+
+  - **``embeddedContext: true``** (the v3 agent engine) — the document travels
+    intact as an ACP ``resource`` content block, so the agent parses the
+    original bytes (PDF included). Verified against a live kiro-cli 2.18.0 /
+    KAS 0.38.7 probe: the model echoed markers embedded in both a ``text``
+    resource and a base64 ``blob`` PDF.
+  - **``embeddedContext: false``** (v1/v2) — the document is reduced to text, as
+    before. Text-like documents (``text/*``, JSON, XML, CSV, …) are **decoded
+    and injected**; PDFs are extracted with ``pypdf`` (a standard dependency); a
+    scanned/image-only PDF that yields no text, or any other binary format, gets
+    an explicit ``[document: … omitted]`` placeholder — never a silent drop.
+    The same probe showed v1/v2 accept a ``resource`` block **without error but
+    silently ignore it**, which is why this is capability-gated rather than
+    try-and-fall-back.
+
+  Every document block therefore carries both the payload (``data``/``text``)
+  and the ready-made ``fallback`` string, and
+  :meth:`ACPClient._build_prompt_blocks` picks one.
 * **Audio — placeholder.** Not supported by kiro-cli; surfaced as a placeholder.
 
 Normalized internal blocks (carried in :class:`~kiro.acp_models.PromptMessage`
@@ -146,9 +160,25 @@ def _document_block(
     name: Optional[str] = None,
     raw_text: Optional[str] = None,
 ) -> dict:
-    """Render a document attachment as a text block (extracted or placeholder).
+    """Normalize a document attachment, carrying both payload and text fallback.
 
-    Resolution order:
+    The returned block always includes ``fallback`` — the exact text
+    representation used when the agent cannot ingest embedded documents — so the
+    consumer can pick a representation from the negotiated capability
+    (issue #58) without re-deriving anything:
+
+    * ``promptCapabilities.embeddedContext`` **true** (v3 agent engine) →
+      :meth:`ACPClient._split_content` emits an ACP ``resource`` content block so
+      the document travels intact. Verified against a live kiro-cli 2.18.0 / KAS
+      0.38.7 probe: both a ``text`` resource and a base64 ``blob`` PDF were read
+      by the model (it echoed markers embedded in each).
+    * **false** (v1/v2) → the ``fallback`` text is injected instead, exactly as
+      before this feature. The same live probe showed v2 accepts a ``resource``
+      block **without error but silently ignores it** (the model reported seeing
+      no attachment), which is why this is capability-gated rather than
+      try-and-fall-back.
+
+    Fallback resolution order:
 
     1. ``raw_text`` provided directly (e.g. Anthropic ``text`` document source)
        → injected verbatim.
@@ -157,39 +187,48 @@ def _document_block(
        fails to parse).
     4. Anything else → explicit ``[document: … omitted]`` placeholder.
 
-    kiro-cli cannot ingest embedded documents (``embeddedContext: false``), so
-    the content always travels as text; this surfaces it instead of silently
-    dropping it.
-
     Args:
         mime: The document media type, if known.
         data: Base64-encoded document bytes, if present.
-        name: A display name (filename / title) for the placeholder.
+        name: A display name (filename / title) for the label/URI.
         raw_text: Already-decoded document text, if the source provided it.
 
     Returns:
-        A normalized text block — extracted content (labelled) or a placeholder.
+        A normalized ``{"type": "document", …}`` block.
     """
     label = name or (mime or "attachment")
+    text: Optional[str] = None
+    fallback: Optional[str] = None
 
     if raw_text:
-        return _text_block(_labelled_document(label, raw_text))
-
-    if data:
+        text = raw_text
+        fallback = _labelled_document(label, raw_text)
+    elif data:
         raw = _decode_base64(data)
         if raw is not None:
             if _is_text_mime(mime):
                 try:
-                    text = raw.decode("utf-8")
-                    return _text_block(_labelled_document(label, text))
+                    decoded = raw.decode("utf-8")
+                    text = decoded
+                    fallback = _labelled_document(label, decoded)
                 except UnicodeDecodeError:
                     logger.debug(f"document {label!r} not valid UTF-8; placeholder")
             elif (mime or "").lower().startswith("application/pdf"):
                 extracted = _extract_pdf_text(raw)
                 if extracted:
-                    return _text_block(_labelled_document(label, extracted))
+                    fallback = _labelled_document(label, extracted)
 
-    return _text_block(f"[document: {label} omitted — unsupported by kiro-cli]")
+    if fallback is None:
+        fallback = f"[document: {label} omitted — unsupported by kiro-cli]"
+
+    return {
+        "type": "document",
+        "mimeType": mime or "application/octet-stream",
+        "data": data,
+        "text": text,
+        "name": label,
+        "fallback": fallback,
+    }
 
 
 def _labelled_document(label: str, text: str) -> str:
@@ -345,23 +384,26 @@ def anthropic_block_to_blocks(block: Any) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def collapse_blocks(blocks: list[dict]) -> Any:
-    """Collapse normalized blocks to a ``str`` (no images) or a block ``list``.
+    """Collapse normalized blocks to a ``str`` (text only) or a block ``list``.
 
-    When no image is present the blocks are joined into a single newline-
-    separated string (the common, text-only case — keeps existing behaviour and
-    the labelled-transcript serialisation simple). When at least one image block
-    is present, the list is returned so :meth:`ACPClient._build_prompt_blocks`
-    can emit the images as separate ACP content blocks.
+    When the content is text only, the blocks are joined into a single newline-
+    separated string (the common case — keeps existing behaviour and the
+    labelled-transcript serialisation simple). When at least one image **or
+    document** block is present, the list is returned so
+    :meth:`ACPClient._build_prompt_blocks` can decide how to represent it:
+    images always travel as ACP image blocks, and documents travel either as
+    ACP ``resource`` blocks or as their text fallback depending on the
+    negotiated ``embeddedContext`` capability (issue #58).
 
     Args:
-        blocks: Normalized text/image blocks.
+        blocks: Normalized text/image/document blocks.
 
     Returns:
         ``str`` for text-only content, else the ``list[dict]`` of blocks.
     """
     if not blocks:
         return ""
-    if any(b.get("type") == "image" for b in blocks):
+    if any(b.get("type") in ("image", "document") for b in blocks):
         return blocks
     texts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
     return "\n".join(t for t in texts if t)

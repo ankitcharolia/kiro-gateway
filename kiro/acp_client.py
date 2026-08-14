@@ -453,6 +453,9 @@ class ACPClient:
                 self._command, self._engine, settings.ACP_AUTH_BRIDGE
             )
         self._auth_resolver = auth_resolver
+        # Negotiated agentCapabilities.promptCapabilities from initialize. Empty
+        # until the handshake completes, so every capability defaults to off.
+        self._prompt_capabilities: dict = {}
         self._extra_args = list(extra_args or [])
         # Default MCP servers registered on every session/new (issue: MCP never
         # registered). kiro-cli executes these itself (mcpCapabilities.http) —
@@ -600,12 +603,34 @@ class ACPClient:
         if isinstance(result, dict):
             proto = str(result.get("protocolVersion", 1))
             agent = result.get("agentInfo", {})
+            # Retain promptCapabilities so the prompt builder can pick a wire
+            # representation per capability instead of assuming one: v3
+            # advertises embeddedContext=true and reads ACP `resource` blocks,
+            # while v1/v2 advertise false and silently ignore them (issue #58).
+            caps = result.get("agentCapabilities")
+            if isinstance(caps, dict):
+                prompt_caps = caps.get("promptCapabilities")
+                if isinstance(prompt_caps, dict):
+                    self._prompt_capabilities = prompt_caps
+                    logger.info(f"ACP promptCapabilities: {prompt_caps}")
             logger.info(
                 f"ACP initialized: agent={agent.get('name', 'unknown')} "
                 f"v{agent.get('version', '?')} protocol={proto}"
             )
         self._initialized = True
         return SessionInitResult(session_id="", protocol_version=proto)
+
+    @property
+    def supports_embedded_context(self) -> bool:
+        """Whether the agent accepts embedded document/context resource blocks.
+
+        Driven by the negotiated ``promptCapabilities.embeddedContext`` (issue
+        #58) — never by the engine string — so a future engine that gains or
+        loses the capability is handled without a code change. ``False`` until
+        ``initialize`` has reported otherwise, which keeps the text-reduction
+        path as the safe default.
+        """
+        return bool(self._prompt_capabilities.get("embeddedContext"))
 
     # ------------------------------------------------------------------
     # Sessions
@@ -1069,7 +1094,9 @@ class ACPClient:
         if not session_id:
             raise ACPError(-32602, "prompt_stream requires a session_id")
 
-        prompt_blocks = self._build_prompt_blocks(params.messages)
+        prompt_blocks = self._build_prompt_blocks(
+            params.messages, self.supports_embedded_context
+        )
         queue: Queue = Queue()
         self._event_queues[session_id] = queue
 
@@ -1359,7 +1386,7 @@ class ACPClient:
         return meta
 
     @staticmethod
-    def _build_prompt_blocks(messages: list) -> list[dict]:
+    def _build_prompt_blocks(messages: list, embed_documents: bool = False) -> list[dict]:
         """
         Render a conversation into ACP ``session/prompt`` content blocks.
 
@@ -1390,8 +1417,23 @@ class ACPClient:
         content — are emitted as their own ACP image content blocks **after** the
         text transcript, with an inline ``[image]`` marker left in the turn's
         text to mark where each appeared. The result is a mixed prompt array
-        ``[{text transcript}, {image}, …]`` (documents/audio are already reduced
-        to text by the shims; only images travel as binary blocks).
+        ``[{text transcript}, {image}, …]``.
+
+        **Documents (issue #58).** Representation follows the negotiated
+        ``promptCapabilities.embeddedContext``: when *embed_documents* is true
+        (the v3 agent engine) each document is emitted as an ACP ``resource``
+        block with an inline ``[document]`` marker, so the file travels intact;
+        otherwise it is reduced to its text fallback inline, as on v1/v2 — which
+        accept a resource block but silently ignore it.
+
+        Args:
+            messages: The conversation to serialise.
+            embed_documents: Whether the agent accepts embedded resource blocks
+                (``ACPClient.supports_embedded_context``). Defaults to ``False``,
+                the safe text-reduction behaviour.
+
+        Returns:
+            The ACP ``session/prompt`` content blocks.
         """
         label = {
             "user": "User",
@@ -1404,13 +1446,14 @@ class ACPClient:
         for m in messages:
             role = getattr(m, "role", None) if not isinstance(m, dict) else m.get("role")
             content = getattr(m, "content", None) if not isinstance(m, dict) else m.get("content")
-            text, images = ACPClient._split_content(content)
-            # Leave an inline marker per image so the (role-less) transcript
-            # still references where each attachment occurred, then carry the
-            # image as a real ACP block appended after the text.
-            for img in images:
-                text = (text + "\n[image]") if text else "[image]"
-                image_blocks.append(img)
+            text, attachments = ACPClient._split_content(content, embed_documents)
+            # Leave an inline marker per attachment so the (role-less) transcript
+            # still references where each occurred, then carry it as a real ACP
+            # block appended after the text.
+            for attachment in attachments:
+                marker = "[image]" if attachment.get("type") == "image" else "[document]"
+                text = (text + f"\n{marker}") if text else marker
+                image_blocks.append(attachment)
             parts.append((role or "user", text))
 
         blocks: list[dict] = []
@@ -1429,19 +1472,30 @@ class ACPClient:
         return blocks or [{"type": "text", "text": ""}]
 
     @staticmethod
-    def _split_content(content: Any) -> tuple[str, list[dict]]:
-        """Split message content into (flattened text, image content blocks).
+    def _split_content(content: Any, embed_documents: bool = False) -> tuple[str, list[dict]]:
+        """Split message content into (flattened text, attachment blocks).
 
-        Text and any non-image parts are flattened to a single string (as
-        :meth:`_flatten_content`), while ``image`` parts are extracted as ACP
-        image wire blocks (``{"type": "image", "mimeType", "data"}``) so the
-        prompt builder can forward them. Plain-string content yields no images.
+        Text parts are flattened to a single string, while ``image`` parts become
+        ACP image wire blocks (``{"type": "image", "mimeType", "data"}``).
+
+        ``document`` parts (issue #58) are represented per the negotiated
+        capability:
+
+        * ``embed_documents`` **True** (``promptCapabilities.embeddedContext``) →
+          an ACP embedded-resource block
+          ``{"type": "resource", "resource": {"uri", "mimeType", "text"|"blob"}}``
+          — the ``text`` variant when the document's text is known, else the
+          base64 ``blob`` so the agent parses the original bytes itself (a live
+          kiro-cli 2.18.0 probe read a PDF sent this way).
+        * **False** → the block's ``fallback`` text is appended to the flattened
+          text, exactly as before this feature (v1/v2 ignore resource blocks).
 
         Args:
             content: A message's content (``str`` or list of normalised blocks).
+            embed_documents: Whether the agent accepts embedded resources.
 
         Returns:
-            A ``(text, images)`` tuple.
+            A ``(text, blocks)`` tuple.
         """
         if content is None:
             return "", []
@@ -1458,12 +1512,50 @@ class ACPClient:
                             "mimeType": part.get("mimeType") or part.get("mime_type") or "image/png",
                             "data": part["data"],
                         })
+                    elif part.get("type") == "document":
+                        resource = ACPClient._document_resource_block(part) \
+                            if embed_documents else None
+                        if resource is not None:
+                            images.append(resource)
+                        else:
+                            chunks.append(str(part.get("fallback") or ""))
                     else:
                         chunks.append(str(part.get("text") or part.get("content") or ""))
                 else:
                     chunks.append(str(part))
             return "\n".join(c for c in chunks if c), images
         return str(content), []
+
+    @staticmethod
+    def _document_resource_block(part: dict) -> Optional[dict]:
+        """Build an ACP embedded-resource block for a normalised document part.
+
+        The wire shape is the ACP/MCP ``EmbeddedResource``: a ``resource`` object
+        carrying a required ``uri`` plus either ``text`` or ``blob`` (base64), all
+        verified accepted end-to-end against a live kiro-cli 2.18.0 / KAS 0.38.7
+        probe with both variants and with a synthetic ``attachment:///`` URI.
+
+        Args:
+            part: A normalised ``{"type": "document", …}`` block.
+
+        Returns:
+            The ACP content block, or ``None`` when the part carries neither text
+            nor data (so the caller falls back to text).
+        """
+        name = str(part.get("name") or "attachment").strip() or "attachment"
+        uri = f"attachment:///{name.lstrip('/')}"
+        resource: dict = {"uri": uri}
+        mime = part.get("mimeType") or part.get("mime_type")
+        if mime:
+            resource["mimeType"] = str(mime)
+        text = part.get("text")
+        if isinstance(text, str) and text:
+            resource["text"] = text
+        elif part.get("data"):
+            resource["blob"] = str(part["data"])
+        else:
+            return None
+        return {"type": "resource", "resource": resource}
 
     @staticmethod
     def _flatten_content(content: Any) -> str:

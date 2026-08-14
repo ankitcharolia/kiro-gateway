@@ -477,9 +477,10 @@ is still not honored by kiro-cli over ACP (issue #31).
 
 ## Multimodal input (`kiro/multimodal.py`, issue #33)
 
-Capability ground truth — **live kiro-cli 2.10.0 probe**
-(`initialize.agentCapabilities.promptCapabilities`): `{"image": true, "audio":
-false, "embeddedContext": false}`. So:
+Capability ground truth (`initialize.agentCapabilities.promptCapabilities`),
+**engine-dependent** — v1/v2 (live 2.10.0 probe): `{"image": true, "audio":
+false, "embeddedContext": false}`; v3 (live 2.18.0 probe): `{"image": true,
+"embeddedContext": true}`. So:
 
 - **Images forwarded.** `openai_part_to_blocks` / `anthropic_block_to_blocks`
   turn a base64 `image_url` / `input_image` / Anthropic `image` block into a
@@ -493,17 +494,33 @@ false, "embeddedContext": false}`. So:
   the live probe (a forwarded PNG changed the model's answer).
 - **Remote image URLs are NOT fetched** (no URL content-block capability;
   SSRF/egress risk) — surfaced as text.
-- **Documents reduced to text** (`embeddedContext: false` → binary rejected):
-  text-like mimes are decoded and injected; PDFs are extracted via `pypdf` (a
-  standard dependency — `_extract_pdf_text`, lazy import for graceful
-  degradation); a scanned/no-text PDF, other binary formats, and audio get an
-  explicit `[document: … omitted]` / `[audio omitted …]` placeholder — never a
-  silent drop.
+- **Documents: capability-gated (issue #58).** `ACPClient.supports_embedded_context`
+  (from the negotiated `promptCapabilities.embeddedContext`, **never** the engine
+  string) decides:
+  - **true (v3)** → the document is emitted as an ACP `resource` block
+    (`{"type":"resource","resource":{"uri","mimeType","text"|"blob"}}`, the
+    ACP/MCP `EmbeddedResource` shape) with an inline `[document]` marker, so the
+    agent parses the original bytes. Live 2.18.0 probe: the model read markers
+    from both a `text` resource and a base64 `blob` PDF, and a synthetic
+    `attachment:///` URI is accepted.
+  - **false (v1/v2)** → reduced to text as before: text-like mimes decoded and
+    injected; PDFs extracted via `pypdf` (`_extract_pdf_text`, lazy import for
+    graceful degradation); a scanned/no-text PDF, other binary formats, and audio
+    get an explicit `[document: … omitted]` / `[audio omitted …]` placeholder —
+    never a silent drop. The same probe showed v2 accepts a `resource` block
+    **without error but silently ignores it**, so this must stay capability-gated,
+    not try-and-fall-back.
+  Each normalised document block carries `data`/`text` **and** a ready-made
+  `fallback` string, so `_split_content(content, embed_documents)` just picks one.
+  Document-bearing content stays a **block list** on `PromptMessage.content`
+  (like images).
 
 When extending: keep both shims routed through `kiro.multimodal`, keep the image
-wire shape, and assert image forwarding + the document/audio placeholder path in
-tests (`tests/unit/test_multimodal.py`, plus the route + `_build_prompt_blocks`
-image tests). Don't fetch remote URLs server-side.
+wire shape, and assert both document branches + the audio placeholder path in
+tests (`tests/unit/test_multimodal.py`, plus `TestEmbeddedContextCapability` /
+`TestDocumentPromptRepresentation` and the route document tests). Don't fetch
+remote URLs server-side. If you touch the v1/v2 rendering, diff the prompt bytes
+against `main` — that path must stay byte-identical.
 
 ## Usage & token accounting (`kiro/tokenizer.py`)
 
