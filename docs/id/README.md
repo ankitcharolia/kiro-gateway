@@ -1,3 +1,5 @@
+> **Documentation note:** The [canonical English README](../../README.md) is the most current guide. This translation may lag behind current releases. See the [documentation index](../README.md).
+
 # Kiro Gateway — Dokumentasi
 
 Jembatan **yang sepenuhnya mematuhi ACP** yang memungkinkan alat AI kompatibel OpenAI atau Anthropic menggunakan langganan Kiro tunggal Anda — dengan merutekan setiap permintaan melalui biner resmi `kiro` CLI.

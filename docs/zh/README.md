@@ -1,3 +1,5 @@
+> **Documentation note:** The [canonical English README](../../README.md) is the most current guide. This translation may lag behind current releases. See the [documentation index](../README.md).
+
 # Kiro Gateway — 文档
 
 这是一个**完全符合ACP规范**的网关，允许任何兼容OpenAI或Anthropic的AI工具通过官方`kiro` CLI二进制文件路由请求，从而使用您的单一Kiro订阅。

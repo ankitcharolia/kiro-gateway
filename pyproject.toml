@@ -6,7 +6,30 @@ build-backend = "hatchling.build"
 name = "kiro-gateway"
 dynamic = ["version"]
 description = "OpenAI & Anthropic-compatible API gateway for Kiro (single-account, compliance-mode)"
+readme = "README.md"
 requires-python = ">=3.14"
+keywords = [
+    "kiro",
+    "kiro-cli",
+    "ai-gateway",
+    "llm-gateway",
+    "openai-api",
+    "anthropic-api",
+    "openai-compatible",
+    "anthropic-compatible",
+    "agent-client-protocol",
+    "mcp",
+    "fastapi",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 dependencies = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
@@ -18,6 +41,12 @@ dependencies = [
     # PDF document text extraction for image/document inputs (issue #33).
     "pypdf>=4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ankitcharolia/kiro-gateway#quick-start"
+Repository = "https://github.com/ankitcharolia/kiro-gateway"
+Issues = "https://github.com/ankitcharolia/kiro-gateway/issues"
+Changelog = "https://github.com/ankitcharolia/kiro-gateway/blob/main/CHANGELOG.md"
 
 [project.scripts]
 kiro-gateway = "kiro.cli:main"

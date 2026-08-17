@@ -1,0 +1,45 @@
+name: ✨ Feature request
+description: Suggest a focused improvement to Kiro Gateway
+title: "feat: "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping shape Kiro Gateway. Please search existing issues first
+        and describe the user problem before proposing an implementation.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Who is affected, and what are they unable to do today?
+      placeholder: "When using ... I need ... because ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: Describe the desired behaviour and, if useful, an example request or response.
+      placeholder: "The gateway should ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and compatibility notes
+      description: What workarounds did you try? Which API, harness, or ACP behaviour matters?
+      placeholder: "I currently work around this by ..."
+
+  - type: checkboxes
+    id: consistency
+    attributes:
+      label: Scope check
+      options:
+        - label: I checked the README and existing issues for a duplicate.
+          required: true
+        - label: I understand that changes should preserve the compliance-first ACP design.
+          required: true

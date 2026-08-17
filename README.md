@@ -1,20 +1,56 @@
-# ACP-Compliant Kiro Gateway
+# ACP-Compliant Kiro Gateway — use Kiro from the AI tools you already use
 
 [![CI](https://github.com/ankitcharolia/kiro-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/ankitcharolia/kiro-gateway/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/achar)
-[![PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://paypal.me/ankitcharolia)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![GitHub stars](https://img.shields.io/github/stars/ankitcharolia/kiro-gateway?style=flat&label=Stars)](https://github.com/ankitcharolia/kiro-gateway/stargazers)
 
+Use your Kiro subscription from **Claude Code, OpenCode, Cursor, Kilo Code**, and other OpenAI- or Anthropic-compatible clients. Kiro Gateway translates those HTTP APIs — plus native ACP — to the official `kiro-cli` binary over the Agent Client Protocol.
 
-An **ACP-based** bridge that lets any OpenAI-compatible or Anthropic-compatible AI harness use your **single** Kiro subscription — by routing every request through the official `kiro-cli` binary, never through reverse-engineered APIs.
+- **Official integration only:** no reverse-engineered Kiro endpoints, account pooling, or credential handling.
+- **One local gateway:** OpenAI, Anthropic, and native ACP clients can share `http://localhost:8000`.
+- **MCP-aware:** harness MCP servers can be discovered and forwarded to `kiro-cli`; the gateway never runs them itself.
 
+## Quick start
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and the
+[Kiro CLI](https://kiro.dev/), then run:
 
-> ### 💛 Support this project
->
-> If Kiro Gateway is useful to you, please consider supporting its continued development:
->
-> **[☕ Buy Me a Coffee](https://buymeacoffee.com/achar)** &nbsp;·&nbsp; **[💸 Donate via PayPal](https://paypal.me/ankitcharolia)**
+```bash
+git clone https://github.com/ankitcharolia/kiro-gateway.git
+cd kiro-gateway
+uv sync
+cp .env.example .env       # set KIRO_GATEWAY_API_KEY to your own secret
+kiro-cli login              # authenticate once with the official CLI
+uv run main.py              # listen on http://localhost:8000
+```
+
+In another terminal, verify the gateway before configuring a client:
+
+```bash
+curl -fsS http://localhost:8000/health
+```
+
+Expected response: `{"status":"ok", "mode":"acp-cli-bridge", "version":"…"}`.
+
+## At a glance
+
+| Works well | Deliberate boundaries |
+|---|---|
+| OpenAI Chat + Responses, Anthropic Messages, and native ACP | Embeddings return `501` because ACP exposes no embeddings model |
+| Streaming and non-streaming responses with native reasoning/thinking shapes | Stateful Responses (`previous_response_id`) is rejected; `store` is a no-op |
+| Images, PDF text extraction, and automatic harness MCP discovery | Client-declared function calling is not honored by `kiro-cli`; use MCP for external tools |
+
+**Works with:** Claude Code · OpenCode · Cursor · Kilo Code · Cline · Continue · Hermes-agent · OpenClaw · Oh My Pi
+
+> ⭐ If this project saves you time, [star it to follow releases and compatibility updates](https://github.com/ankitcharolia/kiro-gateway/stargazers).
+> 💛 If you want to support ongoing maintenance, [☕ Buy Me a Coffee](https://buymeacoffee.com/achar) or [💸 PayPal](https://paypal.me/ankitcharolia).
+
+**Read in another language:** [Español](docs/es/README.md) · [Português](docs/pt/README.md) · [中文](docs/zh/README.md) · [日本語](docs/ja/README.md) · [한국어](docs/ko/README.md) · [Русский](docs/ru/README.md) · [Bahasa Indonesia](docs/id/README.md) · [documentation index](docs/README.md)
+
+> [!NOTE]
+> The root README is the canonical, most current guide. Translated documents are
+> helpful snapshots and may lag behind new endpoints or configuration options.
 
 ---
 
@@ -104,7 +140,7 @@ For tools that only understand the Anthropic API (Claude Code, Kilo Code, OpenCl
 
 ---
 
-## Installation
+## Installation details
 
 ### Prerequisites
 
@@ -115,7 +151,7 @@ For tools that only understand the Anthropic API (Claude Code, Kilo Code, OpenCl
 
 ---
 
-### Option A — Clone and run (bare metal)
+### Clone and run (bare metal)
 
 ```bash
 # 1. Clone the repository

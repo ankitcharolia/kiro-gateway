@@ -1,3 +1,5 @@
+> **Documentation note:** The [canonical English README](../../README.md) is the most current guide. This translation may lag behind current releases. See the [documentation index](../README.md).
+
 # Kiro Gateway — Документация
 
 **Полностью совместимый с ACP** шлюз, позволяющий любому инструменту ИИ, совместимому с OpenAI или Anthropic, использовать единственную подписку Kiro, маршрутизируя каждый запрос через официальный бинарный файл `kiro` CLI.
