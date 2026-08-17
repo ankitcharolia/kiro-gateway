@@ -1,4 +1,4 @@
-# Kiro Gateway — use Kiro from the AI tools you already use
+# ACP-Compliant Kiro Gateway — use Kiro from the AI tools you already use
 
 [![CI](https://github.com/ankitcharolia/kiro-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/ankitcharolia/kiro-gateway/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
@@ -43,7 +43,8 @@ Expected response: `{"status":"ok", "mode":"acp-cli-bridge", "version":"…"}`.
 
 **Works with:** Claude Code · OpenCode · Cursor · Kilo Code · Cline · Continue · Hermes-agent · OpenClaw · Oh My Pi
 
-> ⭐ If this project saves you time, [star it to follow releases and compatibility updates](https://github.com/ankitcharolia/kiro-gateway).
+> ⭐ If this project saves you time, [star it to follow releases and compatibility updates](https://github.com/ankitcharolia/kiro-gateway/stargazers).
+> 💛 If you want to support ongoing maintenance, [☕ Buy Me a Coffee](https://buymeacoffee.com/achar) or [💸 PayPal](https://paypal.me/ankitcharolia).
 
 **Read in another language:** [Español](docs/es/README.md) · [Português](docs/pt/README.md) · [中文](docs/zh/README.md) · [日本語](docs/ja/README.md) · [한국어](docs/ko/README.md) · [Русский](docs/ru/README.md) · [Bahasa Indonesia](docs/id/README.md) · [documentation index](docs/README.md)
 
