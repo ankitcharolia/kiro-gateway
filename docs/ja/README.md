@@ -1,3 +1,5 @@
+> **Documentation note:** The [canonical English README](../../README.md) is the most current guide. This translation may lag behind current releases. See the [documentation index](../README.md).
+
 # Kiro Gateway — ドキュメント
 
 **完全ACP準拠**のブリッジです。OpenAI互換またはAnthropic互換のAIツールが、公式の`kiro` CLIバイナリを通じてリクエストをルーティングすることで、単一のKiroサブスクリプションを使用できます。

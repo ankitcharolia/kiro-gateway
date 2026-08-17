@@ -68,9 +68,9 @@ All contributors must sign the Contributor License Agreement (automated via bot)
 
 ## Questions?
 
-- **Bug reports:** [Open an issue](https://github.com/jwadow/kiro-gateway/issues)
-- **Feature ideas:** Discuss in an issue first
-- **Questions:** [Start a discussion](https://github.com/jwadow/kiro-gateway/discussions)
+- **Bug reports:** [Open an issue](https://github.com/ankitcharolia/kiro-gateway/issues/new/choose)
+- **Feature ideas:** [Start a feature request](https://github.com/ankitcharolia/kiro-gateway/issues/new?template=feature_request.yml)
+- **Questions:** [Start a discussion](https://github.com/ankitcharolia/kiro-gateway/discussions)
 
 ## Recognition
 

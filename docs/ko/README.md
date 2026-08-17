@@ -1,3 +1,5 @@
+> **Documentation note:** The [canonical English README](../../README.md) is the most current guide. This translation may lag behind current releases. See the [documentation index](../README.md).
+
 # Kiro Gateway — 문서
 
 **완전한 ACP 준수** 브리지로, OpenAI 또는 Anthropic 호환 AI 도구가 공식 `kiro` CLI 바이너리를 통해 요청을 라우팅하여 단일 Kiro 구독을 사용할 수 있게 해줍니다.

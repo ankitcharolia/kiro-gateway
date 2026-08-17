@@ -1,3 +1,5 @@
+> **Documentation note:** The [canonical English README](../../README.md) is the most current guide. This translation may lag behind current releases. See the [documentation index](../README.md).
+
 # Kiro Gateway — Documentación
 
 Un puente **completamente compatible con ACP** que permite a cualquier herramienta de IA compatible con OpenAI o Anthropic utilizar tu suscripción única de Kiro, enrutando cada solicitud a través del binario oficial `kiro` CLI.
