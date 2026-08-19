@@ -1,0 +1,151 @@
+<!doctype html>
+<!--
+  Source for assets/social-preview.png — the repository's GitHub social preview
+  card (Settings -> General -> Social preview), also used when the repository
+  link is shared on social platforms and chat apps.
+
+  Regenerate at exactly 1280x640 with headless Chromium, for example:
+
+      npx playwright screenshot \
+        --viewport-size=1280,640 \
+        assets/social-preview.html assets/social-preview.png
+
+  Keep the claims here consistent with the root README: official kiro-cli only,
+  OpenAI/Anthropic/ACP translation, and harness MCP discovery.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Kiro Gateway social preview</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 1280px;
+        height: 640px;
+        overflow: hidden;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 42px 64px 34px;
+        background: radial-gradient(circle at 12% 8%, #1d3a63 0%, #101728 46%, #0a0f1c 100%);
+        color: #f4f7fb;
+        font-family: "DejaVu Sans", "Liberation Sans", Arial, Helvetica, sans-serif;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 16px;
+        border: 1px solid rgba(125, 211, 252, 0.42);
+        border-radius: 999px;
+        background: rgba(56, 189, 248, 0.12);
+        color: #9fd8ff;
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        align-self: flex-start;
+      }
+
+      h1 {
+        margin-top: 24px;
+        font-size: 76px;
+        line-height: 1;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+
+      h1 span {
+        color: #7dd3fc;
+      }
+
+      p.lede {
+        margin-top: 16px;
+        max-width: 1060px;
+        font-size: 27px;
+        line-height: 1.22;
+        color: #c6d3e6;
+      }
+
+      p.lede strong {
+        color: #f4f7fb;
+        font-weight: 600;
+      }
+
+      ul {
+        display: flex;
+        gap: 14px;
+        list-style: none;
+        margin-top: 26px;
+      }
+
+      li {
+        flex: 1;
+        padding: 16px 18px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        border-left: 4px solid #38bdf8;
+        border-radius: 12px;
+        background: rgba(15, 23, 42, 0.62);
+        font-size: 19px;
+        line-height: 1.22;
+        color: #dbe6f5;
+      }
+
+      li b {
+        display: block;
+        margin-bottom: 5px;
+        color: #ffffff;
+        font-size: 20px;
+      }
+
+      footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: 22px;
+        padding-top: 16px;
+        border-top: 1px solid rgba(148, 163, 184, 0.24);
+        font-size: 18px;
+        color: #93a6c0;
+      }
+
+      footer .repo {
+        color: #f4f7fb;
+        font-weight: 600;
+      }
+
+      footer .tags {
+        letter-spacing: 0.04em;
+      }
+    </style>
+  </head>
+  <body>
+    <div>
+      <div class="eyebrow">ACP-compliant &middot; open source</div>
+      <h1>Kiro <span>Gateway</span></h1>
+      <p class="lede">
+        Use your Kiro subscription from <strong>Claude Code, OpenCode, Cursor, Kilo Code</strong>
+        and any OpenAI- or Anthropic-compatible client.
+      </p>
+      <ul>
+        <li><b>Official binary only</b>Every request goes through kiro-cli over ACP</li>
+        <li><b>Three APIs, one port</b>OpenAI, Anthropic, and native ACP endpoints</li>
+        <li><b>MCP-aware</b>Your harness&rsquo;s own MCP servers work automatically</li>
+      </ul>
+    </div>
+    <footer>
+      <span class="repo">github.com/ankitcharolia/kiro-gateway</span>
+      <span class="tags">Python &middot; FastAPI &middot; AGPL-3.0</span>
+    </footer>
+  </body>
+</html>
