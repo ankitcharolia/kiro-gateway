@@ -8,6 +8,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from kiro.acp_client import ACPClient
 
 
 # ---------------------------------------------------------------------------
@@ -610,9 +611,16 @@ class TestOpenAIShimMultimodal:
         resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
         assert resp.status_code == 200
         content = rec.complete_kwargs[0]["messages"][-1].content
-        # No image → collapses to a string carrying the placeholder.
-        assert isinstance(content, str)
-        assert "[document: r.pdf omitted" in content
+        # The document is carried as a block so the client can pick a wire
+        # representation from the negotiated capability (issue #58)...
+        doc = next(b for b in content if b.get("type") == "document")
+        assert "[document: r.pdf omitted" in doc["fallback"]
+        # ...and without embeddedContext (v1/v2) it still renders as that text.
+        blocks = ACPClient._build_prompt_blocks(
+            rec.complete_kwargs[0]["messages"], False
+        )
+        assert "[document: r.pdf omitted" in blocks[0]["text"]
+        assert all(b["type"] == "text" for b in blocks)
 
     def test_chat_text_document_is_extracted(self, sync_client, openai_headers):
         rec = _RecordingShim()
@@ -627,7 +635,21 @@ class TestOpenAIShimMultimodal:
         resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
         assert resp.status_code == 200
         content = rec.complete_kwargs[0]["messages"][-1].content
-        assert "hello world" in content
+        doc = next(b for b in content if b.get("type") == "document")
+        assert "hello world" in doc["fallback"]
+        # v1/v2 rendering (no embeddedContext) injects the extracted text.
+        blocks = ACPClient._build_prompt_blocks(
+            rec.complete_kwargs[0]["messages"], False
+        )
+        assert "hello world" in blocks[0]["text"]
+        # v3 rendering (embeddedContext) sends it as an ACP resource block.
+        blocks = ACPClient._build_prompt_blocks(
+            rec.complete_kwargs[0]["messages"], True
+        )
+        resource = next(b for b in blocks if b["type"] == "resource")["resource"]
+        assert resource["text"] == "hello world"
+        assert resource["mimeType"] == "text/plain"
+        assert resource["uri"].endswith("n.txt")
 
     def test_responses_input_image_forwarded(self, sync_client, openai_headers):
         rec = _RecordingShim()
@@ -804,6 +826,51 @@ class TestOpenAIShimErrorMapping:
         assert resp.status_code == 200  # SSE body already started
         assert '"type": "rate_limit_error"' in resp.text
         assert "data: [DONE]" in resp.text
+
+    # -- v3 auth bridge failures (issue #52) -------------------------------
+    # kiro-cli itself not being authenticated must surface as a native 401
+    # authentication_error, not a generic 502, in BOTH modes.
+
+    def test_chat_non_stream_auth_failure_returns_401(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_complete(
+            ACPError(-32000, "Auth refresh callback failed: not supported")
+        )
+        resp = sync_client.post("/v1/chat/completions", json=self._CHAT, headers=openai_headers)
+        assert resp.status_code == 401
+        assert resp.json()["error"]["type"] == "authentication_error"
+
+    def test_chat_stream_auth_failure_error_type(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_stream(
+            {"type": "error", "message": "Auth refresh callback failed", "code": -32000}
+        )
+        payload = {**self._CHAT, "stream": True}
+        resp = sync_client.post("/v1/chat/completions", json=payload, headers=openai_headers)
+        assert resp.status_code == 200  # SSE body already started
+        assert '"type": "authentication_error"' in resp.text
+        assert "data: [DONE]" in resp.text
+
+    def test_responses_non_stream_auth_failure_returns_401(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_complete(
+            ACPError(-32000, "kiro-cli authentication failed; run `kiro-cli login`")
+        )
+        resp = sync_client.post(
+            "/v1/responses", json={"model": "claude-sonnet-4.6", "input": "hi"},
+            headers=openai_headers,
+        )
+        assert resp.status_code == 401
+        assert resp.json()["error"]["type"] == "authentication_error"
+
+    def test_responses_stream_auth_failure_error_type(self, sync_client, openai_headers):
+        sync_client.app.state.shim_service = _error_shim_stream(
+            {"type": "error", "message": "Auth refresh callback failed", "code": -32000}
+        )
+        resp = sync_client.post(
+            "/v1/responses",
+            json={"model": "claude-sonnet-4.6", "input": "hi", "stream": True},
+            headers=openai_headers,
+        )
+        assert resp.status_code == 200
+        assert "authentication_error" in resp.text
 
     def test_responses_non_stream_rate_limit_returns_429(self, sync_client, openai_headers):
         sync_client.app.state.shim_service = _error_shim_complete(

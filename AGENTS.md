@@ -107,6 +107,7 @@ kiro-gateway/
 │   ├── routes_anthropic_shim.py# /v1/messages, /v1/models
 │   ├── routes_acp.py           # /acp/chat, /acp/chat/stream
 │   ├── harness_mcp.py          # Discover the harness's own MCP servers (issue #75)
+│   ├── kiro_auth.py            # v3 auth callback: relay a kiro-cli access token (issue #52)
 │   ├── config.py               # Env-driven settings (settings object + module constants)
 │   ├── compliance.py           # Single-account enforcement at startup
 │   └── capability_executor.py  # Stub capability dispatch (retained; not in the live path)
@@ -155,6 +156,54 @@ matter — a malformed `initialize` makes the agent exit immediately.
 client-side `fs`/`terminal` capabilities, so it only answers permission
 requests (auto-approve `allow_once` when `ACP_TRUST_TOOLS=true`, else
 `reject_once`) — refined by an optional rule policy, below.
+
+### The v3 agent engine (issue #52)
+
+`KIRO_ACP_ENGINE=v3` is supported but is a **different protocol surface**.
+Everything below was verified against a live kiro-cli 2.18.0 / KAS 0.38.7 probe;
+v1/v2 behaviour is unchanged and every v3 branch is gated on `self._engine`.
+
+- **`kiro-cli acp --agent-engine v3` does not run the agent.** It spawns the Kiro
+  Agent Server with a hardcoded `--auth=acp-callback`, so the server asks the
+  *client* for an access token via `_kiro/auth/getAccessToken` (connection-level:
+  **no `sessionId`**). Declining it still allows `initialize` and `session/new`,
+  but every `session/prompt` fails `-32000 Auth refresh callback failed`.
+  `kiro/kiro_auth.py` answers it by shelling out to `kiro-cli chat _
+  get-kas-token`; only the covenant keys are forwarded, nothing is cached, and
+  failure messages are **fixed strings** (subprocess output could be a live
+  token). Same mechanism as first-party `kirodotdev/KiroCrew`.
+- **A JSON-RPC response must carry exactly one of `result`/`error`.** The old
+  `_respond_error` emitted `result: null` alongside `error`; v3 reads `result`
+  first and dies with `-32603 Internal error` / `Cannot read properties of null`.
+  `_respond` / `_respond_error` now exclude the unused member — don't reintroduce it.
+- **There is no `session/set_model`.** The model is a *session config option*:
+  `session/set_config_option {sessionId, configId: "model", value}`. `set_model`
+  branches on the engine.
+- **`session/new` returns no `models` block.** The catalogue arrives as
+  `configOptions` (`{"id": "model", "currentValue", "options": [{"value", "name"}]}`),
+  parsed by `_capture_config_option_catalogue`; `_normalise_catalogue` accepts
+  `modelId` (v2) / `value` (v3) / `id` (modes). A `config_option_update`
+  notification pushes a **replacement** array mid-session.
+- **Never send an unserved model/mode** (`_is_served`). The old assumption that
+  kiro-cli ignores an unknown id is wrong: an id the account isn't served (e.g.
+  the widely hardcoded `claude-sonnet-4.6`) hangs the turn ~4 min and then fails
+  — `504` on v2, a misleading "Access denied" on v3. The guard applies to **both**
+  engines (it fixed a pre-existing v2 bug); `MODEL_VALIDATION=off` forces the id.
+- **Mode ids differ:** v3 uses `vibe`/`spec`/`plan`/`autonomous`/…, v2 uses
+  `kiro_default`/`code`/`kiro_planner`/`kiro_guide`. `KIRO_ACP_MODE` is
+  engine-specific.
+- **Tool output shape differs:** v3 `rawOutput` is `{"output": "…"}`, v2 is
+  `{"items": [{"Text": …}]}`. Both handled in `_extract_tool_output`.
+- **Permission option ids differ** (`accept`/`always-accept`/`reject`/
+  `always-reject`) but the `kind` values are standard, and `select_option_id`
+  matches on `kind` first — so no change was needed.
+- **Decline everything else.** v3 offers `_kiro/fs/read|write|delete`, hooks,
+  checkpoints, `_kiro/openExternalUrl`, session list/fork/history. The gateway
+  answers **only** the auth callback and `session/request_permission`; keep it
+  that way, and don't advertise capabilities (e.g. `elicitation`) we don't serve.
+- **v3 auto-loads kiro-cli's own MCP servers** regardless of `mcpServers: []`,
+  and kiro-cli sets `KIRO_CONTENT_COLLECTION_ENABLED=true` / telemetry env on the
+  agent server. Both are kiro-cli's posture, not the gateway's.
 
 ### Tool permission policy (`kiro/tool_permissions.py`)
 
@@ -381,6 +430,7 @@ modes — never a bare `502 {"detail": ...}`.
 | rate limit / throttle / quota / `429` | `429` | `rate_limit_error` | `rate_limit_error` |
 | overloaded / unavailable / capacity | `503` | `server_error` | `overloaded_error` |
 | timeout / deadline | `504` | `server_error` | `api_error` |
+| kiro-cli not authenticated (v3 bridge) | `401` | `authentication_error` | `authentication_error` |
 | default | `502` | `server_error` | `api_error` |
 
 - `classify_exception(exc)` for non-streaming (reads `ACPError.code/.data`);
@@ -427,9 +477,10 @@ is still not honored by kiro-cli over ACP (issue #31).
 
 ## Multimodal input (`kiro/multimodal.py`, issue #33)
 
-Capability ground truth — **live kiro-cli 2.10.0 probe**
-(`initialize.agentCapabilities.promptCapabilities`): `{"image": true, "audio":
-false, "embeddedContext": false}`. So:
+Capability ground truth (`initialize.agentCapabilities.promptCapabilities`),
+**engine-dependent** — v1/v2 (live 2.10.0 probe): `{"image": true, "audio":
+false, "embeddedContext": false}`; v3 (live 2.18.0 probe): `{"image": true,
+"embeddedContext": true}`. So:
 
 - **Images forwarded.** `openai_part_to_blocks` / `anthropic_block_to_blocks`
   turn a base64 `image_url` / `input_image` / Anthropic `image` block into a
@@ -443,17 +494,33 @@ false, "embeddedContext": false}`. So:
   the live probe (a forwarded PNG changed the model's answer).
 - **Remote image URLs are NOT fetched** (no URL content-block capability;
   SSRF/egress risk) — surfaced as text.
-- **Documents reduced to text** (`embeddedContext: false` → binary rejected):
-  text-like mimes are decoded and injected; PDFs are extracted via `pypdf` (a
-  standard dependency — `_extract_pdf_text`, lazy import for graceful
-  degradation); a scanned/no-text PDF, other binary formats, and audio get an
-  explicit `[document: … omitted]` / `[audio omitted …]` placeholder — never a
-  silent drop.
+- **Documents: capability-gated (issue #58).** `ACPClient.supports_embedded_context`
+  (from the negotiated `promptCapabilities.embeddedContext`, **never** the engine
+  string) decides:
+  - **true (v3)** → the document is emitted as an ACP `resource` block
+    (`{"type":"resource","resource":{"uri","mimeType","text"|"blob"}}`, the
+    ACP/MCP `EmbeddedResource` shape) with an inline `[document]` marker, so the
+    agent parses the original bytes. Live 2.18.0 probe: the model read markers
+    from both a `text` resource and a base64 `blob` PDF, and a synthetic
+    `attachment:///` URI is accepted.
+  - **false (v1/v2)** → reduced to text as before: text-like mimes decoded and
+    injected; PDFs extracted via `pypdf` (`_extract_pdf_text`, lazy import for
+    graceful degradation); a scanned/no-text PDF, other binary formats, and audio
+    get an explicit `[document: … omitted]` / `[audio omitted …]` placeholder —
+    never a silent drop. The same probe showed v2 accepts a `resource` block
+    **without error but silently ignores it**, so this must stay capability-gated,
+    not try-and-fall-back.
+  Each normalised document block carries `data`/`text` **and** a ready-made
+  `fallback` string, so `_split_content(content, embed_documents)` just picks one.
+  Document-bearing content stays a **block list** on `PromptMessage.content`
+  (like images).
 
 When extending: keep both shims routed through `kiro.multimodal`, keep the image
-wire shape, and assert image forwarding + the document/audio placeholder path in
-tests (`tests/unit/test_multimodal.py`, plus the route + `_build_prompt_blocks`
-image tests). Don't fetch remote URLs server-side.
+wire shape, and assert both document branches + the audio placeholder path in
+tests (`tests/unit/test_multimodal.py`, plus `TestEmbeddedContextCapability` /
+`TestDocumentPromptRepresentation` and the route document tests). Don't fetch
+remote URLs server-side. If you touch the v1/v2 rendering, diff the prompt bytes
+against `main` — that path must stay byte-identical.
 
 ## Usage & token accounting (`kiro/tokenizer.py`)
 
@@ -609,7 +676,8 @@ take precedence over `.env`).
 | `MCP_DISCOVERY` | `all` | Scope for discovering the **harness's own** MCP servers (`kiro.harness_mcp`) and forwarding them on `session/new` — on by default, no config needed. `all` = user + workspace configs; `user` = user-level only (hardening for untrusted repos); `off` = disable. Not in `.env.example` by design. |
 | `ACP_WORKSPACE_DIR` | process cwd | **Fallback** session `cwd`. The cwd is resolved per request (`X-Kiro-Workspace` header → `filesystem_roots` → the prompt `<env>` `Working directory:` line, parsed by `kiro.workspace`) so kiro-cli anchors in the harness's directory by default; this is used only when none is present. cwd is an anchor, not a jail (verified live) — tools still reach absolute paths elsewhere. |
 | `KIRO_ACP_MODE` | `` (kiro-cli default) | Agent persona selected per session via `session/set_mode` (`kiro_default`, `code`, `kiro_planner`, `kiro_guide`). Unknown value accepted silently (keeps default). Distinct from `KIRO_ACP_MODEL`. |
-| `KIRO_ACP_ENGINE` | `v2` | `--agent-engine` (`v1`/`v2`/`v3`), pinned explicitly so a future default-engine flip can't change behaviour. `v3` needs host-mediated auth the gateway lacks (issue #52) — generation fails; keep `v2`. Invalid value falls back to `v2`. |
+| `KIRO_ACP_ENGINE` | `v2` | `--agent-engine` (`v1`/`v2`/`v3`), pinned explicitly so a future default-engine flip can't change behaviour. `v3` is supported (issue #52) via the auth bridge below. Invalid value falls back to `v2`. |
+| `ACP_AUTH_BRIDGE` | `true` | **v3 only.** Answer the agent server's `_kiro/auth/getAccessToken` by relaying a short-lived token from `kiro-cli chat _ get-kas-token` (`kiro/kiro_auth.py`). Inert on v1/v2 (callback never sent). `false` = decline it, so v3 fails closed with `401`. See COMPLIANCE.md. |
 | `KIRO_ACP_AGENT` | `` (none) | `--agent`: (custom) agent config for the first session (spawn flag). |
 | `KIRO_ACP_MODEL` | `` (none) | `--model`: initial session model at spawn. Distinct from `KIRO_ACP_MODE`; a per-request model still overrides it. |
 | `KIRO_ACP_EFFORT` | `` (none) | `--effort`: initial thinking effort (`low`/`medium`/`high`/`xhigh`/`max`). |

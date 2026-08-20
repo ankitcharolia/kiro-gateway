@@ -28,6 +28,7 @@ secondary signal.
 | rate limit / throttle / quota / 429  | 429         | rate_limit_error| rate_limit_error   |
 | overloaded / unavailable / capacity  | 503         | server_error    | overloaded_error   |
 | timeout / deadline                   | 504         | server_error    | api_error          |
+| kiro-cli not authenticated           | 401         | authentication_error | authentication_error |
 | (default)                            | 502         | server_error    | api_error          |
 """
 from __future__ import annotations
@@ -55,6 +56,19 @@ _OVERLOADED_RE = re.compile(
 
 _TIMEOUT_RE = re.compile(
     r"(timed?\s*out|time[\s_-]?out|deadline\s+exceeded|\b504\b|\b408\b)",
+    re.IGNORECASE,
+)
+
+# kiro-cli's own credentials are unusable (expired / never logged in). Distinct
+# from the gateway's client auth: the remedy is `kiro-cli login` on the gateway
+# host. Matches the v3 auth-bridge failures (issue #52) — the agent server
+# reports a declined/failed `_kiro/auth/getAccessToken` as "Auth refresh callback
+# failed" / TokenExpiredError / TokenInvalidError (verified against a live
+# kiro-cli 2.18.0 probe) — as well as kiro-cli's own not-logged-in phrasings.
+_AUTH_RE = re.compile(
+    r"(auth\s+refresh\s+callback\s+failed|token\s*(?:expired|invalid)error|"
+    r"authentication\s+failed|not\s+logged\s+in|kiro-cli\s+login|"
+    r"authentication\s+bridge\s+is\s+disabled|expired\s+token|\b401\b)",
     re.IGNORECASE,
 )
 
@@ -173,6 +187,22 @@ def classify_error(
             openai_type="server_error",
             anthropic_type="api_error",
             retry_after=retry_after,
+        )
+
+    if _AUTH_RE.search(text):
+        # kiro-cli itself is not authenticated. 401 (rather than the generic 502)
+        # so harnesses surface a credential problem instead of retry-looping a
+        # gateway error. The message names the remedy; it never carries token
+        # material (see kiro.kiro_auth).
+        return MappedError(
+            status_code=401,
+            message=(
+                message
+                or "kiro-cli is not authenticated; run `kiro-cli login` on the "
+                   "gateway host"
+            ),
+            openai_type="authentication_error",
+            anthropic_type="authentication_error",
         )
 
     return MappedError(

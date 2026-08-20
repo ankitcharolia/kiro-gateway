@@ -80,11 +80,21 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"ACP engine: {settings.ACP_ENGINE}")
     if settings.ACP_ENGINE == "v3":
-        logger.warning(
-            "KIRO_ACP_ENGINE=v3 selected: the v3 engine requires host-mediated "
-            "auth (_kiro/auth/getAccessToken) that the gateway does not "
-            "implement, so generation will fail. See issue #52. Use v2."
-        )
+        if settings.ACP_AUTH_BRIDGE:
+            logger.info(
+                "KIRO_ACP_ENGINE=v3: the agent server is launched with "
+                "--auth=acp-callback, so the gateway relays a short-lived access "
+                "token obtained from kiro-cli itself (_kiro/auth/getAccessToken). "
+                "The refresh token is never read and no token is stored. "
+                "See COMPLIANCE.md and issue #52."
+            )
+        else:
+            logger.warning(
+                "KIRO_ACP_ENGINE=v3 with ACP_AUTH_BRIDGE=false: the agent's auth "
+                "callback will be declined, so generation will fail with an "
+                "authentication error. Set ACP_AUTH_BRIDGE=true or use "
+                "KIRO_ACP_ENGINE=v2."
+            )
     if settings.ACP_AGENT:
         logger.info(f"ACP spawn agent: {settings.ACP_AGENT}")
     if settings.ACP_MODEL:
