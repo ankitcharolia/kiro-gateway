@@ -125,3 +125,51 @@ def test_acp_stream_plan_suppressed_when_off(sync_client, monkeypatch):
     body = _collect_sse(sync_client, {"messages": [{"role": "user", "content": "go"}]})
     assert "event: acp_plan" not in body
     assert "event: acp_text" in body
+
+
+# ---------------------------------------------------------------------------
+# SSE keepalive: kiro-cli emits no notification while one of its built-in tools
+# runs, so the native stream must prove the connection is alive too. An SSE
+# comment is used rather than a new acp_* event type existing clients would not
+# recognise.
+# ---------------------------------------------------------------------------
+
+import asyncio
+
+
+class _SilentThenAnswerShim:
+    """ShimService stand-in that stalls before emitting anything."""
+
+    def __init__(self, stall_seconds: float):
+        self.stall_seconds = stall_seconds
+
+    def available_models(self):
+        return []
+
+    async def stream_tokens(self, **kwargs):
+        await asyncio.sleep(self.stall_seconds)
+        yield {"type": "text", "content": "done"}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+def test_acp_stream_emits_keepalive_while_silent(sync_client, monkeypatch):
+    monkeypatch.setattr("kiro.routes_acp.settings.SSE_KEEPALIVE_INTERVAL", 0.05)
+    sync_client.app.state.shim_service = _SilentThenAnswerShim(0.45)
+
+    body = _collect_sse(sync_client, {"messages": [{"role": "user", "content": "go"}]})
+
+    assert body.count(": keepalive") >= 3
+    # The comment frame must not become an acp_* event or disturb the real turn.
+    assert "event: acp_keepalive" not in body
+    assert "event: acp_text" in body
+    assert "event: acp_done" in body
+
+
+def test_acp_stream_keepalive_disabled_by_zero_interval(sync_client, monkeypatch):
+    monkeypatch.setattr("kiro.routes_acp.settings.SSE_KEEPALIVE_INTERVAL", 0)
+    sync_client.app.state.shim_service = _SilentThenAnswerShim(0.2)
+
+    body = _collect_sse(sync_client, {"messages": [{"role": "user", "content": "go"}]})
+
+    assert ": keepalive" not in body
+    assert "event: acp_done" in body

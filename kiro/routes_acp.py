@@ -29,6 +29,7 @@ from kiro.acp_models import (
     ToolResult,
 )
 from kiro.shim_service import ShimService
+from kiro.streaming_core import KEEPALIVE, iter_with_keepalive
 from kiro.config import settings
 from kiro.harness_mcp import resolve_session_mcp_servers
 
@@ -126,16 +127,27 @@ async def acp_chat_stream(
             body.filesystem_roots or [],
         )
         try:
-            async for event in shim.stream_tokens(
-                messages=body.messages,
-                model=body.model,
-                max_tokens=body.max_tokens,
-                temperature=body.temperature,
-                tools=body.tools or [],
-                filesystem_roots=body.filesystem_roots or [],
-                terminal=body.terminal,
-                mcp_servers=mcp,
+            async for event in iter_with_keepalive(
+                shim.stream_tokens(
+                    messages=body.messages,
+                    model=body.model,
+                    max_tokens=body.max_tokens,
+                    temperature=body.temperature,
+                    tools=body.tools or [],
+                    filesystem_roots=body.filesystem_roots or [],
+                    terminal=body.terminal,
+                    mcp_servers=mcp,
+                ),
+                settings.SSE_KEEPALIVE_INTERVAL,
             ):
+                if event is KEEPALIVE:
+                    # kiro-cli is busy (typically running one of its built-in
+                    # tools). An SSE comment keeps the connection provably alive
+                    # without adding a new event type to the acp_* taxonomy that
+                    # existing clients would not recognise.
+                    yield ": keepalive\n\n"
+                    continue
+
                 etype = event.get("type", "text")
                 if etype == "plan" and not settings.ACP_SURFACE_THINKING:
                     continue

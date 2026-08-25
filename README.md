@@ -245,6 +245,11 @@ ACP_WORKSPACE_DIR=               # Fallback session cwd. By default the harness
 ACP_TIMEOUT=120                  # Seconds to await a JSON-RPC response
 ACP_STDIO_MAX_BYTES=16777216     # Max bytes per ACP stdout line (16 MiB) — raise
                                  # for very large tool outputs in long agent turns
+SSE_KEEPALIVE_INTERVAL=15        # Seconds between SSE keepalives while a streaming
+                                 # turn waits on kiro-cli. Prevents client idle
+                                 # watchdogs from aborting a long tool call
+                                 # (Claude Code: "API Error: The operation timed
+                                 # out." after 300s of silence). 0 disables.
 
 # ── ACP session mode & spawn args ─────────────────────────────────────
 # Agent persona selected per session via session/set_mode (kiro_default,
@@ -361,6 +366,15 @@ http://localhost:8000/acp/chat/stream  # SSE streaming
 | `plan` (task list) | folded into `reasoning_content` (Responses reasoning item) | folded into a `thinking` block |
 | `done` | `[DONE]` + `finish_reason` | `message_delta` + `message_stop` |
 | `error` | error chunk + `[DONE]` | `error` event |
+| _(upstream silence — no event)_ | `: keepalive` SSE comment | `ping` event |
+
+> The last row is the `SSE_KEEPALIVE_INTERVAL` heartbeat: kiro-cli sends nothing
+> while one of its built-in tools runs (measured: 40s of silence for a 40s
+> command), so every streaming route emits its protocol's no-op frame meanwhile
+> to stop client idle watchdogs from aborting the turn (Claude Code gives up
+> after 300s with "API Error: The operation timed out."). `/v1/responses` and
+> `/acp/chat/stream` use the same SSE comment frame. Keepalives never alter the
+> assembled response; set `SSE_KEEPALIVE_INTERVAL=0` to disable them.
 
 ---
 

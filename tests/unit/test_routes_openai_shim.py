@@ -4,6 +4,7 @@ All ACP calls are mocked — no kiro CLI needed.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2062,3 +2063,137 @@ class TestOpenAIWorkspaceCwd:
         assert resp.status_code == 200
         assert rec.complete_kwargs[0]["filesystem_roots"] == []
 
+
+# ---------------------------------------------------------------------------
+# SSE keepalive: kiro-cli emits nothing while one of its built-in tools runs (a
+# live probe measured 40.02s of silence for a 40s sleep), and clients abort a
+# stream that stays silent too long. Both streaming surfaces must keep the
+# connection provably alive with SSE comment frames.
+# ---------------------------------------------------------------------------
+
+class _SilentThenAnswerShim:
+    """ShimService stand-in that stalls before emitting anything."""
+
+    def __init__(self, stall_seconds: float):
+        self.stall_seconds = stall_seconds
+
+    def available_models(self):
+        return []
+
+    async def stream_tokens(self, **kwargs):
+        # Models kiro-cli sitting in a long built-in tool call: no ACP
+        # notification arrives, so the route has nothing real to forward.
+        await asyncio.sleep(self.stall_seconds)
+        yield {"type": "text", "content": "done"}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class TestOpenAIChatKeepalive:
+    """/v1/chat/completions stays alive while the upstream turn is silent."""
+
+    _PAYLOAD = {
+        "model": "claude-sonnet-4.6",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+
+    def test_comment_frames_emitted_while_upstream_is_silent(
+        self, sync_client, openai_headers, monkeypatch
+    ):
+        # Target the route module's own reference: another test may reload
+        # kiro.config, so kiro.config.settings is not necessarily the object the
+        # already-imported route closed over.
+        monkeypatch.setattr(
+            "kiro.routes_openai_shim.settings.SSE_KEEPALIVE_INTERVAL", 0.05
+        )
+        sync_client.app.state.shim_service = _SilentThenAnswerShim(0.45)
+
+        resp = sync_client.post(
+            "/v1/chat/completions", json=self._PAYLOAD, headers=openai_headers
+        )
+
+        assert resp.status_code == 200
+        assert resp.text.count(": keepalive") >= 3
+        # Keepalives are SSE comments, so they must not appear as data chunks
+        # and must not disturb the real completion.
+        assert "data: : keepalive" not in resp.text
+        assert "data: [DONE]" in resp.text
+        assert "done" in resp.text
+
+    def test_keepalive_disabled_by_zero_interval(
+        self, sync_client, openai_headers, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "kiro.routes_openai_shim.settings.SSE_KEEPALIVE_INTERVAL", 0
+        )
+        sync_client.app.state.shim_service = _SilentThenAnswerShim(0.2)
+
+        resp = sync_client.post(
+            "/v1/chat/completions", json=self._PAYLOAD, headers=openai_headers
+        )
+
+        assert resp.status_code == 200
+        assert ": keepalive" not in resp.text
+        assert "data: [DONE]" in resp.text
+
+    def test_fast_stream_emits_no_keepalive(
+        self, sync_client, openai_headers, monkeypatch
+    ):
+        """A turn that never idles must be byte-identical to the old behaviour."""
+        monkeypatch.setattr(
+            "kiro.routes_openai_shim.settings.SSE_KEEPALIVE_INTERVAL", 5
+        )
+        sync_client.app.state.shim_service = _SilentThenAnswerShim(0)
+
+        resp = sync_client.post(
+            "/v1/chat/completions", json=self._PAYLOAD, headers=openai_headers
+        )
+
+        assert resp.status_code == 200
+        assert ": keepalive" not in resp.text
+        assert "data: [DONE]" in resp.text
+
+
+class TestOpenAIResponsesKeepalive:
+    """/v1/responses stays alive while the upstream turn is silent."""
+
+    _PAYLOAD = {
+        "model": "claude-sonnet-4.6",
+        "stream": True,
+        "input": "hi",
+    }
+
+    def test_comment_frames_emitted_while_upstream_is_silent(
+        self, sync_client, openai_headers, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "kiro.routes_openai_shim.settings.SSE_KEEPALIVE_INTERVAL", 0.05
+        )
+        sync_client.app.state.shim_service = _SilentThenAnswerShim(0.45)
+
+        resp = sync_client.post(
+            "/v1/responses", json=self._PAYLOAD, headers=openai_headers
+        )
+
+        assert resp.status_code == 200
+        assert resp.text.count(": keepalive") >= 3
+        # No invented `response.*` event type, and the real terminal event still
+        # arrives.
+        assert "event: response.keepalive" not in resp.text
+        assert "response.completed" in resp.text
+
+    def test_keepalive_disabled_by_zero_interval(
+        self, sync_client, openai_headers, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "kiro.routes_openai_shim.settings.SSE_KEEPALIVE_INTERVAL", 0
+        )
+        sync_client.app.state.shim_service = _SilentThenAnswerShim(0.2)
+
+        resp = sync_client.post(
+            "/v1/responses", json=self._PAYLOAD, headers=openai_headers
+        )
+
+        assert resp.status_code == 200
+        assert ": keepalive" not in resp.text
+        assert "response.completed" in resp.text

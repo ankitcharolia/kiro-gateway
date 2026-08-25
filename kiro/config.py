@@ -121,6 +121,21 @@ KIRO_CLI_PATH: str = (
 )
 ACP_TIMEOUT: int = int(os.environ.get("ACP_TIMEOUT", "120"))
 
+# How often (seconds) the streaming routes emit an SSE keepalive while waiting
+# for the next event from kiro-cli. A turn produces no wire traffic for as long
+# as one of kiro-cli's built-in tools is running (a slow command, a large file
+# write) — a live probe measured 40.02s of silence for a 40s ``sleep``, scaling
+# 1:1 with the tool's runtime. Harnesses abort a stream that stays silent too
+# long: Claude Code's stream watchdog gives up after 300s and reports "API
+# Error: The operation timed out." Emitting a periodic no-op frame (an Anthropic
+# ``ping`` event / an SSE comment) keeps the connection provably alive without
+# perturbing the assembled response, which is what the native Anthropic API
+# does. Must stay well under the harness's idle budget. Set 0 to disable
+# keepalives (the previous, silent behaviour). Fractional values are allowed.
+SSE_KEEPALIVE_INTERVAL: float = float(
+    os.environ.get("SSE_KEEPALIVE_INTERVAL", "15")
+)
+
 # Maximum size (in bytes) of a single JSON-RPC line read from kiro-cli's
 # stdout. ACP messages carry tool outputs and assistant text, which can be
 # large during long agent turns (big file reads, diffs, long completions).
@@ -480,6 +495,9 @@ class _Settings:
     # Alias: some callers/tests refer to the CLI binary as KIRO_CLI_COMMAND.
     KIRO_CLI_COMMAND: str = field(default_factory=lambda: KIRO_CLI_PATH)
     ACP_TIMEOUT: int = field(default_factory=lambda: ACP_TIMEOUT)
+    SSE_KEEPALIVE_INTERVAL: float = field(
+        default_factory=lambda: SSE_KEEPALIVE_INTERVAL
+    )
     ACP_STDIO_MAX_BYTES: int = field(default_factory=lambda: ACP_STDIO_MAX_BYTES)
     ACP_TRUST_TOOLS: bool = field(default_factory=lambda: ACP_TRUST_TOOLS)
     ACP_TOOL_DENY: str = field(default_factory=lambda: ACP_TOOL_DENY)

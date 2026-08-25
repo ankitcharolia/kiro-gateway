@@ -44,6 +44,7 @@ from kiro.multimodal import (
     append_text, collapse_blocks, openai_part_to_blocks, prepend_text,
 )
 from kiro.shim_service import ShimService
+from kiro.streaming_core import KEEPALIVE, iter_with_keepalive
 from kiro.system_sanitizer import sanitize_system_prompt
 from kiro.tokenizer import normalize_usage
 
@@ -575,22 +576,34 @@ async def _stream_response(
     yield chunk({"role": "assistant", "content": ""})
 
     try:
-        async for event in shim.stream_tokens(
-            messages=messages,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stop=stop,
-            tools=tools,
-            response_format=response_format,
-            tool_choice=tool_choice,
-            filesystem_roots=fs_roots,
-            terminal=terminal,
-            surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
-            surface_thinking=settings.ACP_SURFACE_THINKING,
-            mcp_servers=mcp_servers,
+        async for event in iter_with_keepalive(
+            shim.stream_tokens(
+                messages=messages,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop,
+                tools=tools,
+                response_format=response_format,
+                tool_choice=tool_choice,
+                filesystem_roots=fs_roots,
+                terminal=terminal,
+                surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
+                surface_thinking=settings.ACP_SURFACE_THINKING,
+                mcp_servers=mcp_servers,
+            ),
+            settings.SSE_KEEPALIVE_INTERVAL,
         ):
+            if event is KEEPALIVE:
+                # kiro-cli is busy (typically running one of its built-in tools)
+                # and has sent nothing for a whole interval. An SSE comment is
+                # ignored by every conformant parser, so it keeps client-side
+                # idle watchdogs from aborting the turn without adding a chunk
+                # callers would have to filter out.
+                yield ": keepalive\n\n"
+                continue
+
             etype = event.get("type")
             if etype == "plan":
                 # Fold the task list into the reasoning channel.
@@ -1119,21 +1132,32 @@ async def _responses_stream(
     yield sse("response.in_progress", {"response": base_response("in_progress")})
 
     try:
-        async for event in shim.stream_tokens(
-            messages=messages,
-            model=model,
-            max_tokens=max_output_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            tools=tools,
-            response_format=response_format,
-            tool_choice=tool_choice,
-            filesystem_roots=fs_roots,
-            terminal=terminal,
-            surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
-            surface_thinking=settings.ACP_SURFACE_THINKING,
-            mcp_servers=mcp_servers,
+        async for event in iter_with_keepalive(
+            shim.stream_tokens(
+                messages=messages,
+                model=model,
+                max_tokens=max_output_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                tools=tools,
+                response_format=response_format,
+                tool_choice=tool_choice,
+                filesystem_roots=fs_roots,
+                terminal=terminal,
+                surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
+                surface_thinking=settings.ACP_SURFACE_THINKING,
+                mcp_servers=mcp_servers,
+            ),
+            settings.SSE_KEEPALIVE_INTERVAL,
         ):
+            if event is KEEPALIVE:
+                # The Responses event taxonomy has no ping/no-op event, and an
+                # invented `response.*` type would break strict parsers, so use
+                # an SSE comment: ignored by every conformant parser and absent
+                # from the assembled response.
+                yield ": keepalive\n\n"
+                continue
+
             etype = event.get("type")
             if etype == "plan":
                 event = {"type": "thinking",

@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, Iterator, List, Optional
 
+from loguru import logger
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -19,6 +21,85 @@ class FirstTokenTimeoutError(TimeoutError):
         super().__init__(
             f"No token received within {timeout_seconds}s first-token timeout."
         )
+
+
+# ---------------------------------------------------------------------------
+# Keepalive
+# ---------------------------------------------------------------------------
+
+#: Sentinel yielded by :func:`iter_with_keepalive` when the wrapped iterator has
+#: produced nothing for a whole interval. Compared by identity, so it can never
+#: be confused with a real event (which is always a ``dict``).
+KEEPALIVE = object()
+
+
+async def iter_with_keepalive(
+    source: AsyncIterator[Any],
+    interval: float,
+) -> AsyncIterator[Any]:
+    """Yield from ``source``, injecting :data:`KEEPALIVE` while it is idle.
+
+    kiro-cli emits no ACP notification for as long as one of its built-in tools
+    is running, so a streaming turn can put nothing on the wire for minutes (a
+    live probe measured 40.02s of silence for a 40s ``sleep``, scaling 1:1 with
+    the tool's runtime). Harnesses abort a stream that stays silent — Claude
+    Code's watchdog gives up after 300s with "API Error: The operation timed
+    out." This wrapper turns "nothing arrived for ``interval`` seconds" into a
+    sentinel the caller renders as its protocol's no-op frame, leaving real
+    events untouched.
+
+    Cancellation semantics are preserved: the in-flight pull is cancelled and
+    ``source`` is closed on teardown, so ``prompt_stream``'s finally-block still
+    runs and tells kiro-cli to abandon the turn when the client disconnects.
+
+    Args:
+        source: The async iterator to consume.
+        interval: Seconds of silence before a keepalive is emitted. Values <= 0
+            disable keepalives and stream ``source`` through unchanged.
+
+    Yields:
+        Every item produced by ``source``, interleaved with :data:`KEEPALIVE`
+        sentinels for each whole ``interval`` that passed without an item.
+    """
+    if interval <= 0:
+        async for item in source:
+            yield item
+        return
+
+    iterator = source.__aiter__()
+    pending: Optional[asyncio.Future] = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(iterator.__anext__())
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if not done:
+                # Still waiting on kiro-cli (typically a built-in tool run) —
+                # prove to the client that the connection is alive. The same
+                # pull stays in flight, so no event can be missed or reordered.
+                yield KEEPALIVE
+                continue
+            task, pending = pending, None
+            try:
+                item = task.result()
+            except StopAsyncIteration:
+                return
+            yield item
+    finally:
+        if pending is not None:
+            pending.cancel()
+            try:
+                await pending
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+            except Exception as exc:  # noqa: BLE001 — teardown must not mask
+                # The source failed while we were tearing down (e.g. client
+                # disconnect racing an upstream error). The caller is already
+                # unwinding, so log rather than replace its exception.
+                logger.debug(f"Keepalive teardown: source raised {exc!r}")
+        aclose = getattr(source, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 # ---------------------------------------------------------------------------

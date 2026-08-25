@@ -52,6 +52,7 @@ from kiro.error_mapping import MappedError, classify_event, classify_exception
 from kiro.model_validation import ModelNotAvailableError, resolve_alias, validate_model
 from kiro.multimodal import anthropic_block_to_blocks, collapse_blocks
 from kiro.shim_service import ShimService
+from kiro.streaming_core import KEEPALIVE, iter_with_keepalive
 from kiro.system_sanitizer import sanitize_system_prompt
 from kiro.tokenizer import estimate_request_tokens, normalize_usage
 
@@ -653,22 +654,34 @@ async def _stream_response(
     yield sse("ping", {"type": "ping"})
 
     try:
-        async for event in shim.stream_tokens(
-            messages=messages,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            stop=stop,
-            tools=tools,
-            tool_choice=tool_choice,
-            filesystem_roots=fs_roots,
-            terminal=terminal,
-            surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
-            surface_thinking=settings.ACP_SURFACE_THINKING,
-            mcp_servers=mcp_servers,
+        async for event in iter_with_keepalive(
+            shim.stream_tokens(
+                messages=messages,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                stop=stop,
+                tools=tools,
+                tool_choice=tool_choice,
+                filesystem_roots=fs_roots,
+                terminal=terminal,
+                surface_tool_calls=settings.ACP_SURFACE_TOOL_CALLS,
+                surface_thinking=settings.ACP_SURFACE_THINKING,
+                mcp_servers=mcp_servers,
+            ),
+            settings.SSE_KEEPALIVE_INTERVAL,
         ):
+            if event is KEEPALIVE:
+                # kiro-cli is busy (typically running one of its built-in tools)
+                # and has sent nothing for a whole interval. A ping is a no-op in
+                # the Anthropic event taxonomy and is what the native API sends,
+                # so it keeps harness stream watchdogs from aborting the turn
+                # without affecting the assembled message.
+                yield sse("ping", {"type": "ping"})
+                continue
+
             etype = event.get("type")
             if etype == "plan":
                 event = {"type": "thinking",

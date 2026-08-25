@@ -4,6 +4,7 @@ All ACP calls are mocked — no kiro CLI needed.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -1919,3 +1920,94 @@ class TestAnthropicWorkspaceCwd:
         assert resp.status_code == 200
         assert rec.complete_kwargs[0]["filesystem_roots"] == []
 
+
+
+# ---------------------------------------------------------------------------
+# SSE keepalive: a turn produces no wire traffic while kiro-cli runs one of its
+# built-in tools (a live probe measured 40.02s of silence for a 40s sleep), and
+# Claude Code's stream watchdog aborts after 300s of silence ("API Error: The
+# operation timed out."). The shim must keep pinging.
+# ---------------------------------------------------------------------------
+
+class _SilentThenAnswerShim:
+    """ShimService stand-in that stalls before emitting anything."""
+
+    def __init__(self, stall_seconds: float):
+        self.stall_seconds = stall_seconds
+
+    def available_models(self):
+        return []
+
+    async def stream_tokens(self, **kwargs):
+        # Models kiro-cli sitting in a long built-in tool call: no ACP
+        # notification arrives, so the shim has nothing real to forward.
+        await asyncio.sleep(self.stall_seconds)
+        yield {"type": "text", "content": "done"}
+        yield {"type": "done", "finish_reason": "stop", "usage": {}}
+
+
+class TestAnthropicShimKeepalive:
+    """/v1/messages stays alive while the upstream turn is silent."""
+
+    _PAYLOAD = {
+        "model": "claude-sonnet-4.6",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+
+    def test_pings_emitted_while_upstream_is_silent(
+        self, sync_client, anthropic_headers, monkeypatch
+    ):
+        # Target the route module's own reference: another test may reload
+        # kiro.config, so kiro.config.settings is not necessarily the object the
+        # already-imported route closed over.
+        monkeypatch.setattr(
+            "kiro.routes_anthropic_shim.settings.SSE_KEEPALIVE_INTERVAL", 0.05
+        )
+        sync_client.app.state.shim_service = _SilentThenAnswerShim(0.45)
+
+        resp = sync_client.post(
+            "/v1/messages", json=self._PAYLOAD, headers=anthropic_headers
+        )
+
+        assert resp.status_code == 200
+        # One ping is sent up front; the silent window must add several more.
+        assert resp.text.count("event: ping") >= 3
+        # Keepalives must not disturb the real message.
+        assert "text_delta" in resp.text
+        assert "event: message_stop" in resp.text
+
+    def test_keepalive_disabled_by_zero_interval(
+        self, sync_client, anthropic_headers, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "kiro.routes_anthropic_shim.settings.SSE_KEEPALIVE_INTERVAL", 0
+        )
+        sync_client.app.state.shim_service = _SilentThenAnswerShim(0.2)
+
+        resp = sync_client.post(
+            "/v1/messages", json=self._PAYLOAD, headers=anthropic_headers
+        )
+
+        assert resp.status_code == 200
+        # Only the single up-front ping — the previous, silent behaviour.
+        assert resp.text.count("event: ping") == 1
+        assert "event: message_stop" in resp.text
+
+    def test_fast_stream_emits_only_the_opening_ping(
+        self, sync_client, anthropic_headers, monkeypatch
+    ):
+        """A turn that never idles must be byte-identical to the old behaviour."""
+        monkeypatch.setattr(
+            "kiro.routes_anthropic_shim.settings.SSE_KEEPALIVE_INTERVAL", 5
+        )
+        sync_client.app.state.shim_service = _SilentThenAnswerShim(0)
+
+        resp = sync_client.post(
+            "/v1/messages", json=self._PAYLOAD, headers=anthropic_headers
+        )
+
+        assert resp.status_code == 200
+        assert resp.text.count("event: ping") == 1
+        assert "event: message_stop" in resp.text

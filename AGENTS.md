@@ -370,6 +370,37 @@ translators emit OpenAI/Anthropic/ACP SSE.
   `kiro.error_mapping` can classify them; non-streaming completions surface the
   same failure as an `ACPError(code, message, data)`.
 
+## SSE keepalive (`iter_with_keepalive`)
+
+kiro-cli emits **no** `session/update` for as long as one of its built-in tools
+runs, so a streaming turn can put nothing on the wire for minutes — verified
+against a live kiro-cli 2.19.1 probe: a 40s `sleep` produced **40.02s of total
+silence** between the `tool_call` and `tool_call_update` events, scaling 1:1 with
+the tool's runtime. Harness watchdogs abort a silent stream (Claude Code: 300s,
+"API Error: The operation timed out.").
+
+`streaming_core.iter_with_keepalive(source, interval)` wraps the event iterator
+and yields the `KEEPALIVE` sentinel (an `object()`, identity-compared, so it can
+never collide with a real dict event) for each `interval` that passes with no
+item. The in-flight `__anext__` is kept across intervals — events cannot be
+missed or reordered — and teardown cancels it and `aclose()`s the source so
+`prompt_stream`'s finally-block still tells kiro-cli to abandon the turn on
+client disconnect.
+
+**All four streaming surfaces render the sentinel** as their protocol's no-op
+frame, and each must keep doing so:
+
+| Surface | Frame | Why |
+|---|---|---|
+| `/v1/chat/completions` | `: keepalive\n\n` (SSE comment) | Ignored by conformant parsers; not a chunk callers must filter |
+| `/v1/responses` | `: keepalive\n\n` (SSE comment) | The Responses taxonomy has no ping; an invented `response.*` type would break strict parsers |
+| `/v1/messages` | `event: ping` | A no-op in the Anthropic taxonomy and what the native API sends |
+| `/acp/chat/stream` | `: keepalive\n\n` (SSE comment) | Avoids adding an `acp_*` event existing clients don't know |
+
+`interval <= 0` streams through unchanged, so `SSE_KEEPALIVE_INTERVAL=0` restores
+the exact pre-keepalive behaviour. Tests must assert both the idle case and that
+a never-idle turn emits no keepalive at all.
+
 ## Error Mapping (`kiro/error_mapping.py`)
 
 A single classifier maps ACP/upstream failures to an HTTP status code and the
@@ -616,6 +647,7 @@ take precedence over `.env`).
 | `KIRO_ACP_EXTRA_ARGS` | `` (none) | Escape hatch: extra raw `kiro-cli acp` args, shell-quoted, appended verbatim. |
 | `ACP_TIMEOUT` | `120` | Seconds to await a JSON-RPC response |
 | `ACP_STDIO_MAX_BYTES` | `16777216` (16 MiB) | Max bytes per ACP stdout line; raise for very large tool outputs in long turns |
+| `SSE_KEEPALIVE_INTERVAL` | `15` | Seconds of upstream silence before a streaming route emits a no-op keepalive frame. kiro-cli sends no notification while a built-in tool runs (probe: 40.02s silent for a 40s command), and harness watchdogs abort a silent stream (Claude Code: 300s). `0` disables (the old silent behaviour). |
 | `ACP_ENABLED` / `OPENAI_SHIM_ENABLED` / `ANTHROPIC_SHIM_ENABLED` | `true` | Router toggles |
 | `SERVER_HOST` / `SERVER_PORT` | `0.0.0.0` / `8000` | Bind address |
 | `COMPLIANCE_MODE` | `true` | Single-account enforcement |
@@ -629,7 +661,12 @@ take precedence over `.env`).
 - **Complete network isolation.** A global fixture blocks all outbound HTTP; the
   real `kiro-cli` binary is never spawned.
 - **Mock the subprocess, not the logic.** `tests/conftest.py` exposes:
-  - `sync_client` — TestClient with the whole `ShimService` mocked (fast route checks).
+  - `sync_client` — TestClient with the whole `ShimService` mocked (fast route
+    checks). Patches `ACPClient.start/stop/initialize` **and `new_session`** —
+    the latter is required because the lifespan's model-catalogue warm-up
+    (`main.py`) opens a session, which would otherwise write a JSON-RPC request
+    to a subprocess that was never spawned and hang `TestClient.__enter__`.
+    **Anything the lifespan calls on `ACPClient` must be patched here.**
   - `test_client` — TestClient that patches `ACPClient.start/stop/initialize`
     **and** `new_session/prompt/prompt_stream`. The real `ShimService` and routes
     run end-to-end. **If you add a method on the prompt path, patch it here**, or

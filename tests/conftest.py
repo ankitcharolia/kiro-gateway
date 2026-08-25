@@ -284,9 +284,9 @@ def test_client():
 def sync_client():
     """Function-scoped TestClient with ACP and ShimService fully mocked.
 
-    Patches start/stop/initialize so no kiro CLI is spawned. Also installs a
-    mock ShimService on app.state so shim routes return valid responses.
-    Uses function scope to avoid cross-test state contamination.
+    Patches start/stop/initialize/new_session so no kiro CLI is spawned. Also
+    installs a mock ShimService on app.state so shim routes return valid
+    responses. Uses function scope to avoid cross-test state contamination.
     """
     from unittest.mock import AsyncMock, MagicMock
 
@@ -299,6 +299,14 @@ def sync_client():
 
     async def _noop_initialize(self, capabilities=None) -> None:
         pass
+
+    async def _mock_new_session(self, capabilities=None, cwd=None, model=None,
+                                mode=None, mcp_servers=None) -> str:
+        # The lifespan opens a warm-up session to populate the model catalogue.
+        # Without this patch the JSON-RPC request is written to a subprocess that
+        # was never spawned, so TestClient.__enter__ blocks in the lifespan and
+        # every test using this fixture hangs.
+        return "test-session-id"
 
     mock_shim = MagicMock()
     mock_shim.available_models = MagicMock(return_value=[])
@@ -319,6 +327,7 @@ def sync_client():
         patch("kiro.acp_client.ACPClient.start", new=_noop_start),
         patch("kiro.acp_client.ACPClient.stop", new=_noop_stop),
         patch("kiro.acp_client.ACPClient.initialize", new=_noop_initialize),
+        patch("kiro.acp_client.ACPClient.new_session", new=_mock_new_session),
     ):
         with TestClient(app) as client:
             client.app.state.shim_service = mock_shim
