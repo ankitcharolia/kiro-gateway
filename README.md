@@ -4,6 +4,8 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![GitHub stars](https://img.shields.io/github/stars/ankitcharolia/kiro-gateway?style=flat&label=Stars)](https://github.com/ankitcharolia/kiro-gateway/stargazers)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/achar)
+[![PayPal](https://img.shields.io/badge/PayPal-00457C?logo=paypal&logoColor=white)](https://paypal.me/ankitcharolia)
 
 Use your Kiro subscription from **Claude Code, OpenCode, Cursor, Kilo Code**, and other OpenAI- or Anthropic-compatible clients. Kiro Gateway translates those HTTP APIs — plus native ACP — to the official `kiro-cli` binary over the Agent Client Protocol.
 
