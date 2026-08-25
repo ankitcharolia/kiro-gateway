@@ -625,7 +625,7 @@ take precedence over `.env`).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `KIRO_GATEWAY_API_KEY` | `test-proxy-key` | Client auth secret |
+| `KIRO_GATEWAY_API_KEY` | `change-me` | Client auth secret (matches the `.env.example` placeholder — set your own) |
 | `KIRO_CLI_PATH` | `kiro-cli` | Path/name of the Kiro CLI binary |
 | `KIRO_MODELS` | `` (none) | Emergency fallback model list for `GET /v1/models` — leave unset; the gateway populates the live catalogue automatically via a warm-up session at startup |
 | `MODEL_VALIDATION` | `warn` | How a requested model absent from the live catalogue is handled: `warn` (log + fall back), `strict` (404 native error), `off` (forward silently). Skipped until the catalogue is known (issue #42). |

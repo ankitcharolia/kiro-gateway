@@ -148,7 +148,7 @@ existing env vars take precedence over `.env`).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `KIRO_GATEWAY_API_KEY` | `test-proxy-key` | Bearer / `x-api-key` clients must send |
+| `KIRO_GATEWAY_API_KEY` | `change-me` | Bearer / `x-api-key` clients must send |
 | `KIRO_CLI_PATH` | `kiro-cli` | Path/name of the Kiro CLI binary |
 | `ACP_TRUST_TOOLS` | `true` | Auto-approve a single tool invocation on `session/request_permission`; set `false` to reject (read/answer-only posture) |
 | `ACP_WORKSPACE_DIR` | process cwd | Fallback `cwd`; harness cwd auto-detected per request (`X-Kiro-Workspace` header, `filesystem_roots`, or the prompt `<env>` `Working directory:` line via `kiro.workspace`) |

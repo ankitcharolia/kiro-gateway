@@ -22,7 +22,14 @@ except Exception:
 # ---------------------------------------------------------------------------
 # KIRO_GATEWAY_API_KEY is the client auth secret clients must send as
 # Bearer (OpenAI) or x-api-key (Anthropic).
-KIRO_GATEWAY_API_KEY: str = os.environ.get("KIRO_GATEWAY_API_KEY", "test-proxy-key")
+#
+# The fallback matches the ``.env.example`` placeholder so there is a single
+# documented default instead of two different well-known values (the fallback
+# used to be "test-proxy-key" while .env.example shipped "change-me", which
+# made it unclear which key an unconfigured gateway actually accepts).
+# Neither is a secret: set your own value in ``.env`` before exposing the
+# gateway beyond localhost.
+KIRO_GATEWAY_API_KEY: str = os.environ.get("KIRO_GATEWAY_API_KEY", "change-me")
 
 # ---------------------------------------------------------------------------
 # Compliance

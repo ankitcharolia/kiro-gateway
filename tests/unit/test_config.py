@@ -111,6 +111,60 @@ def test_proxy_api_key_from_env():
         assert settings.KIRO_GATEWAY_API_KEY == KIRO_GATEWAY_API_KEY
 
 
+class TestGatewayApiKeyDefault:
+    """The code fallback must stay in sync with the .env.example placeholder.
+
+    These used to differ ("test-proxy-key" in code vs "change-me" in
+    .env.example), so it was unclear which key an unconfigured gateway accepts.
+    """
+
+    def _fallback_default(self, monkeypatch) -> str:
+        """Reload kiro.config with no KIRO_GATEWAY_API_KEY set."""
+        import importlib
+        import kiro.config as cfg
+        monkeypatch.delenv("KIRO_GATEWAY_API_KEY", raising=False)
+        return importlib.reload(cfg).KIRO_GATEWAY_API_KEY
+
+    def _restore(self, monkeypatch, original: str) -> None:
+        """Reload with the ambient value so later tests still authenticate.
+
+        kiro.auth reads ``config.KIRO_GATEWAY_API_KEY`` at request time, so a
+        reloaded module holding the fallback would 401 every later route test.
+        """
+        import importlib
+        import kiro.config as cfg
+        monkeypatch.setenv("KIRO_GATEWAY_API_KEY", original)
+        importlib.reload(cfg)
+
+    def test_fallback_is_the_documented_placeholder(self, monkeypatch):
+        import kiro.config as cfg
+        original = cfg.KIRO_GATEWAY_API_KEY
+        try:
+            assert self._fallback_default(monkeypatch) == "change-me"
+        finally:
+            self._restore(monkeypatch, original)
+
+    def test_fallback_matches_env_example(self, monkeypatch):
+        """Guard against the code default and .env.example drifting apart."""
+        import kiro.config as cfg
+        from pathlib import Path
+
+        env_example = Path(__file__).resolve().parents[2] / ".env.example"
+        placeholder = None
+        for line in env_example.read_text(encoding="utf-8").splitlines():
+            if line.startswith("KIRO_GATEWAY_API_KEY="):
+                placeholder = line.split("=", 1)[1].strip()
+                break
+
+        assert placeholder, "KIRO_GATEWAY_API_KEY missing from .env.example"
+
+        original = cfg.KIRO_GATEWAY_API_KEY
+        try:
+            assert self._fallback_default(monkeypatch) == placeholder
+        finally:
+            self._restore(monkeypatch, original)
+
+
 def test_settings_feature_flags_are_bool():
     assert isinstance(settings.ACP_ENABLED, bool)
     assert isinstance(settings.OPENAI_SHIM_ENABLED, bool)
