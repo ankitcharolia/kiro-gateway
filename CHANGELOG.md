@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org); versions follow
 [Semantic Versioning](https://semver.org).
 
+## 2.4.1 (2026-08-25)
+
+### Features
+
+* **streaming:** keep SSE streams alive while kiro-cli runs a tool ([8b7d88d](https://github.com/ankitcharolia/kiro-gateway/commit/8b7d88d234a3818510ce35b4490fc7ced07ed532))
+
+### Refactoring
+
+* **config:** align KIRO_GATEWAY_API_KEY default with .env.example ([acd2bf7](https://github.com/ankitcharolia/kiro-gateway/commit/acd2bf79647008a9a66a58570e79bba5828a4c49))
+
+### Documentation
+
+* **changelog:** update for v2.4.0 [skip ci] ([5faa985](https://github.com/ankitcharolia/kiro-gateway/commit/5faa985f62c205437de4a86e2a43927976cedee9))
+* **readme:** restore ACP title and support callout ([afe9179](https://github.com/ankitcharolia/kiro-gateway/commit/afe9179522e8a57c73f70cf6f7dfc60092f20985))
+* **readme:** add Buy Me a Coffee and PayPal badges ([94f75c1](https://github.com/ankitcharolia/kiro-gateway/commit/94f75c13a383b022be82142ae0c09834d0c45016))
+
+### Chores
+
+* **docs:** improve GitHub discoverability ([08c435a](https://github.com/ankitcharolia/kiro-gateway/commit/08c435af1152ec96aa92cbf7e08e5841e3c2f44b))
+* **assets:** add GitHub social preview ([801dcd8](https://github.com/ankitcharolia/kiro-gateway/commit/801dcd88f0d05b4fc8356741c6bde4922051c278))
+
+
+### ❤️ Thanks to our contributors
+
+* @ankitcharolia
+* @github-actions[bot]
+
 ## 2.4.0 (2026-08-12)
 
 ### Features
