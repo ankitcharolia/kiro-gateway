@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
@@ -13,6 +14,7 @@ import pytest_asyncio
 
 from kiro.acp_client import ACPClient
 from kiro.acp_models import PromptMessage, PromptParams, ACPToolDefinition
+from kiro.config import settings
 
 # Capture the genuine new_session implementation at import time. The
 # session-scoped ``test_client`` fixture monkeypatches ``ACPClient.new_session``
@@ -25,6 +27,12 @@ _REAL_NEW_SESSION = ACPClient.new_session
 _REAL_PROMPT_STREAM = ACPClient.prompt_stream
 # Same reason — the fixture also patches ACPClient.prompt for the session.
 _REAL_PROMPT = ACPClient.prompt
+# Ditto for initialize: the capability-capture tests must exercise the real
+# handshake, not the session-scoped mock the ``test_client`` fixture installs.
+_REAL_INITIALIZE = ACPClient.initialize
+# And stop(): the shutdown-escalation tests must drive the real
+# stdin-close -> SIGTERM -> SIGKILL ladder, not the fixture's no-op mock.
+_REAL_STOP = ACPClient.stop
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +635,264 @@ class TestSpawnArgvConstruction:
         """A blank engine falls back to the explicit v2 pin."""
         client = ACPClient(engine="")
         assert client._build_argv()[:4] == ["kiro-cli", "acp", "--agent-engine", "v2"]
+
+    def test_v3_drops_session_scope_flags(self):
+        """v3 rejects --agent/--model/--effort outright, so they are dropped.
+
+        kiro-cli exits with "the following arguments are not supported with
+        --agent-engine=v3" before writing any JSON-RPC, so forwarding them would
+        break every request rather than degrade (verified live on 2.19.x).
+        """
+        client = ACPClient(
+            engine="v3", agent="planner",
+            initial_model="claude-sonnet-4.6", effort="high",
+        )
+        assert client._build_argv() == ["kiro-cli", "acp", "--agent-engine", "v3"]
+
+    def test_v3_still_appends_extra_args(self):
+        """extra_args stay an operator escape hatch even on v3."""
+        client = ACPClient(engine="v3", agent="planner", extra_args=["--verbose"])
+        assert client._build_argv() == [
+            "kiro-cli", "acp", "--agent-engine", "v3", "--verbose",
+        ]
+
+    @pytest.mark.parametrize("engine", ["v1", "v2"])
+    def test_v1_v2_keep_session_scope_flags(self, engine):
+        """v1/v2 accept the flags, so their argv is unchanged by the v3 gate."""
+        client = ACPClient(
+            engine=engine, agent="planner",
+            initial_model="claude-opus-4.8", effort="max",
+        )
+        assert client._build_argv() == [
+            "kiro-cli", "acp", "--agent-engine", engine,
+            "--agent", "planner", "--model", "claude-opus-4.8", "--effort", "max",
+        ]
+
+    def test_v3_drop_is_logged(self, caplog):
+        """Dropping a flag is surfaced, never silent."""
+        from loguru import logger as _logger
+
+        messages: list[str] = []
+        sink_id = _logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+        try:
+            ACPClient(engine="v3", agent="planner")._build_argv()
+        finally:
+            _logger.remove(sink_id)
+        assert any("--agent" in m and "v3" in m for m in messages)
+
+
+class TestV3RestrictivePostureWarning:
+    """A refusing posture on v3 warns that pre-approved tools cannot be refused.
+
+    ACP_TRUST_TOOLS is enforced from session/request_permission and that works on
+    v3 (a live probe confirmed reject_once blocks the tool). But v3 skips the
+    request entirely for tools its own permissions.yaml allows, so the operator
+    must be told the posture is not airtight.
+    """
+
+    def _warnings(self, **kwargs) -> list[str]:
+        from loguru import logger as _logger
+
+        messages: list[str] = []
+        sink_id = _logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+        try:
+            ACPClient(**kwargs)._warn_restrictive_posture_on_v3()
+        finally:
+            _logger.remove(sink_id)
+        return messages
+
+    def test_v3_with_trust_disabled_warns(self):
+        msgs = self._warnings(engine="v3", trust_tools=False)
+        assert any("permissions.yaml" in m for m in msgs)
+
+    def test_v3_with_deny_rules_warns(self):
+        from kiro.tool_permissions import ToolPermissionPolicy
+
+        policy = ToolPermissionPolicy.from_config("", "Bash(rm -rf *)", default_allow=True)
+        msgs = self._warnings(engine="v3", trust_tools=True, permission_policy=policy)
+        assert any("permissions.yaml" in m for m in msgs)
+
+    def test_v3_fully_trusting_does_not_warn(self):
+        from kiro.tool_permissions import ToolPermissionPolicy
+
+        policy = ToolPermissionPolicy.from_config("", "", default_allow=True)
+        assert self._warnings(
+            engine="v3", trust_tools=True, permission_policy=policy
+        ) == []
+
+    @pytest.mark.parametrize("engine", ["v1", "v2"])
+    def test_v1_v2_never_warn(self, engine):
+        """v1/v2 always ask, so the gateway's refusal is authoritative."""
+        assert self._warnings(engine=engine, trust_tools=False) == []
+
+
+class TestShutdownEscalation:
+    """stop() escalates stdin-close -> SIGTERM -> SIGKILL, reaping each stage.
+
+    Closing stdin is not enough on v3: a live probe showed the process ignoring
+    EOF and staying alive until signalled.
+    """
+
+    def _proc(self, exits_after: str) -> MagicMock:
+        """Build a fake process that only exits at the given stage."""
+        proc = MagicMock()
+        proc.returncode = None
+        proc.stdin = MagicMock()
+        proc.stdin.is_closing.return_value = False
+        state = {"stage": None}
+
+        async def wait():
+            if state["stage"] == exits_after:
+                return 0
+            await asyncio.sleep(3600)
+
+        proc.wait = wait
+        proc.stdin.close = MagicMock(side_effect=lambda: state.__setitem__("stage", "stdin"))
+        proc.terminate = MagicMock(side_effect=lambda: state.__setitem__("stage", "term"))
+        proc.kill = MagicMock(side_effect=lambda: state.__setitem__("stage", "kill"))
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_exit_on_stdin_close_skips_signals(self):
+        """The cooperative v1/v2 path never signals the process."""
+        client = ACPClient()
+        client._proc = self._proc("stdin")
+
+        await _REAL_STOP(client)
+
+        client._proc.stdin.close.assert_called_once()
+        client._proc.terminate.assert_not_called()
+        client._proc.kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sigterm_used_when_stdin_close_ignored(self, monkeypatch):
+        """v3 ignores stdin EOF, so SIGTERM is required — and SIGKILL is not."""
+        monkeypatch.setattr("kiro.acp_client._STOP_STDIN_TIMEOUT", 0.01)
+        client = ACPClient()
+        client._proc = self._proc("term")
+
+        await _REAL_STOP(client)
+
+        client._proc.terminate.assert_called_once()
+        client._proc.kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sigkill_is_last_resort(self, monkeypatch):
+        """A process that ignores SIGTERM is killed and still reaped."""
+        monkeypatch.setattr("kiro.acp_client._STOP_STDIN_TIMEOUT", 0.01)
+        monkeypatch.setattr("kiro.acp_client._STOP_TERM_TIMEOUT", 0.01)
+        monkeypatch.setattr("kiro.acp_client._STOP_KILL_TIMEOUT", 0.01)
+        client = ACPClient()
+        client._proc = self._proc("kill")
+
+        await _REAL_STOP(client)
+
+        client._proc.terminate.assert_called_once()
+        client._proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_v3_skips_the_stdin_wait(self):
+        """v3 ignores stdin EOF, so shutdown signals immediately instead of waiting.
+
+        The stdin timeout is left at its real 5s value: if the stage were not
+        skipped this test would take that long, so a regression shows up as a
+        slow test as well as a failed assertion.
+        """
+        client = ACPClient(engine="v3")
+        client._proc = self._proc("term")
+
+        started = time.monotonic()
+        await _REAL_STOP(client)
+        elapsed = time.monotonic() - started
+
+        client._proc.terminate.assert_called_once()
+        assert elapsed < 1.0
+
+    @pytest.mark.asyncio
+    async def test_already_exited_process_is_not_signalled(self):
+        """A process that already exited is left alone."""
+        client = ACPClient()
+        client._proc = self._proc("stdin")
+        client._proc.returncode = 0
+
+        await _REAL_STOP(client)
+
+        client._proc.terminate.assert_not_called()
+        client._proc.kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_process_is_safe(self):
+        """stop() before start() must not raise."""
+        await _REAL_STOP(ACPClient())
+
+
+class TestAgentInfoFallback:
+    """initialize() tolerates a missing/None agentInfo (the v3 engine sends none)."""
+
+    @pytest.mark.asyncio
+    async def test_agent_info_is_used_when_present(self):
+        client = ACPClient()
+        client._call = AsyncMock(return_value={
+            "protocolVersion": 1,
+            "agentInfo": {"name": "Kiro CLI Agent", "version": "2.19.1"},
+        })
+        client._probe_cli_version = AsyncMock(return_value="should-not-be-used")
+
+        await _REAL_INITIALIZE(client)
+
+        assert client.agent_name == "Kiro CLI Agent"
+        assert client.agent_version == "2.19.1"
+        client._probe_cli_version.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_agent_info_falls_back_to_cli_version(self):
+        """v3 omits agentInfo entirely, so the binary is asked instead."""
+        client = ACPClient(engine="v3")
+        client._call = AsyncMock(return_value={"protocolVersion": 1})
+        client._probe_cli_version = AsyncMock(return_value="2.19.2")
+
+        await _REAL_INITIALIZE(client)
+
+        assert client.agent_name == "kiro-cli"
+        assert client.agent_version == "2.19.2"
+
+    @pytest.mark.asyncio
+    async def test_null_agent_info_does_not_raise(self):
+        """An explicit null must not become an AttributeError."""
+        client = ACPClient()
+        client._call = AsyncMock(return_value={"protocolVersion": 1, "agentInfo": None})
+        client._probe_cli_version = AsyncMock(return_value=None)
+
+        result = await _REAL_INITIALIZE(client)
+
+        assert result.protocol_version == "1"
+        assert client.agent_version is None
+
+    @pytest.mark.asyncio
+    async def test_version_probe_parses_cli_output(self):
+        """`kiro-cli --version` prints "kiro-cli <version>"."""
+        client = ACPClient()
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"kiro-cli 2.19.2\n", b""))
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            assert await client._probe_cli_version() == "2.19.2"
+
+    @pytest.mark.asyncio
+    async def test_version_probe_failure_is_swallowed(self):
+        """A missing binary degrades the log line, never startup."""
+        client = ACPClient()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(side_effect=OSError("nope"))):
+            assert await client._probe_cli_version() is None
+
+    @pytest.mark.asyncio
+    async def test_version_probe_nonzero_exit_returns_none(self):
+        client = ACPClient()
+        proc = MagicMock()
+        proc.returncode = 1
+        proc.communicate = AsyncMock(return_value=(b"", b"boom"))
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            assert await client._probe_cli_version() is None
 
 
 class TestEngineConfigValidation:
@@ -2109,3 +2375,561 @@ class TestPromptStreamLimiting:
         await feeder
         texts = "".join(e["content"] for e in events if e["type"] == "text")
         assert texts == "one two three four five"
+
+
+# ---------------------------------------------------------------------------
+# v3 agent engine (issue #52): host-mediated auth callback, configOptions
+# catalogue, session/set_config_option and the v3 tool-output shape.
+# All shapes verified against a live kiro-cli 2.18.0 / KAS 0.38.7 probe.
+# ---------------------------------------------------------------------------
+
+class TestV3AuthCallback:
+    """``_kiro/auth/getAccessToken`` is answered only when the bridge is on."""
+
+    @staticmethod
+    def _capture_writes(client: ACPClient) -> list[str]:
+        written: list[str] = []
+
+        async def fake_write_line(line: str) -> None:
+            written.append(line)
+
+        client._write_line = fake_write_line  # type: ignore[assignment]
+        return written
+
+    @pytest.mark.asyncio
+    async def test_v3_answers_callback_with_resolver_payload(self):
+        from kiro.kiro_auth import KiroAuthResolver
+
+        resolver = MagicMock(spec=KiroAuthResolver)
+        resolver.resolve = AsyncMock(return_value={
+            "accessToken": "tok", "expiresAt": "2026-08-14T11:30:00Z",
+            "profileArn": "arn:aws:codewhisperer:us-east-1:1:profile/A",
+        })
+        client = ACPClient(engine="v3", auth_resolver=resolver)
+        written = self._capture_writes(client)
+
+        await client._handle_agent_request({
+            "jsonrpc": "2.0", "id": 0,
+            "method": "_kiro/auth/getAccessToken", "params": {},
+        })
+
+        assert len(written) == 1
+        msg = json.loads(written[0])
+        assert msg["id"] == 0
+        assert msg["result"]["accessToken"] == "tok"
+        assert "error" not in msg or msg["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_resolver_failure_is_reported_as_jsonrpc_error(self):
+        from kiro.kiro_auth import KiroAuthError, KiroAuthResolver
+
+        resolver = MagicMock(spec=KiroAuthResolver)
+        resolver.resolve = AsyncMock(
+            side_effect=KiroAuthError("kiro-cli authentication failed; run `kiro-cli login`")
+        )
+        client = ACPClient(engine="v3", auth_resolver=resolver)
+        written = self._capture_writes(client)
+
+        await client._handle_agent_request({
+            "jsonrpc": "2.0", "id": 7,
+            "method": "_kiro/auth/getAccessToken", "params": {},
+        })
+
+        msg = json.loads(written[0])
+        assert msg["error"]["code"] == -32000
+        assert "kiro-cli login" in msg["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_v2_declines_the_callback(self):
+        """On the default engine no resolver exists, so the callback is refused."""
+        client = ACPClient(engine="v2")
+        written = self._capture_writes(client)
+        assert client._auth_resolver is None
+
+        await client._handle_agent_request({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "_kiro/auth/getAccessToken", "params": {},
+        })
+
+        msg = json.loads(written[0])
+        assert msg["error"]["code"] == -32000
+        assert "ACP_AUTH_BRIDGE" in msg["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_v3_client_side_fs_requests_are_still_declined(self):
+        """v3 offers _kiro/fs/*; the gateway keeps its least-privilege posture."""
+        from kiro.kiro_auth import KiroAuthResolver
+
+        resolver = MagicMock(spec=KiroAuthResolver)
+        resolver.resolve = AsyncMock(return_value={"accessToken": "t", "expiresAt": "x"})
+        client = ACPClient(engine="v3", auth_resolver=resolver)
+        written = self._capture_writes(client)
+
+        for method in ("_kiro/fs/read", "_kiro/fs/write", "_kiro/fs/delete",
+                       "_kiro/hooks/executeHook", "_kiro/openExternalUrl"):
+            await client._handle_agent_request({
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": {},
+            })
+
+        assert len(written) == 5
+        for line in written:
+            assert json.loads(line)["error"]["code"] == -32601
+
+
+class TestV3PermissionOptionIds:
+    """v3 advertises different optionIds; matching is by ``kind``."""
+
+    V3_OPTIONS = [
+        {"optionId": "accept", "name": "Allow", "kind": "allow_once"},
+        {"optionId": "always-accept", "name": "Always allow", "kind": "allow_always"},
+        {"optionId": "reject", "name": "Deny", "kind": "reject_once"},
+        {"optionId": "always-reject", "name": "Always deny", "kind": "reject_always"},
+    ]
+
+    def test_trusting_client_picks_v3_allow_once_id(self):
+        client = ACPClient(engine="v3", trust_tools=True)
+        assert client._select_permission_option(self.V3_OPTIONS, {}) == "accept"
+
+    def test_untrusting_client_picks_v3_reject_once_id(self):
+        client = ACPClient(engine="v3", trust_tools=False)
+        assert client._select_permission_option(self.V3_OPTIONS, {}) == "reject"
+
+
+class TestV3ConfigOptionsCatalogue:
+    """v3 reports the model/mode catalogue via configOptions, not ``models``."""
+
+    SESSION_NEW_V3 = {
+        "sessionId": "sess-v3",
+        "modes": {"availableModes": [{"id": "vibe", "name": "Default"}]},
+        "configOptions": [
+            {"type": "select", "id": "mode", "category": "mode",
+             "currentValue": "vibe",
+             "options": [{"value": "vibe", "name": "Default"},
+                         {"value": "plan", "name": "Plan"}]},
+            {"type": "select", "id": "model", "category": "model",
+             "currentValue": "claude-opus-5",
+             "options": [{"value": "auto", "name": "Auto", "description": "Auto"},
+                         {"value": "claude-opus-5", "name": "Claude Opus 5"}]},
+        ],
+    }
+
+    def test_models_come_from_config_options(self):
+        client = ACPClient(engine="v3")
+        client._capture_available_models(self.SESSION_NEW_V3)
+
+        assert [m["id"] for m in client.available_models] == ["auto", "claude-opus-5"]
+        assert client.available_models[1]["name"] == "Claude Opus 5"
+        assert client._current_model_id == "claude-opus-5"
+
+    def test_modes_come_from_config_options(self):
+        client = ACPClient(engine="v3")
+        client._capture_available_models(self.SESSION_NEW_V3)
+
+        assert [m["id"] for m in client.available_modes] == ["vibe", "plan"]
+        assert client._current_mode_id == "vibe"
+
+    def test_v2_models_block_still_wins(self):
+        """v1/v2 behaviour is unchanged when a models block is present."""
+        client = ACPClient(engine="v2")
+        client._capture_available_models({
+            "models": {"currentModelId": "claude-sonnet-4.6",
+                       "availableModels": [{"modelId": "claude-sonnet-4.6",
+                                            "name": "Sonnet"}]},
+            "configOptions": [{"id": "model", "currentValue": "ignored",
+                               "options": [{"value": "ignored"}]}],
+        })
+
+        assert [m["id"] for m in client.available_models] == ["claude-sonnet-4.6"]
+        assert client._current_model_id == "claude-sonnet-4.6"
+
+    def test_config_option_update_refreshes_catalogue(self):
+        client = ACPClient(engine="v3")
+        client._handle_notification({
+            "method": "session/update",
+            "params": {"sessionId": "sess-v3", "update": {
+                "sessionUpdate": "config_option_update",
+                "configOptions": [
+                    {"id": "model", "currentValue": "gpt-5.6-sol",
+                     "options": [{"value": "gpt-5.6-sol", "name": "GPT 5.6 Sol"}]},
+                ],
+            }},
+        })
+
+        assert [m["id"] for m in client.available_models] == ["gpt-5.6-sol"]
+        assert client._current_model_id == "gpt-5.6-sol"
+
+    def test_malformed_config_options_are_ignored(self):
+        client = ACPClient(engine="v3")
+        for payload in (None, [], "nope", [None, 3, {"id": "model"}]):
+            client._capture_available_models({"configOptions": payload})
+        assert client.available_models == []
+
+
+class TestV3ModelSelectionVerb:
+    """v3 has no session/set_model — the model is a session config option."""
+
+    @pytest.mark.asyncio
+    async def test_v3_uses_set_config_option(self):
+        client = ACPClient(engine="v3")
+        client._call = AsyncMock(return_value={})
+
+        await client.set_model("sess-1", "claude-opus-5")
+
+        client._call.assert_awaited_once_with(
+            "session/set_config_option",
+            {"sessionId": "sess-1", "configId": "model", "value": "claude-opus-5"},
+        )
+        assert client._current_model_id == "claude-opus-5"
+
+    @pytest.mark.asyncio
+    async def test_v2_still_uses_set_model(self):
+        client = ACPClient(engine="v2")
+        client._call = AsyncMock(return_value={})
+
+        await client.set_model("sess-1", "claude-sonnet-4.6")
+
+        client._call.assert_awaited_once_with(
+            "session/set_model",
+            {"sessionId": "sess-1", "modelId": "claude-sonnet-4.6"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_failure_never_breaks_the_turn(self):
+        from kiro.acp_client import ACPError
+
+        client = ACPClient(engine="v3")
+        client._call = AsyncMock(side_effect=ACPError(-32000, "nope"))
+
+        await client.set_model("sess-1", "bogus-model")  # must not raise
+
+
+class TestUnservedModelGuard:
+    """An unserved model/mode is never put on the wire, on any engine.
+
+    A live kiro-cli 2.18.0 probe with an id this account is not served (the
+    widely hardcoded ``claude-sonnet-4.6``) hung the turn for ~4 minutes and then
+    failed — a 504 on v2 and a misleading "Access denied" on v3 — so the old
+    assumption that kiro-cli silently keeps its default does not hold.
+    """
+
+    @staticmethod
+    def _client(engine: str) -> ACPClient:
+        client = ACPClient(engine=engine)
+        client._available_models = [{"id": "auto"}, {"id": "claude-opus-5"}]
+        client._available_modes = [{"id": "vibe"}, {"id": "plan"}]
+        client._call = AsyncMock(return_value={})
+        return client
+
+    @pytest.mark.parametrize("engine", ["v2", "v3"])
+    @pytest.mark.asyncio
+    async def test_unserved_model_is_not_sent(self, engine):
+        client = self._client(engine)
+
+        await client.set_model("sess-1", "claude-sonnet-4.6")
+
+        client._call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_served_model_is_sent_on_v3_as_config_option(self):
+        client = self._client("v3")
+
+        await client.set_model("sess-1", "claude-opus-5")
+
+        client._call.assert_awaited_once_with(
+            "session/set_config_option",
+            {"sessionId": "sess-1", "configId": "model", "value": "claude-opus-5"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_served_model_is_sent_on_v2_as_set_model(self):
+        client = self._client("v2")
+
+        await client.set_model("sess-1", "claude-opus-5")
+
+        client._call.assert_awaited_once_with(
+            "session/set_model",
+            {"sessionId": "sess-1", "modelId": "claude-opus-5"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_catalogue_does_not_block(self):
+        """A cold client cannot verify the id, so it must not withhold it."""
+        client = ACPClient(engine="v3")
+        client._call = AsyncMock(return_value={})
+
+        await client.set_model("sess-1", "anything")
+
+        client._call.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_model_validation_off_forces_the_id(self, monkeypatch):
+        """The legacy forward-everything behaviour stays available."""
+        monkeypatch.setattr(settings, "MODEL_VALIDATION", "off", raising=False)
+        client = self._client("v2")
+
+        await client.set_model("sess-1", "claude-sonnet-4.6")
+
+        client._call.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unserved_mode_is_not_sent(self):
+        """A v2 mode id (e.g. kiro_default) must not be pushed to a v3 session."""
+        client = self._client("v3")
+
+        await client.set_mode("sess-1", "kiro_default")
+
+        client._call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_served_mode_is_sent(self):
+        client = self._client("v3")
+
+        await client.set_mode("sess-1", "plan")
+
+        client._call.assert_awaited_once_with(
+            "session/set_mode", {"sessionId": "sess-1", "modeId": "plan"},
+        )
+
+
+class TestV3ToolOutputShape:
+    """v3 reports tool output as a flat string, v2 as an items list."""
+
+    def test_v3_flat_output_string(self):
+        assert ACPClient._extract_tool_output(
+            {"output": "PROBE52_TOOL_MARKER\n", "exitStatus": 0}
+        ) == "PROBE52_TOOL_MARKER\n"
+
+    def test_v2_items_list_unchanged(self):
+        assert ACPClient._extract_tool_output(
+            {"items": [{"Text": "l1"}, {"Text": "l2"}]}
+        ) == "l1\nl2"
+
+    def test_stdout_key_is_accepted(self):
+        assert ACPClient._extract_tool_output({"stdout": "hi"}) == "hi"
+
+    def test_no_recognised_key_yields_empty(self):
+        assert ACPClient._extract_tool_output({"unrelated": {"a": 1}}) == ""
+
+    def test_v3_output_reaches_the_tool_call_update_event(self):
+        client = ACPClient(engine="v3")
+        queue = asyncio.Queue()
+        client._event_queues["s"] = queue
+
+        client._handle_notification({
+            "method": "session/update",
+            "params": {"sessionId": "s", "update": {
+                "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                "title": "Run Command", "kind": "execute", "status": "completed",
+                "rawOutput": {"output": "hello-v3\n"},
+            }},
+        })
+
+        event = queue.get_nowait()
+        assert event["type"] == "tool_call_update"
+        assert event["output"] == "hello-v3\n"
+
+
+class TestAuthBridgeConfig:
+    """config.ACP_AUTH_BRIDGE gates the v3 credential relay (issue #52)."""
+
+    def _reload_config(self, monkeypatch, value):
+        import importlib
+        import kiro.config as cfg
+        if value is None:
+            monkeypatch.delenv("ACP_AUTH_BRIDGE", raising=False)
+        else:
+            monkeypatch.setenv("ACP_AUTH_BRIDGE", value)
+        return importlib.reload(cfg)
+
+    def test_default_is_enabled(self, monkeypatch):
+        """On by default — but inert unless the engine is v3."""
+        cfg = self._reload_config(monkeypatch, None)
+        try:
+            assert cfg.ACP_AUTH_BRIDGE is True
+            assert cfg.settings.ACP_AUTH_BRIDGE is True
+        finally:
+            self._reload_config(monkeypatch, None)
+
+    @pytest.mark.parametrize("value,expected", [
+        ("true", True), ("TRUE", True), ("false", False), ("0", False), ("", False),
+    ])
+    def test_env_parsing(self, monkeypatch, value, expected):
+        cfg = self._reload_config(monkeypatch, value)
+        try:
+            assert cfg.ACP_AUTH_BRIDGE is expected
+        finally:
+            self._reload_config(monkeypatch, None)
+
+    def test_disabled_bridge_leaves_v3_client_without_resolver(self, monkeypatch):
+        """A v3 client fails closed rather than relaying a credential."""
+        monkeypatch.setattr(settings, "ACP_AUTH_BRIDGE", False, raising=False)
+        assert ACPClient(engine="v3")._auth_resolver is None
+
+    def test_enabled_bridge_gives_v3_client_a_resolver(self, monkeypatch):
+        from kiro.kiro_auth import KiroAuthResolver
+
+        monkeypatch.setattr(settings, "ACP_AUTH_BRIDGE", True, raising=False)
+        assert isinstance(ACPClient(engine="v3")._auth_resolver, KiroAuthResolver)
+
+    def test_v2_client_never_gets_a_resolver(self, monkeypatch):
+        """The default engine stays completely credential-free."""
+        monkeypatch.setattr(settings, "ACP_AUTH_BRIDGE", True, raising=False)
+        assert ACPClient(engine="v2")._auth_resolver is None
+
+
+# ---------------------------------------------------------------------------
+# Embedded documents (issue #58): representation follows the negotiated
+# promptCapabilities.embeddedContext, never the engine string.
+# Live kiro-cli 2.18.0 / KAS 0.38.7 probe: v3 advertises embeddedContext=true and
+# the model READ both a `text` resource and a base64 `blob` PDF; v2 advertises
+# false and silently IGNORES a resource block (the model saw no attachment).
+# ---------------------------------------------------------------------------
+
+class TestEmbeddedContextCapability:
+    """`supports_embedded_context` is driven by the initialize handshake."""
+
+    @pytest.mark.asyncio
+    async def test_false_before_initialize(self):
+        """Unknown capability must default to the safe text-reduction path."""
+        assert ACPClient().supports_embedded_context is False
+
+    @pytest.mark.asyncio
+    async def test_captured_from_initialize_v3(self):
+        client = ACPClient(engine="v3")
+        client._call = AsyncMock(return_value={
+            "protocolVersion": 1,
+            "agentCapabilities": {"promptCapabilities": {
+                "image": True, "embeddedContext": True}},
+        })
+
+        await _REAL_INITIALIZE(client)
+
+        assert client.supports_embedded_context is True
+
+    @pytest.mark.asyncio
+    async def test_captured_from_initialize_v2(self):
+        client = ACPClient(engine="v2")
+        client._call = AsyncMock(return_value={
+            "protocolVersion": 1,
+            "agentCapabilities": {"promptCapabilities": {
+                "image": True, "audio": False, "embeddedContext": False}},
+        })
+
+        await _REAL_INITIALIZE(client)
+
+        assert client.supports_embedded_context is False
+
+    @pytest.mark.asyncio
+    async def test_missing_capabilities_block_is_safe(self):
+        client = ACPClient()
+        client._call = AsyncMock(return_value={"protocolVersion": 1})
+
+        await _REAL_INITIALIZE(client)
+
+        assert client.supports_embedded_context is False
+
+
+class TestDocumentPromptRepresentation:
+    """A document renders as text (v1/v2) or an ACP resource block (v3)."""
+
+    TEXT_DOC = {
+        "type": "document", "mimeType": "text/markdown", "data": None,
+        "text": "# Spec\nbody", "name": "spec.md",
+        "fallback": "[document: spec.md]\n# Spec\nbody",
+    }
+    BINARY_DOC = {
+        "type": "document", "mimeType": "application/pdf", "data": "QUJD",
+        "text": None, "name": "scan.pdf",
+        "fallback": "[document: scan.pdf omitted — unsupported by kiro-cli]",
+    }
+
+    def _messages(self, doc: dict) -> list:
+        return [PromptMessage(role="user", content=[
+            {"type": "text", "text": "summarise this"}, doc,
+        ])]
+
+    def test_without_capability_document_is_reduced_to_text(self):
+        blocks = ACPClient._build_prompt_blocks(self._messages(self.TEXT_DOC), False)
+
+        assert [b["type"] for b in blocks] == ["text"]
+        assert "summarise this" in blocks[0]["text"]
+        assert "[document: spec.md]" in blocks[0]["text"]
+        assert "# Spec" in blocks[0]["text"]
+
+    def test_with_capability_text_document_becomes_a_resource(self):
+        blocks = ACPClient._build_prompt_blocks(self._messages(self.TEXT_DOC), True)
+
+        assert [b["type"] for b in blocks] == ["text", "resource"]
+        # The transcript keeps a marker where the attachment appeared.
+        assert "[document]" in blocks[0]["text"]
+        assert "[document: spec.md]" not in blocks[0]["text"]
+        resource = blocks[1]["resource"]
+        assert resource["text"] == "# Spec\nbody"
+        assert resource["mimeType"] == "text/markdown"
+        assert resource["uri"] == "attachment:///spec.md"
+        assert "blob" not in resource
+
+    def test_with_capability_binary_document_becomes_a_blob(self):
+        """A PDF travels as base64 so the agent parses it itself (probe-verified)."""
+        blocks = ACPClient._build_prompt_blocks(self._messages(self.BINARY_DOC), True)
+
+        resource = blocks[1]["resource"]
+        assert resource["blob"] == "QUJD"
+        assert resource["mimeType"] == "application/pdf"
+        assert "text" not in resource
+
+    def test_binary_document_without_capability_keeps_the_placeholder(self):
+        blocks = ACPClient._build_prompt_blocks(self._messages(self.BINARY_DOC), False)
+
+        assert [b["type"] for b in blocks] == ["text"]
+        assert "[document: scan.pdf omitted" in blocks[0]["text"]
+
+    def test_payloadless_document_falls_back_even_with_capability(self):
+        """Nothing to embed → the text fallback is used rather than a bad block."""
+        empty = {"type": "document", "mimeType": "application/zip", "data": None,
+                 "text": None, "name": "a.zip",
+                 "fallback": "[document: a.zip omitted — unsupported by kiro-cli]"}
+
+        blocks = ACPClient._build_prompt_blocks(self._messages(empty), True)
+
+        assert [b["type"] for b in blocks] == ["text"]
+        assert "[document: a.zip omitted" in blocks[0]["text"]
+
+    def test_images_and_documents_coexist(self):
+        messages = [PromptMessage(role="user", content=[
+            {"type": "text", "text": "look"},
+            {"type": "image", "mimeType": "image/png", "data": "aW1n"},
+            self.TEXT_DOC,
+        ])]
+
+        blocks = ACPClient._build_prompt_blocks(messages, True)
+
+        assert [b["type"] for b in blocks] == ["text", "image", "resource"]
+        assert "[image]" in blocks[0]["text"] and "[document]" in blocks[0]["text"]
+
+    def test_text_only_content_is_unaffected(self):
+        blocks = ACPClient._build_prompt_blocks(
+            [PromptMessage(role="user", content="just text")], True
+        )
+
+        assert blocks == [{"type": "text", "text": "just text"}]
+
+    def test_document_resource_block_shape(self):
+        """The wire shape matches ACP's EmbeddedResource (uri + text|blob)."""
+        block = ACPClient._document_resource_block(self.TEXT_DOC)
+
+        assert set(block) == {"type", "resource"}
+        assert block["type"] == "resource"
+        assert set(block["resource"]) == {"uri", "mimeType", "text"}
+
+    def test_document_resource_block_none_without_payload(self):
+        assert ACPClient._document_resource_block(
+            {"type": "document", "name": "x", "data": None, "text": None}
+        ) is None
+
+    def test_unnamed_document_still_gets_a_uri(self):
+        block = ACPClient._document_resource_block(
+            {"type": "document", "text": "x", "name": ""}
+        )
+
+        assert block["resource"]["uri"] == "attachment:///attachment"

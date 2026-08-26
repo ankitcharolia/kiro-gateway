@@ -82,9 +82,11 @@ class TestOpenAIParts:
             "filename": "notes.txt",
             "file_data": f"data:text/plain;base64,{HELLO_B64}",
         })
-        assert blocks[0]["type"] == "text"
-        assert "[document: notes.txt]" in blocks[0]["text"]
-        assert "hello world" in blocks[0]["text"]
+        assert blocks[0]["type"] == "document"
+        assert "[document: notes.txt]" in blocks[0]["fallback"]
+        assert "hello world" in blocks[0]["fallback"]
+        # The decoded text is retained so v3 can embed it as a resource (#58).
+        assert blocks[0]["text"] == "hello world"
 
     def test_binary_document_without_pypdf_is_placeholder(self):
         blocks = openai_part_to_blocks({
@@ -92,8 +94,11 @@ class TestOpenAIParts:
             "filename": "report.pdf",
             "file_data": f"data:application/pdf;base64,{HELLO_B64}",
         })
-        assert blocks[0]["type"] == "text"
-        assert "[document: report.pdf omitted" in blocks[0]["text"]
+        assert blocks[0]["type"] == "document"
+        assert "[document: report.pdf omitted" in blocks[0]["fallback"]
+        # No extracted text, but the bytes survive for the v3 resource path.
+        assert blocks[0]["text"] is None
+        assert blocks[0]["data"]
 
     def test_audio_is_placeholder(self):
         blocks = openai_part_to_blocks({"type": "input_audio", "input_audio": {"data": "x"}})
@@ -134,24 +139,25 @@ class TestAnthropicBlocks:
             "type": "document", "title": "spec.md",
             "source": {"type": "text", "media_type": "text/markdown", "data": "# Title\nbody"},
         })
-        assert blocks[0]["type"] == "text"
-        assert "[document: spec.md]" in blocks[0]["text"]
-        assert "# Title" in blocks[0]["text"]
+        assert blocks[0]["type"] == "document"
+        assert "[document: spec.md]" in blocks[0]["fallback"]
+        assert "# Title" in blocks[0]["fallback"]
+        assert blocks[0]["text"] == "# Title\nbody"
 
     def test_document_base64_text_extracted(self):
         blocks = anthropic_block_to_blocks({
             "type": "document", "title": "data.csv",
             "source": {"type": "base64", "media_type": "text/csv", "data": HELLO_B64},
         })
-        assert "[document: data.csv]" in blocks[0]["text"]
-        assert "hello world" in blocks[0]["text"]
+        assert "[document: data.csv]" in blocks[0]["fallback"]
+        assert "hello world" in blocks[0]["fallback"]
 
     def test_document_binary_placeholder(self):
         blocks = anthropic_block_to_blocks({
             "type": "document", "title": "scan.pdf",
             "source": {"type": "base64", "media_type": "application/pdf", "data": HELLO_B64},
         })
-        assert "[document: scan.pdf omitted" in blocks[0]["text"]
+        assert "[document: scan.pdf omitted" in blocks[0]["fallback"]
 
     def test_tool_use_marker(self):
         blocks = anthropic_block_to_blocks({
@@ -206,9 +212,9 @@ class TestPdfExtraction:
             "type": "input_file", "filename": "invoice.pdf",
             "file_data": f"data:application/pdf;base64,{pdf_b64}",
         })
-        assert blocks[0]["type"] == "text"
-        assert "[document: invoice.pdf]" in blocks[0]["text"]
-        assert "Invoice total 42 EUR" in blocks[0]["text"]
+        assert blocks[0]["type"] == "document"
+        assert "[document: invoice.pdf]" in blocks[0]["fallback"]
+        assert "Invoice total 42 EUR" in blocks[0]["fallback"]
 
     def test_invalid_pdf_bytes_degrade_to_placeholder(self):
         """Non-PDF bytes labelled as PDF parse-fail gracefully → placeholder."""
@@ -217,7 +223,7 @@ class TestPdfExtraction:
             "type": "input_file", "filename": "broken.pdf",
             "file_data": f"data:application/pdf;base64,{bad}",
         })
-        assert "[document: broken.pdf omitted" in blocks[0]["text"]
+        assert "[document: broken.pdf omitted" in blocks[0]["fallback"]
 
     def test_pdf_extracted_when_available(self, monkeypatch):
         import kiro.multimodal as mm
@@ -227,8 +233,8 @@ class TestPdfExtraction:
             "type": "input_file", "filename": "r.pdf",
             "file_data": f"data:application/pdf;base64,{HELLO_B64}",
         })
-        assert "[document: r.pdf]" in blocks[0]["text"]
-        assert "EXTRACTED PDF TEXT" in blocks[0]["text"]
+        assert "[document: r.pdf]" in blocks[0]["fallback"]
+        assert "EXTRACTED PDF TEXT" in blocks[0]["fallback"]
 
     def test_pdf_placeholder_when_extraction_returns_none(self, monkeypatch):
         import kiro.multimodal as mm
@@ -238,7 +244,7 @@ class TestPdfExtraction:
             "type": "input_file", "filename": "r.pdf",
             "file_data": f"data:application/pdf;base64,{HELLO_B64}",
         })
-        assert "[document: r.pdf omitted" in blocks[0]["text"]
+        assert "[document: r.pdf omitted" in blocks[0]["fallback"]
 
 
 # ---------------------------------------------------------------------------

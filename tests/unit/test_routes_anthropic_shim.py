@@ -8,6 +8,7 @@ import asyncio
 import json
 
 import pytest
+from kiro.acp_client import ACPClient
 
 
 # ---------------------------------------------------------------------------
@@ -764,8 +765,14 @@ class TestAnthropicShimMultimodal:
         resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
         assert resp.status_code == 200
         content = rec.complete_kwargs[0]["messages"][-1].content
-        assert isinstance(content, str)
-        assert "[document: spec.md]" in content and "# Spec" in content
+        doc = next(b for b in content if b.get("type") == "document")
+        assert "[document: spec.md]" in doc["fallback"] and "# Spec" in doc["fallback"]
+        # v1/v2 rendering (no embeddedContext) keeps the text reduction.
+        blocks = ACPClient._build_prompt_blocks(
+            rec.complete_kwargs[0]["messages"], False
+        )
+        assert "[document: spec.md]" in blocks[0]["text"]
+        assert "# Spec" in blocks[0]["text"]
 
     def test_messages_binary_document_placeholder(self, sync_client, anthropic_headers):
         rec = _RecordingShim()
@@ -780,7 +787,16 @@ class TestAnthropicShimMultimodal:
         }
         resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
         assert resp.status_code == 200
-        assert "[document: scan.pdf omitted" in rec.complete_kwargs[0]["messages"][-1].content
+        content = rec.complete_kwargs[0]["messages"][-1].content
+        doc = next(b for b in content if b.get("type") == "document")
+        assert "[document: scan.pdf omitted" in doc["fallback"]
+        # A binary document with no extractable text still travels intact on v3.
+        blocks = ACPClient._build_prompt_blocks(
+            rec.complete_kwargs[0]["messages"], True
+        )
+        resource = next(b for b in blocks if b["type"] == "resource")["resource"]
+        assert resource["blob"] == "QUJD"
+        assert resource["mimeType"] == "application/pdf"
 
 
 # ---------------------------------------------------------------------------
@@ -916,6 +932,29 @@ class TestAnthropicShimErrorMapping:
         resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
         assert resp.status_code == 502
         assert resp.json()["error"]["type"] == "api_error"
+
+    # -- v3 auth bridge failures (issue #52) -------------------------------
+    # kiro-cli itself not being authenticated must surface as a native 401
+    # authentication_error in BOTH modes, matching the OpenAI shim.
+
+    def test_non_stream_auth_failure_returns_401(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_error_shim_complete(
+            ACPError(-32000, "Auth refresh callback failed: not supported")
+        )
+        resp = sync_client.post("/v1/messages", json=self._MSG, headers=anthropic_headers)
+        assert resp.status_code == 401
+        body = resp.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "authentication_error"
+
+    def test_stream_auth_failure_error_type(self, sync_client, anthropic_headers):
+        sync_client.app.state.shim_service = _anthropic_error_shim_stream(
+            {"type": "error", "message": "Auth refresh callback failed", "code": -32000}
+        )
+        payload = {**self._MSG, "stream": True}
+        resp = sync_client.post("/v1/messages", json=payload, headers=anthropic_headers)
+        assert resp.status_code == 200  # SSE body already started
+        assert '"type": "authentication_error"' in resp.text
 
     def test_stream_rate_limit_error_type(self, sync_client, anthropic_headers):
         sync_client.app.state.shim_service = _anthropic_error_shim_stream(

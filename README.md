@@ -242,9 +242,17 @@ SSE_KEEPALIVE_INTERVAL=15        # Seconds between SSE keepalives while a stream
 KIRO_ACP_MODE=
 # Flags passed to `kiro-cli acp` at launch (all optional). The engine is
 # pinned explicitly (default v2) so a future change to kiro-cli's default
-# engine can't silently alter behaviour. v3 needs host-mediated auth the
-# gateway does not implement (generation fails) — keep v2.
+# engine can't silently alter behaviour. v3 is supported but needs the auth
+# bridge below (see COMPLIANCE.md) — keep v2 unless you want v3's features.
 KIRO_ACP_ENGINE=v2               # v1 | v2 | v3
+# v3 ONLY: `kiro-cli acp --agent-engine v3` launches its agent server with a
+# hardcoded --auth=acp-callback, so the server asks the gateway for an access
+# token. true (default) = relay a short-lived token obtained from kiro-cli
+# itself (`kiro-cli chat _ get-kas-token`); the refresh token is never read and
+# nothing is stored. false = decline the callback, so v3 fails closed with a
+# 401 instead of the gateway handling a credential. Inert on v1/v2, where the
+# callback is never sent. See the "Scoped exception" section in COMPLIANCE.md.
+ACP_AUTH_BRIDGE=true
 KIRO_ACP_AGENT=                  # --agent: (custom) agent config for the first session
 KIRO_ACP_MODEL=                  # --model: initial session model (per-request model still wins)
 KIRO_ACP_EFFORT=                 # --effort: low | medium | high | xhigh | max
@@ -465,6 +473,7 @@ streaming and non-streaming paths.
 | Rate limit / throttle / quota / `429` | `429` | `rate_limit_error` | `rate_limit_error` |
 | Overloaded / unavailable / capacity | `503` | `server_error` | `overloaded_error` |
 | Timeout / deadline exceeded | `504` | `server_error` | `api_error` |
+| kiro-cli itself not authenticated (v3 auth bridge) | `401` | `authentication_error` | `authentication_error` |
 | Any other failure (default) | `502` | `server_error` | `api_error` |
 
 - **Non-streaming.** The response status code is the mapped code and the body

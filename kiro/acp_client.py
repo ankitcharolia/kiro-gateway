@@ -51,7 +51,7 @@ import os
 import re as _re
 import uuid
 from asyncio import Queue
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 from loguru import logger
 
@@ -62,6 +62,13 @@ from kiro.acp_models import (
     GatewayCapabilities,
 )
 from kiro.config import ACP_STDIO_MAX_BYTES, settings
+from kiro.kiro_auth import (
+    AUTH_CALLBACK_ERROR_CODE,
+    AUTH_CALLBACK_METHOD,
+    KiroAuthError,
+    KiroAuthResolver,
+    build_resolver,
+)
 from kiro.output_limits import StreamLimiter
 from kiro.tool_permissions import (
     DECISION_ALLOW,
@@ -80,6 +87,36 @@ _STOP_REASON_MAP: dict[str, str] = {
     "refusal": "stop",
     "cancelled": "stop",
 }
+
+#: Session-scope ``kiro-cli acp`` flags each engine refuses outright, keyed by
+#: engine string. kiro-cli does not ignore an unsupported flag — it exits with
+#: ``error: the following arguments are not supported with --agent-engine=v3``
+#: before writing any JSON-RPC, so passing one breaks every request. Verified
+#: against a live kiro-cli 2.19.x probe; v3 replaces all of these with the
+#: ``permissions.yaml`` policy engine and per-session ACP methods. v1/v2 accept
+#: them, so their tuples stay empty and their argv is byte-identical to before.
+ENGINE_UNSUPPORTED_SPAWN_FLAGS: dict[str, tuple[str, ...]] = {
+    "v3": ("--agent", "--model", "--effort", "--trust-all-tools", "--trust-tools"),
+}
+
+#: Engines that ignore EOF on stdin and only exit when signalled. Verified
+#: against a live kiro-cli 2.19.x probe: a v3 ``acp`` process stayed alive
+#: indefinitely after stdin was closed, while v1/v2 exit promptly. Listing the
+#: engine here skips straight to SIGTERM so shutdown does not burn
+#: ``_STOP_STDIN_TIMEOUT`` on a stage that cannot succeed.
+ENGINES_IGNORING_STDIN_EOF: frozenset[str] = frozenset({"v3"})
+
+#: Bounded per-stage waits for the stdin-close → SIGTERM → SIGKILL shutdown
+#: escalation in :meth:`ACPClient.stop`. The stdin stage keeps the historical
+#: 5s budget for v1/v2 (which exit there); the signal stages are short because
+#: a process that ignored SIGTERM is not going to flush anything useful.
+_STOP_STDIN_TIMEOUT = 5.0
+_STOP_TERM_TIMEOUT = 3.0
+_STOP_KILL_TIMEOUT = 2.0
+
+#: Bound on the best-effort ``kiro-cli --version`` probe used when the engine
+#: reports no ``agentInfo`` (v3). Informational only, so it stays short.
+_VERSION_PROBE_TIMEOUT = 5.0
 
 
 def format_plan_text(entries: list, description: str = "") -> str:
@@ -404,6 +441,7 @@ class ACPClient:
         mcp_servers: Optional[list[dict]] = None,
         mcp_init_timeout: int = 30,
         permission_policy: Optional[ToolPermissionPolicy] = None,
+        auth_resolver: Optional[KiroAuthResolver] = None,
     ):
         self._command = command
         self._trust_tools = trust_tools
@@ -435,6 +473,19 @@ class ACPClient:
         self._initial_model = (initial_model or "").strip() or None
         self._effort = (effort or "").strip() or None
         self._engine = (engine or "v2").strip() or "v2"
+        # v3 agent engine only: the agent server is launched with a hardcoded
+        # --auth=acp-callback and asks the gateway for an access token
+        # (_kiro/auth/getAccessToken, issue #52). The resolver relays one from
+        # kiro-cli itself; it is None on v1/v2 (callback never sent) and when
+        # ACP_AUTH_BRIDGE is disabled, in which case the callback is declined.
+        if auth_resolver is None:
+            auth_resolver = build_resolver(
+                self._command, self._engine, settings.ACP_AUTH_BRIDGE
+            )
+        self._auth_resolver = auth_resolver
+        # Negotiated agentCapabilities.promptCapabilities from initialize. Empty
+        # until the handshake completes, so every capability defaults to off.
+        self._prompt_capabilities: dict = {}
         self._extra_args = list(extra_args or [])
         # Default MCP servers registered on every session/new (issue: MCP never
         # registered). kiro-cli executes these itself (mcpCapabilities.http) —
@@ -463,6 +514,18 @@ class ACPClient:
         # survive the teardown of a disconnected streaming generator and can
         # be cleaned up on stop().
         self._cancel_tasks: set[asyncio.Task] = set()
+        # Agent -> gateway request handlers, scheduled off the read loop so a
+        # handler that shells out (the v3 _kiro/auth/getAccessToken callback runs
+        # `kiro-cli chat _ get-kas-token`) cannot block stdout demultiplexing.
+        # A strong reference is retained because asyncio only weakly references
+        # scheduled tasks: without this set the event loop may garbage-collect an
+        # in-flight handler mid-await, so the agent would wait forever for a
+        # reply that is never written.
+        self._agent_request_tasks: set[asyncio.Task] = set()
+        # Agent identity from initialize. The v3 engine reports no agentInfo, so
+        # these fall back to the binary's own --version (see _probe_cli_version).
+        self._agent_name: str = "kiro-cli"
+        self._agent_version: str | None = None
         self._write_lock = asyncio.Lock()
         self._initialized = False
         # Kept for backward-compatibility with older tests/callers.
@@ -499,26 +562,95 @@ class ACPClient:
 
         Deterministic order: base command, an explicit ``--agent-engine`` pin,
         then the optional ``--agent`` / ``--model`` / ``--effort`` flags (only
-        when set), then any raw ``extra_args`` appended verbatim. With nothing
-        configured this yields ``[command, "acp", "--agent-engine", "v2"]`` — the
-        same process as before plus an explicit engine pin (issue #53).
+        when set *and* supported by the selected engine), then any raw
+        ``extra_args`` appended verbatim. With nothing configured this yields
+        ``[command, "acp", "--agent-engine", "v2"]`` — the same process as before
+        plus an explicit engine pin (issue #53).
+
+        Session-scope flags are engine-gated because ``kiro-cli acp`` **hard
+        rejects** them on the v3 engine rather than ignoring them: verified
+        against a live kiro-cli 2.19.x probe, ``--agent``, ``--model``,
+        ``--effort``, ``--trust-all-tools`` and ``--trust-tools`` each make the
+        process exit immediately with ``error: the following arguments are not
+        supported with --agent-engine=v3``. Forwarding an operator's
+        ``KIRO_ACP_AGENT``/``KIRO_ACP_MODEL``/``KIRO_ACP_EFFORT`` to a v3 session
+        would therefore break *every* request instead of degrading, so the
+        unsupported flags are dropped with a warning and the per-request
+        ``session/set_model`` path continues to select the model.
 
         Returns:
             The argv list to spawn.
         """
         argv = [self._command, "acp", "--agent-engine", self._engine]
-        if self._agent:
-            argv += ["--agent", self._agent]
-        if self._initial_model:
-            argv += ["--model", self._initial_model]
-        if self._effort:
-            argv += ["--effort", self._effort]
+        spawn_flags = (
+            ("--agent", self._agent),
+            ("--model", self._initial_model),
+            ("--effort", self._effort),
+        )
+        dropped: list[str] = []
+        for flag, value in spawn_flags:
+            if not value:
+                continue
+            if flag in ENGINE_UNSUPPORTED_SPAWN_FLAGS.get(self._engine, ()):
+                dropped.append(flag)
+                continue
+            argv += [flag, value]
+        if dropped:
+            logger.warning(
+                f"kiro-cli engine {self._engine} does not accept "
+                f"{', '.join(dropped)} on 'acp'; dropping "
+                f"{'them' if len(dropped) > 1 else 'it'} so the session can "
+                "start (the requested model is still applied per request via "
+                "session/set_model)"
+            )
         argv += self._extra_args
         return argv
+
+    def _warn_restrictive_posture_on_v3(self) -> None:
+        """Warn when a restrictive tool posture cannot be fully guaranteed on v3.
+
+        ``ACP_TRUST_TOOLS`` and :class:`ToolPermissionPolicy` are enforced from
+        ``session/request_permission``, and that is engine-agnostic: verified
+        against a live kiro-cli 2.19.x v3 probe, answering ``reject_once``
+        genuinely blocks the tool (the model reported the command "was rejected,
+        so it didn't run"). So a refusing posture *is* honoured on v3 for every
+        tool kiro-cli asks about.
+
+        What differs on v3 is which tools it asks about. v3 decides that with its
+        own ``permissions.yaml`` policy engine (deny > ask > allow), and a tool
+        that policy already **allows** is executed without ever sending
+        ``session/request_permission`` — so the gateway is never consulted and
+        cannot refuse it. A user-scope ``capability: all -> allow`` rule
+        therefore silently pre-approves everything.
+
+        The gateway cannot close that from here: v3's ``acp`` subcommand rejects
+        ``--trust-all-tools``/``--trust-tools``/``--agent`` (see
+        :data:`ENGINE_UNSUPPORTED_SPAWN_FLAGS`) and ACP exposes no method to push
+        policy, so the only fix is a ``deny`` rule in kiro-cli's own policy —
+        which wins over every ``allow`` regardless of scope. Log it loudly rather
+        than let an operator believe an answer-only deployment is airtight.
+        """
+        if self._engine != "v3":
+            return
+        if self._trust_tools and not self._permission_policy.has_rules:
+            return
+        posture = (
+            "ACP_TRUST_TOOLS=false" if not self._trust_tools
+            else "ACP_TOOL_DENY/ACP_TOOL_ALLOW rules"
+        )
+        logger.warning(
+            f"{posture} is set on the v3 engine: the gateway refuses every tool "
+            "kiro-cli asks about, but v3 skips session/request_permission for "
+            "tools its own permissions.yaml already allows, and those cannot be "
+            "refused from here. For a hard guarantee add a deny rule to "
+            "~/.kiro/settings/permissions.yaml (deny beats allow in every "
+            "scope), or use KIRO_ACP_ENGINE=v2."
+        )
 
     async def start(self) -> None:
         """Spawn ``kiro-cli acp`` and begin reading its stdio."""
         argv = self._build_argv()
+        self._warn_restrictive_posture_on_v3()
         logger.info(f"Spawning ACP subprocess: {' '.join(argv)}")
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -532,7 +664,20 @@ class ACPClient:
         logger.info(f"kiro-cli ACP subprocess started (pid={self._proc.pid})")
 
     async def stop(self) -> None:
-        """Gracefully stop the subprocess and cancel reader tasks."""
+        """Gracefully stop the subprocess and cancel reader tasks.
+
+        Shutdown escalates stdin-close → ``SIGTERM`` → ``SIGKILL``, each with its
+        own bounded wait, because closing stdin is **not** sufficient on every
+        engine: verified against a live kiro-cli 2.19.x probe, a v3 ``acp``
+        process ignores EOF on stdin and stays alive indefinitely (v1/v2 exit
+        promptly). Such engines are listed in
+        :data:`ENGINES_IGNORING_STDIN_EOF` and skip straight to the signal, so
+        shutdown does not stall for a timeout that cannot succeed. Without the
+        ``SIGTERM`` step the old code waited the full timeout and then sent
+        ``SIGKILL`` without reaping, which denied kiro-cli any chance to flush
+        and could leave a zombie behind. Each stage is awaited so the process is
+        reaped before returning.
+        """
         for task in (self._reader_task, self._stderr_task, *self._cancel_tasks):
             if task:
                 task.cancel()
@@ -541,17 +686,73 @@ class ACPClient:
                 except asyncio.CancelledError:
                     pass
         self._cancel_tasks.clear()
+        self._agent_request_tasks.clear()
         if self._proc and self._proc.returncode is None:
+            # Stage 1: EOF on stdin — the cooperative path (v1/v2 exit here).
+            # Skipped for engines known to ignore it, so shutdown is not delayed
+            # by a full timeout that cannot succeed.
+            exited = False
             try:
                 if self._proc.stdin and not self._proc.stdin.is_closing():
                     self._proc.stdin.close()
-                await asyncio.wait_for(self._proc.wait(), timeout=5.0)
-            except (asyncio.TimeoutError, ProcessLookupError, OSError):
-                try:
-                    self._proc.kill()
-                except ProcessLookupError:
-                    pass
+            except (OSError, ProcessLookupError):
+                pass
+            if self._engine in ENGINES_IGNORING_STDIN_EOF:
+                logger.debug(
+                    f"engine {self._engine} ignores stdin EOF; signalling directly"
+                )
+            else:
+                exited = await self._await_exit(_STOP_STDIN_TIMEOUT)
+            if not exited:
+                # Stage 2: SIGTERM — required for v3, which ignores stdin EOF.
+                if not await self._signal_and_wait(
+                    self._proc.terminate, _STOP_TERM_TIMEOUT
+                ):
+                    # Stage 3: SIGKILL — last resort, still reaped below.
+                    logger.warning(
+                        "kiro-cli ignored SIGTERM; sending SIGKILL"
+                    )
+                    await self._signal_and_wait(
+                        self._proc.kill, _STOP_KILL_TIMEOUT
+                    )
         logger.info("kiro-cli ACP subprocess stopped")
+
+    async def _await_exit(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for the subprocess to exit.
+
+        Args:
+            timeout: Seconds to wait.
+
+        Returns:
+            True if the process has exited (or is already gone), else False.
+        """
+        if not self._proc:
+            return True
+        try:
+            await asyncio.wait_for(self._proc.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            return False
+        except (ProcessLookupError, OSError):
+            # Already reaped by the event loop's child watcher.
+            return True
+
+    async def _signal_and_wait(self, signal_fn: Callable[[], None],
+                               timeout: float) -> bool:
+        """Send a termination signal and wait for the process to exit.
+
+        Args:
+            signal_fn: Bound ``terminate``/``kill`` of the subprocess.
+            timeout: Seconds to wait for the exit after signalling.
+
+        Returns:
+            True if the process has exited, else False.
+        """
+        try:
+            signal_fn()
+        except (ProcessLookupError, OSError):
+            return True
+        return await self._await_exit(timeout)
 
     async def initialize(
         self, capabilities: Optional[GatewayCapabilities] = None
@@ -581,13 +782,84 @@ class ACPClient:
         proto = "1"
         if isinstance(result, dict):
             proto = str(result.get("protocolVersion", 1))
-            agent = result.get("agentInfo", {})
+            # v3 omits agentInfo entirely and a malformed agent could send an
+            # explicit null, so neither `result["agentInfo"]` nor the two-arg
+            # `.get` default is safe on its own — normalise to a dict first.
+            agent = result.get("agentInfo")
+            if not isinstance(agent, dict):
+                agent = {}
+            # Retain promptCapabilities so the prompt builder can pick a wire
+            # representation per capability instead of assuming one: v3
+            # advertises embeddedContext=true and reads ACP `resource` blocks,
+            # while v1/v2 advertise false and silently ignore them (issue #58).
+            caps = result.get("agentCapabilities")
+            if isinstance(caps, dict):
+                prompt_caps = caps.get("promptCapabilities")
+                if isinstance(prompt_caps, dict):
+                    self._prompt_capabilities = prompt_caps
+                    logger.info(f"ACP promptCapabilities: {prompt_caps}")
+            name = agent.get("name") or "kiro-cli"
+            version = agent.get("version")
+            if not version:
+                # The v3 engine reports no agentInfo, so fall back to asking the
+                # binary. Best-effort and cached: a missing version must never
+                # fail startup, it only degrades the log line and the property.
+                version = await self._probe_cli_version()
+            self._agent_name = name
+            self._agent_version = version
             logger.info(
-                f"ACP initialized: agent={agent.get('name', 'unknown')} "
-                f"v{agent.get('version', '?')} protocol={proto}"
+                f"ACP initialized: agent={name} v{version or '?'} "
+                f"protocol={proto} engine={self._engine}"
             )
         self._initialized = True
         return SessionInitResult(session_id="", protocol_version=proto)
+
+    async def _probe_cli_version(self) -> str | None:
+        """Best-effort ``kiro-cli --version`` lookup for engines without agentInfo.
+
+        Returns:
+            The version string (e.g. ``"2.19.2"``) or None when the binary cannot
+            be queried. Never raises: the version is informational only.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._command, "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=_VERSION_PROBE_TIMEOUT
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            logger.debug(f"kiro-cli version probe failed: {exc}")
+            return None
+        if proc.returncode != 0:
+            return None
+        # Output is "kiro-cli <version>"; take the last whitespace-separated token.
+        text = stdout.decode("utf-8", errors="replace").strip()
+        return text.split()[-1] if text else None
+
+    @property
+    def agent_name(self) -> str:
+        """Agent name from ``initialize``, or a sensible default."""
+        return self._agent_name
+
+    @property
+    def agent_version(self) -> str | None:
+        """Negotiated agent version, or the probed CLI version, else None."""
+        return self._agent_version
+
+    @property
+    def supports_embedded_context(self) -> bool:
+        """Whether the agent accepts embedded document/context resource blocks.
+
+        Driven by the negotiated ``promptCapabilities.embeddedContext`` (issue
+        #58) — never by the engine string — so a future engine that gains or
+        loses the capability is handled without a code change. ``False`` until
+        ``initialize`` has reported otherwise, which keeps the text-reduction
+        path as the safe default.
+        """
+        return bool(self._prompt_capabilities.get("embeddedContext"))
 
     # ------------------------------------------------------------------
     # Sessions
@@ -668,48 +940,111 @@ class ACPClient:
         """
         Cache the model catalogue reported by ``session/new``.
 
-        kiro-cli returns a ``models`` object on every ``session/new``::
+        Two shapes are accepted, because the engines differ:
 
-            {"models": {"currentModelId": "...",
-                        "availableModels": [{"modelId", "name", "description"}, ...]}}
+        * **v1/v2** return a ``models`` object::
 
-        The list is normalised to ``{"id", "name", "description"}`` dicts and
-        cached so ``GET /v1/models`` can advertise the live catalogue instead of
-        a static fallback.
+              {"models": {"currentModelId": "...",
+                          "availableModels": [{"modelId", "name", "description"}, …]}}
+
+        * **v3** returns no ``models`` block at all — the catalogue arrives as a
+          ``configOptions`` select (verified against a live kiro-cli 2.18.0
+          probe)::
+
+              {"configOptions": [{"id": "model", "category": "model",
+                                  "currentValue": "…",
+                                  "options": [{"value", "name", "description"}, …]}]}
+
+        Both are normalised to ``{"id", "name", "description"}`` dicts and cached
+        so ``GET /v1/models`` advertises the live catalogue on either engine.
 
         Args:
             session_result: The raw ``session/new`` result dict.
         """
         models_info = session_result.get("models")
-        if not isinstance(models_info, dict):
+        if isinstance(models_info, dict):
+            current = models_info.get("currentModelId")
+            if isinstance(current, str) and current:
+                self._current_model_id = current
+            normalised = self._normalise_catalogue(models_info.get("availableModels"))
+            if normalised:
+                self._available_models = normalised
+                return
+        self._capture_config_option_catalogue(session_result.get("configOptions"))
+
+    def _capture_config_option_catalogue(self, config_options: Any) -> None:
+        """
+        Cache the model/mode catalogues carried by a v3 ``configOptions`` array.
+
+        Used both for ``session/new`` and for the ``config_option_update``
+        notification, which pushes a **replacement** array mid-session.
+
+        Args:
+            config_options: The raw ``configOptions`` value (ignored when it is
+                not a list, so v1/v2 results are unaffected).
+        """
+        if not isinstance(config_options, list):
             return
-        current = models_info.get("currentModelId")
-        if isinstance(current, str) and current:
-            self._current_model_id = current
-        available = models_info.get("availableModels")
-        if not isinstance(available, list):
-            return
+        for option in config_options:
+            if not isinstance(option, dict):
+                continue
+            option_id = str(option.get("id") or option.get("category") or "")
+            entries = self._normalise_catalogue(option.get("options"))
+            current = option.get("currentValue")
+            if option_id == "model":
+                if isinstance(current, str) and current:
+                    self._current_model_id = current
+                if entries:
+                    self._available_models = entries
+            elif option_id == "mode":
+                if isinstance(current, str) and current:
+                    self._current_mode_id = current
+                if entries:
+                    self._available_modes = entries
+
+    @staticmethod
+    def _normalise_catalogue(entries: Any) -> list[dict]:
+        """
+        Normalise a model/mode list to ``{"id", "name", "description"}`` dicts.
+
+        Accepts every id spelling the engines use: ``modelId`` (v2 models),
+        ``value`` (v3 configOptions options) and ``id`` (modes).
+
+        Args:
+            entries: The raw list of catalogue entries.
+
+        Returns:
+            The normalised entries, or ``[]`` when there is nothing usable.
+        """
+        if not isinstance(entries, list):
+            return []
         normalised: list[dict] = []
-        for entry in available:
+        for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            model_id = entry.get("modelId")
-            if not model_id:
+            entry_id = entry.get("modelId") or entry.get("value") or entry.get("id")
+            if not entry_id:
                 continue
             normalised.append({
-                "id": str(model_id),
-                "name": str(entry.get("name") or model_id),
+                "id": str(entry_id),
+                "name": str(entry.get("name") or entry_id),
                 "description": str(entry.get("description") or ""),
             })
-        if normalised:
-            self._available_models = normalised
+        return normalised
 
     async def set_model(self, session_id: str, model_id: str) -> None:
         """
-        Select the model for an existing session via ``session/set_model``.
+        Select the model for an existing session.
 
-        kiro-cli accepts this request silently (it does not validate the id),
-        so an unknown model simply leaves the session on its default model.
+        The verb depends on the agent engine: v1/v2 use ``session/set_model``,
+        while the **v3 agent server implements no ``session/set_model``** and
+        exposes the model as a *session config option* instead — verified against
+        a live kiro-cli 2.18.0 probe (``session/new`` returns no ``models`` block,
+        only ``configOptions`` with an ``id: "model"`` select) and matching
+        first-party usage in ``kirodotdev/KiroCrew``. Same effect, different verb.
+
+        kiro-cli accepts the request silently (it does not validate the id), so
+        an unknown model simply leaves the session on its default model.
         Failures are logged and swallowed so a model-selection problem never
         breaks the completion itself.
 
@@ -718,6 +1053,11 @@ class ACPClient:
             model_id: The model id requested by the caller (e.g.
                 ``claude-sonnet-4.6``).
         """
+        if not self._is_served("model", model_id, self._available_models):
+            return
+        if self._engine == "v3":
+            await self.set_config_option(session_id, "model", model_id)
+            return
         try:
             await self._call(
                 "session/set_model",
@@ -728,6 +1068,88 @@ class ACPClient:
             logger.warning(
                 f"session/set_model failed for '{model_id}': {exc}; "
                 "session will use its default model"
+            )
+
+    def _is_served(self, kind: str, value: str, catalogue: list[dict]) -> bool:
+        """Whether a model/mode id is one kiro-cli actually serves.
+
+        An unserved id must not be put on the wire. The old assumption — that
+        kiro-cli silently keeps the session default for an unknown id — does not
+        hold: a live kiro-cli 2.18.0 probe with an id this account is not served
+        (the widely hardcoded ``claude-sonnet-4.6``) hung the turn for ~4 minutes
+        and then failed, as a ``504`` on v2 and as a misleading "Access denied.
+        Please check your authentication." on v3.
+
+        So when the live catalogue is known and the id is absent from it, the
+        selection is skipped and the session keeps the model ``session/new``
+        assigned. This matches what ``MODEL_VALIDATION=warn`` already reports
+        ("falling back to the session default") and mirrors first-party behaviour
+        in ``kirodotdev/KiroCrew`` ("this path never puts an unserved model on the
+        wire"). Harnesses that hardcode a foreign id keep working, and
+        ``MODEL_ALIASES`` can map one onto a served model.
+
+        Two deliberate escape hatches:
+
+        * the check is skipped while the catalogue is unknown (cold client), so a
+          selection is never withheld on a guess;
+        * ``MODEL_VALIDATION=off`` restores the legacy forward-everything
+          behaviour for operators who need to force an id.
+
+        Args:
+            kind: ``"model"`` or ``"mode"``, for logging.
+            value: The requested id.
+            catalogue: The cached catalogue to check against.
+
+        Returns:
+            ``True`` when the value may be sent.
+        """
+        if not catalogue:
+            return True
+        if str(getattr(settings, "MODEL_VALIDATION", "warn")).lower() == "off":
+            return True
+        served = {entry.get("id") for entry in catalogue}
+        if value in served:
+            return True
+        logger.warning(
+            f"{kind} '{value}' is not in kiro-cli's live catalogue "
+            f"({', '.join(sorted(str(s) for s in served))}); keeping the session "
+            f"default instead of sending an unserved {kind} "
+            f"(set MODEL_VALIDATION=off to force it)"
+        )
+        return False
+
+    async def set_config_option(
+        self, session_id: str, config_id: str, value: str
+    ) -> None:
+        """
+        Set a v3 session config option via ``session/set_config_option``.
+
+        The v3 agent server exposes the model, mode and thinking effort as
+        ``configOptions`` selects rather than dedicated ACP verbs. Failures are
+        logged and swallowed, mirroring :meth:`set_model` / :meth:`set_mode`: a
+        configuration problem must never break the completion itself.
+
+        Args:
+            session_id: The ACP session to configure.
+            config_id: The option id (``model`` / ``mode`` / ``effort``).
+            value: The option value to select.
+        """
+        try:
+            await self._call(
+                "session/set_config_option",
+                {"sessionId": session_id, "configId": config_id, "value": value},
+            )
+            if config_id == "model":
+                self._current_model_id = value
+            elif config_id == "mode":
+                self._current_mode_id = value
+            logger.info(
+                f"ACP session {session_id} config '{config_id}' set to '{value}'"
+            )
+        except ACPError as exc:
+            logger.warning(
+                f"session/set_config_option {config_id}='{value}' failed: {exc}; "
+                "session will use its default"
             )
 
     @property
@@ -744,8 +1166,10 @@ class ACPClient:
             {"modes": {"currentModeId": "kiro_default",
                        "availableModes": [{"id", "name", "description"}, ...]}}
 
-        Each mode is an agent persona (``kiro_default``, ``code``,
-        ``kiro_planner``, ``kiro_guide``, …). The list is normalised to
+        Each mode is an agent persona. The ids are **engine-specific**:
+        v1/v2 use ``kiro_default``/``code``/``kiro_planner``/``kiro_guide``,
+        while v3 uses ``vibe``/``spec``/``plan``/``autonomous``/… (verified
+        against a live kiro-cli 2.18.0 probe). The list is normalised to
         ``{"id", "name", "description"}`` dicts and cached alongside the current
         mode id so the gateway can advertise/select the active agent.
 
@@ -758,21 +1182,7 @@ class ACPClient:
         current = modes_info.get("currentModeId")
         if isinstance(current, str) and current:
             self._current_mode_id = current
-        available = modes_info.get("availableModes")
-        if not isinstance(available, list):
-            return
-        normalised: list[dict] = []
-        for entry in available:
-            if not isinstance(entry, dict):
-                continue
-            mode_id = entry.get("id")
-            if not mode_id:
-                continue
-            normalised.append({
-                "id": str(mode_id),
-                "name": str(entry.get("name") or mode_id),
-                "description": str(entry.get("description") or ""),
-            })
+        normalised = self._normalise_catalogue(modes_info.get("availableModes"))
         if normalised:
             self._available_modes = normalised
 
@@ -790,6 +1200,8 @@ class ACPClient:
             session_id: The ACP session to configure.
             mode_id: The mode/agent id requested (e.g. ``kiro_planner``).
         """
+        if not self._is_served("mode", mode_id, self._available_modes):
+            return
         try:
             await self._call(
                 "session/set_mode",
@@ -911,7 +1323,9 @@ class ACPClient:
         if not session_id:
             raise ACPError(-32602, "prompt_stream requires a session_id")
 
-        prompt_blocks = self._build_prompt_blocks(params.messages)
+        prompt_blocks = self._build_prompt_blocks(
+            params.messages, self.supports_embedded_context
+        )
         queue: Queue = Queue()
         self._event_queues[session_id] = queue
 
@@ -1201,7 +1615,7 @@ class ACPClient:
         return meta
 
     @staticmethod
-    def _build_prompt_blocks(messages: list) -> list[dict]:
+    def _build_prompt_blocks(messages: list, embed_documents: bool = False) -> list[dict]:
         """
         Render a conversation into ACP ``session/prompt`` content blocks.
 
@@ -1232,8 +1646,23 @@ class ACPClient:
         content — are emitted as their own ACP image content blocks **after** the
         text transcript, with an inline ``[image]`` marker left in the turn's
         text to mark where each appeared. The result is a mixed prompt array
-        ``[{text transcript}, {image}, …]`` (documents/audio are already reduced
-        to text by the shims; only images travel as binary blocks).
+        ``[{text transcript}, {image}, …]``.
+
+        **Documents (issue #58).** Representation follows the negotiated
+        ``promptCapabilities.embeddedContext``: when *embed_documents* is true
+        (the v3 agent engine) each document is emitted as an ACP ``resource``
+        block with an inline ``[document]`` marker, so the file travels intact;
+        otherwise it is reduced to its text fallback inline, as on v1/v2 — which
+        accept a resource block but silently ignore it.
+
+        Args:
+            messages: The conversation to serialise.
+            embed_documents: Whether the agent accepts embedded resource blocks
+                (``ACPClient.supports_embedded_context``). Defaults to ``False``,
+                the safe text-reduction behaviour.
+
+        Returns:
+            The ACP ``session/prompt`` content blocks.
         """
         label = {
             "user": "User",
@@ -1246,13 +1675,14 @@ class ACPClient:
         for m in messages:
             role = getattr(m, "role", None) if not isinstance(m, dict) else m.get("role")
             content = getattr(m, "content", None) if not isinstance(m, dict) else m.get("content")
-            text, images = ACPClient._split_content(content)
-            # Leave an inline marker per image so the (role-less) transcript
-            # still references where each attachment occurred, then carry the
-            # image as a real ACP block appended after the text.
-            for img in images:
-                text = (text + "\n[image]") if text else "[image]"
-                image_blocks.append(img)
+            text, attachments = ACPClient._split_content(content, embed_documents)
+            # Leave an inline marker per attachment so the (role-less) transcript
+            # still references where each occurred, then carry it as a real ACP
+            # block appended after the text.
+            for attachment in attachments:
+                marker = "[image]" if attachment.get("type") == "image" else "[document]"
+                text = (text + f"\n{marker}") if text else marker
+                image_blocks.append(attachment)
             parts.append((role or "user", text))
 
         blocks: list[dict] = []
@@ -1271,19 +1701,30 @@ class ACPClient:
         return blocks or [{"type": "text", "text": ""}]
 
     @staticmethod
-    def _split_content(content: Any) -> tuple[str, list[dict]]:
-        """Split message content into (flattened text, image content blocks).
+    def _split_content(content: Any, embed_documents: bool = False) -> tuple[str, list[dict]]:
+        """Split message content into (flattened text, attachment blocks).
 
-        Text and any non-image parts are flattened to a single string (as
-        :meth:`_flatten_content`), while ``image`` parts are extracted as ACP
-        image wire blocks (``{"type": "image", "mimeType", "data"}``) so the
-        prompt builder can forward them. Plain-string content yields no images.
+        Text parts are flattened to a single string, while ``image`` parts become
+        ACP image wire blocks (``{"type": "image", "mimeType", "data"}``).
+
+        ``document`` parts (issue #58) are represented per the negotiated
+        capability:
+
+        * ``embed_documents`` **True** (``promptCapabilities.embeddedContext``) →
+          an ACP embedded-resource block
+          ``{"type": "resource", "resource": {"uri", "mimeType", "text"|"blob"}}``
+          — the ``text`` variant when the document's text is known, else the
+          base64 ``blob`` so the agent parses the original bytes itself (a live
+          kiro-cli 2.18.0 probe read a PDF sent this way).
+        * **False** → the block's ``fallback`` text is appended to the flattened
+          text, exactly as before this feature (v1/v2 ignore resource blocks).
 
         Args:
             content: A message's content (``str`` or list of normalised blocks).
+            embed_documents: Whether the agent accepts embedded resources.
 
         Returns:
-            A ``(text, images)`` tuple.
+            A ``(text, blocks)`` tuple.
         """
         if content is None:
             return "", []
@@ -1300,12 +1741,50 @@ class ACPClient:
                             "mimeType": part.get("mimeType") or part.get("mime_type") or "image/png",
                             "data": part["data"],
                         })
+                    elif part.get("type") == "document":
+                        resource = ACPClient._document_resource_block(part) \
+                            if embed_documents else None
+                        if resource is not None:
+                            images.append(resource)
+                        else:
+                            chunks.append(str(part.get("fallback") or ""))
                     else:
                         chunks.append(str(part.get("text") or part.get("content") or ""))
                 else:
                     chunks.append(str(part))
             return "\n".join(c for c in chunks if c), images
         return str(content), []
+
+    @staticmethod
+    def _document_resource_block(part: dict) -> Optional[dict]:
+        """Build an ACP embedded-resource block for a normalised document part.
+
+        The wire shape is the ACP/MCP ``EmbeddedResource``: a ``resource`` object
+        carrying a required ``uri`` plus either ``text`` or ``blob`` (base64), all
+        verified accepted end-to-end against a live kiro-cli 2.18.0 / KAS 0.38.7
+        probe with both variants and with a synthetic ``attachment:///`` URI.
+
+        Args:
+            part: A normalised ``{"type": "document", …}`` block.
+
+        Returns:
+            The ACP content block, or ``None`` when the part carries neither text
+            nor data (so the caller falls back to text).
+        """
+        name = str(part.get("name") or "attachment").strip() or "attachment"
+        uri = f"attachment:///{name.lstrip('/')}"
+        resource: dict = {"uri": uri}
+        mime = part.get("mimeType") or part.get("mime_type")
+        if mime:
+            resource["mimeType"] = str(mime)
+        text = part.get("text")
+        if isinstance(text, str) and text:
+            resource["text"] = text
+        elif part.get("data"):
+            resource["blob"] = str(part["data"])
+        else:
+            return None
+        return {"type": "resource", "resource": resource}
 
     @staticmethod
     def _flatten_content(content: Any) -> str:
@@ -1414,8 +1893,13 @@ class ACPClient:
         has_id = msg.get("id") is not None
 
         if method and has_id:
-            # Agent -> gateway request (e.g. session/request_permission).
-            asyncio.create_task(self._handle_agent_request(msg))
+            # Agent -> gateway request (e.g. session/request_permission, or the
+            # v3 auth callback). Scheduled off the read loop so a handler that
+            # shells out never blocks stdout demux, with a strong reference held
+            # until completion so the task cannot be garbage-collected mid-flight.
+            task = asyncio.create_task(self._handle_agent_request(msg))
+            self._agent_request_tasks.add(task)
+            task.add_done_callback(self._agent_request_tasks.discard)
             return
         if method:
             # Notification (no id) such as session/update.
@@ -1678,12 +2162,22 @@ class ACPClient:
             return
 
         session_id = params.get("sessionId", "")
+        update = params.get("update", {}) if isinstance(params, dict) else {}
+        if isinstance(update, dict) and update.get("sessionUpdate") == "config_option_update":
+            # v3 pushes a REPLACEMENT configOptions array when the model/mode/
+            # effort catalogue changes; keep the cached catalogue (used by
+            # GET /v1/models) in step. Handled before the queue lookup because it
+            # can arrive outside an active prompt. Not surfaced as a client event.
+            self._capture_config_option_catalogue(update.get("configOptions"))
+            return
+
         queue = self._event_queues.get(session_id)
         if not queue:
             return
 
         update = params.get("update", {})
         kind = update.get("sessionUpdate")
+
 
         # kiro-cli may attach token usage to an update or its params/_meta
         # (this is the same data its interactive /usage view shows). Capture it
@@ -1811,9 +2305,12 @@ class ACPClient:
     def _extract_tool_output(raw_output: Any) -> str:
         """Extract printable text from a tool call's ``rawOutput``.
 
-        kiro-cli returns ``rawOutput`` as ``{"items": [{"Text": "..."}, {"Json": …}]}``.
-        This concatenates the text items (and JSON-encodes structured items) into
-        a plain string for the activity/reasoning view.
+        The two engines report output differently (both verified live):
+
+        * **v1/v2** — ``{"items": [{"Text": "..."}, {"Json": …}]}``
+        * **v3** — ``{"output": "PROBE52_TOOL_MARKER\\n", …}`` (kiro-cli 2.18.0)
+
+        Both are reduced to a plain string for the activity/reasoning view.
 
         Args:
             raw_output: The ``rawOutput`` object from a ``tool_call_update``.
@@ -1825,6 +2322,13 @@ class ACPClient:
             return ""
         items = raw_output.get("items")
         if not isinstance(items, list):
+            # v3 shape: a flat string under "output" (or "stdout" on some tools).
+            for key in ("output", "stdout"):
+                value = raw_output.get(key)
+                if isinstance(value, str) and value:
+                    return value[:8000]
+                if value is not None and not isinstance(value, (dict, list)):
+                    return str(value)[:8000]
             return ""
         parts: list[str] = []
         for item in items:
@@ -1855,8 +2359,36 @@ class ACPClient:
             await self._respond(req_id, {"outcome": {"outcome": "selected", "optionId": option_id}})
             return
 
+        if method == AUTH_CALLBACK_METHOD:
+            # v3 only (issue #52): the agent server keeps no credential and asks
+            # the gateway for a short-lived access token, which the resolver
+            # obtains from kiro-cli itself. Connection-level request — it carries
+            # no sessionId, so it is answered directly. Declined when the bridge
+            # is disabled or the engine is not v3, which fails the turn with a
+            # clear auth error instead of relaying anything.
+            if self._auth_resolver is None:
+                await self._respond_error(
+                    req_id,
+                    AUTH_CALLBACK_ERROR_CODE,
+                    "kiro-cli authentication bridge is disabled; set "
+                    "ACP_AUTH_BRIDGE=true or use KIRO_ACP_ENGINE=v2",
+                )
+                return
+            try:
+                result = await self._auth_resolver.resolve()
+            except KiroAuthError as exc:
+                # The resolver guarantees a token-free message, so it is safe to
+                # log and to hand back to the agent.
+                logger.error(f"v3 auth callback failed: {exc}")
+                await self._respond_error(req_id, AUTH_CALLBACK_ERROR_CODE, str(exc))
+                return
+            await self._respond(req_id, result)
+            return
+
         # We advertise no fs/terminal capabilities, so kiro-cli should never
-        # ask us to perform them. If it does, decline cleanly.
+        # ask us to perform them. If it does, decline cleanly. This also covers
+        # v3's richer client-callback surface (_kiro/fs/*, hooks, checkpoints):
+        # declining keeps the gateway's least-privilege posture.
         await self._respond_error(req_id, -32601, f"{method} not supported by gateway")
 
     def _select_permission_option(self, options: list[dict],
@@ -1892,12 +2424,42 @@ class ACPClient:
         return select_option_id(options, approve)
 
     async def _respond(self, req_id: Any, result: Any) -> None:
-        await self._write_line(JsonRpcResponse(id=req_id, result=result).model_dump_json())
+        """Send a JSON-RPC success response to an agent request.
+
+        JSON-RPC 2.0 requires that a response carry **either** ``result`` or
+        ``error``, never both, so the unused ``error`` member is excluded. The v3
+        agent server reads ``result`` first and crashes on a ``null`` one
+        (``Cannot read properties of null``), so this is load-bearing, not
+        cosmetic.
+
+        Args:
+            req_id: The id of the request being answered.
+            result: The result payload (nested ``None`` values are preserved).
+        """
+        await self._write_line(
+            JsonRpcResponse(id=req_id, result=result).model_dump_json(
+                exclude={"error"}
+            )
+        )
 
     async def _respond_error(self, req_id: Any, code: int, message: str) -> None:
+        """Send a JSON-RPC error response to an agent request.
+
+        The ``result`` member is excluded for the same reason as in
+        :meth:`_respond`: a response carrying ``result: null`` next to ``error``
+        makes the v3 agent server take the null branch and report an opaque
+        ``-32603 Internal error`` instead of the message sent here.
+
+        Args:
+            req_id: The id of the request being answered.
+            code: The JSON-RPC error code.
+            message: A human-readable, credential-free error message.
+        """
         from kiro.acp_models import JsonRpcError
         await self._write_line(
-            JsonRpcResponse(id=req_id, error=JsonRpcError(code=code, message=message)).model_dump_json()
+            JsonRpcResponse(
+                id=req_id, error=JsonRpcError(code=code, message=message)
+            ).model_dump_json(exclude={"result"}, exclude_none=True)
         )
 
     # ------------------------------------------------------------------

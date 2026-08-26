@@ -456,12 +456,18 @@ ACP_MODEL: str = os.environ.get("KIRO_ACP_MODEL", "").strip()
 ACP_EFFORT: str = os.environ.get("KIRO_ACP_EFFORT", "").strip()
 # --agent-engine: "v1" | "v2" | "v3". Pinned explicitly to v2 (the current
 # kiro-cli default) so a future flip of the default engine cannot silently
-# change the gateway's behaviour. v3 currently requires host-mediated auth
-# that the gateway does not implement (see issue #52) — accepted syntactically
-# but not usable yet.
+# change the gateway's behaviour. v3 is supported (issue #52) but needs the
+# host-mediated auth bridge below, because `kiro-cli acp --agent-engine v3`
+# launches its agent server with a hardcoded `--auth=acp-callback`.
 _ACP_ENGINE_CHOICES = ("v1", "v2", "v3")
 _acp_engine_raw = os.environ.get("KIRO_ACP_ENGINE", "v2").strip().lower()
 ACP_ENGINE: str = _acp_engine_raw if _acp_engine_raw in _ACP_ENGINE_CHOICES else "v2"
+# Answer the v3 agent server's `_kiro/auth/getAccessToken` callback by relaying a
+# short-lived access token obtained from kiro-cli itself (see kiro/kiro_auth.py
+# and COMPLIANCE.md). Inert on v1/v2, where the callback is never sent, so the
+# gateway stays completely credential-free on the default engine. Set false to
+# make v3 fail closed instead of relaying a token.
+ACP_AUTH_BRIDGE: bool = os.environ.get("ACP_AUTH_BRIDGE", "true").lower() == "true"
 # Escape hatch: extra raw args appended verbatim to the acp argv, parsed with
 # shell-style quoting (e.g. KIRO_ACP_EXTRA_ARGS='--verbose --trust-tools fs_read').
 ACP_EXTRA_ARGS: str = os.environ.get("KIRO_ACP_EXTRA_ARGS", "").strip()
@@ -521,6 +527,7 @@ class _Settings:
     ACP_MODEL: str = field(default_factory=lambda: ACP_MODEL)
     ACP_EFFORT: str = field(default_factory=lambda: ACP_EFFORT)
     ACP_ENGINE: str = field(default_factory=lambda: ACP_ENGINE)
+    ACP_AUTH_BRIDGE: bool = field(default_factory=lambda: ACP_AUTH_BRIDGE)
     ACP_EXTRA_ARGS: str = field(default_factory=lambda: ACP_EXTRA_ARGS)
 
     # Feature flags (default enabled; override via env)
