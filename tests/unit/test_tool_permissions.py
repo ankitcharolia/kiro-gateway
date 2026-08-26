@@ -318,6 +318,33 @@ class TestSelectOptionId:
         assert select_option_id(options, True) == "allow-this-once"
 
 
+class TestV3PermissionOptionShape:
+    """The v3 engine offers different optionIds than v1/v2 — match on `kind`.
+
+    Captured verbatim from a live kiro-cli 2.19.x v3 ``session/request_permission``
+    (title "printf <marker>"). The ids are ``accept``/``reject`` rather than
+    ``allow_once``/``reject_once``, so any id-based matching would silently invert
+    the decision. Answering the ``reject`` id was confirmed to block execution.
+    """
+
+    V3_OPTIONS = [
+        {"optionId": "accept", "kind": "allow_once", "name": "Accept"},
+        {"optionId": "always-accept", "kind": "allow_always", "name": "Always accept"},
+        {"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+        {"optionId": "always-reject", "kind": "reject_always", "name": "Always reject"},
+    ]
+
+    def test_refuse_picks_the_v3_reject_id(self):
+        assert select_option_id(self.V3_OPTIONS, False) == "reject"
+
+    def test_approve_picks_the_v3_accept_id(self):
+        assert select_option_id(self.V3_OPTIONS, True) == "accept"
+
+    def test_refuse_never_selects_an_accept_id(self):
+        """Guards the fail-safe: refusing must never resolve to an allow option."""
+        assert select_option_id(self.V3_OPTIONS, False) not in {"accept", "always-accept"}
+
+
 # ---------------------------------------------------------------------------
 # Integration with ACPClient
 # ---------------------------------------------------------------------------

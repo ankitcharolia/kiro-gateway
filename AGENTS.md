@@ -197,6 +197,46 @@ v1/v2 behaviour is unchanged and every v3 branch is gated on `self._engine`.
 - **Permission option ids differ** (`accept`/`always-accept`/`reject`/
   `always-reject`) but the `kind` values are standard, and `select_option_id`
   matches on `kind` first — so no change was needed.
+- **`ACP_TRUST_TOOLS` is honoured on v3, for every tool kiro-cli asks about.**
+  Enforcement hangs off `session/request_permission`, which is engine-agnostic:
+  verified live through the gateway's own `ACPClient` on v3, `trust_tools=False`
+  produced "The command didn't run — you rejected the tool call" while
+  `trust_tools=True` executed the same command. What differs is *which* tools v3
+  asks about: it decides that with its own `permissions.yaml` policy engine
+  (`deny > ask > allow`, no precedence between scopes), and a tool that policy
+  already **allows** runs without ever sending the request — so the gateway is
+  never consulted and cannot refuse it. A user-scope `capability: all -> allow`
+  therefore pre-approves everything. The gateway cannot close that from here (v3
+  rejects the trust flags, and ACP exposes no method to push policy), so
+  `_warn_restrictive_posture_on_v3` logs a warning instead of letting an operator
+  believe an answer-only deployment is airtight; the only hard fix is a `deny`
+  rule in kiro-cli's own policy, which beats every `allow`. First-party
+  `kirodotdev/KiroCrew` documents the same constraint ("kiro-cli only sends
+  `session/request_permission` for tools it must ask about") and solves it the
+  same way — by never pre-approving what policy would deny.
+- **v3 rejects every session-scope spawn flag.** `--agent`, `--model`,
+  `--effort`, `--trust-all-tools` and `--trust-tools` each make `kiro-cli acp`
+  exit immediately with `error: the following arguments are not supported with
+  --agent-engine=v3`, *before* any JSON-RPC — it does not ignore them. Passing an
+  operator's `KIRO_ACP_AGENT`/`KIRO_ACP_MODEL`/`KIRO_ACP_EFFORT` through would
+  therefore break every request, so `_build_argv` drops them with a warning via
+  `ENGINE_UNSUPPORTED_SPAWN_FLAGS` (v1/v2 argv is byte-identical to before) and
+  the model is still applied per session by `set_model`. Only `--auth-method`
+  and `-v` are additionally accepted on v3.
+- **v3 reports no `agentInfo`.** `initialize` omits the key entirely, so
+  `initialize` normalises a missing/`null` value and falls back to a best-effort
+  `kiro-cli --version` (`_probe_cli_version`, exposed as `agent_name` /
+  `agent_version`). Informational only — it can never fail startup.
+- **v3 ignores EOF on stdin.** Closing stdin does not stop the process (v1/v2
+  exit promptly), so `stop()` escalates stdin-close → `SIGTERM` → `SIGKILL` with
+  a bounded wait per stage and awaits each one so the process is reaped.
+  `ENGINES_IGNORING_STDIN_EOF` skips the stdin stage for v3, which took gateway
+  shutdown from ~5s to ~0s.
+- **Answer agent requests off the read loop.** The auth callback shells out, so
+  `_dispatch` schedules handlers as tasks and keeps a **strong reference** to
+  them (`_agent_request_tasks`) — asyncio only weakly references scheduled tasks,
+  so without it an in-flight handler can be garbage-collected mid-await and the
+  agent waits forever for a reply that is never written.
 - **Decline everything else.** v3 offers `_kiro/fs/read|write|delete`, hooks,
   checkpoints, `_kiro/openExternalUrl`, session list/fork/history. The gateway
   answers **only** the auth callback and `session/request_permission`; keep it
@@ -204,6 +244,56 @@ v1/v2 behaviour is unchanged and every v3 branch is gated on `self._engine`.
 - **v3 auto-loads kiro-cli's own MCP servers** regardless of `mcpServers: []`,
   and kiro-cli sets `KIRO_CONTENT_COLLECTION_ENABLED=true` / telemetry env on the
   agent server. Both are kiro-cli's posture, not the gateway's.
+
+#### Before switching the default to v3
+
+v3 works end-to-end today (`KIRO_ACP_ENGINE=v3` completes `initialize` /
+`session/new` / `session/prompt` and returns generated text), but **`v2` remains
+the default** until the items below are settled. Each was verified against a live
+kiro-cli 2.19.x / KAS 0.48.0 probe. Treat this as the checklist for flipping the
+default — not as a list of things that break a v3 session.
+
+**Open design decisions (not yet implemented — these change the PR's premise):**
+
+1. **`--auth-method cli` may make `ACP_AUTH_BRIDGE` unnecessary.** `kiro-cli acp`
+   accepts `--auth-method cli` on v3 — "Resolve access tokens for the v3 engine
+   from the Kiro CLI credential store", i.e. authentication stays *inside*
+   kiro-cli instead of the agent server calling back to the gateway for a token.
+   That is strictly closer to the compliance model (principle 1: the gateway
+   never handles credentials) and would remove the whole
+   `_kiro/auth/getAccessToken` path, `kiro/kiro_auth.py`, and the token-shaped
+   failure modes. It is **not** wired up: the gateway still spawns v3 with the
+   hardcoded `--auth=acp-callback` posture and answers the callback. Decide
+   between the two before v3 becomes the default, and prefer `--auth-method cli`
+   unless a live probe shows it cannot refresh mid-session.
+2. **v3's informational pushes are declined.** `_kiro/governance/state` and
+   `_kiro/tools/didChange` are agent→client **requests** the gateway answers with
+   `-32601`. Harmless today (the session proceeds), but they are precisely where
+   kiro-cli reports its **feature ceiling** and **tool tags** — e.g.
+   `{isEnterprise, features: {mcpEnabled, webToolsEnabled, autonomousAgents, …},
+   disabledReason}` and `tags: [{source: builtin, tag: read|write|shell|web}]`.
+   Consuming them would let the gateway know which capabilities an account is
+   actually served *before* a turn fails, rather than discovering it from an
+   error. Declining them is a deliberate least-privilege choice, so this is a
+   feature decision, not a bug.
+
+**Behavioural differences an operator must know about:**
+
+3. **Existing `KIRO_ACP_*` spawn config is silently inert on v3.**
+   `KIRO_ACP_AGENT`, `KIRO_ACP_MODEL` and `KIRO_ACP_EFFORT` are dropped (v3
+   rejects the flags outright — see above). Before this fix they made **every**
+   v3 request fail; now they are dropped with a warning. An operator relying on
+   `KIRO_ACP_AGENT` to select a custom agent has **no v3 equivalent** through the
+   gateway, and `KIRO_ACP_MODE` uses different mode ids per engine.
+4. **`ACP_TRUST_TOOLS=false` is not an airtight guarantee on v3.** It is honoured
+   for every tool kiro-cli asks about, but a tool pre-approved by kiro-cli's own
+   `permissions.yaml` never reaches the gateway. A hard answer-only posture needs
+   a `deny` rule in that file (deny beats allow in every scope) — or `v2`. The
+   gateway warns; it cannot enforce.
+5. **`KIRO_ACP_ENGINE=v3` requires a per-account model check.** Sending a model
+   the account is not served hangs the turn ~4 min and then reports a misleading
+   "Access denied" on v3 (`504` on v2). `_is_served` guards both engines; don't
+   set `MODEL_VALIDATION=off` on v3 without knowing the served catalogue.
 
 ### Tool permission policy (`kiro/tool_permissions.py`)
 
@@ -667,7 +757,7 @@ take precedence over `.env`).
 | `MODEL_VALIDATION` | `warn` | How a requested model absent from the live catalogue is handled: `warn` (log + fall back), `strict` (404 native error), `off` (forward silently). Skipped until the catalogue is known (issue #42). |
 | `MODEL_ALIASES` | `` (none) | Comma-separated `alias=target` pairs rewriting a requested model id to a real kiro-cli model before validation/`set_model` (e.g. `gpt-4o=claude-sonnet-4.6`). |
 | `ENFORCE_MAX_TOKENS` | `false` | When `true`, the gateway caps output at `max_tokens` (`finish_reason=length`). `stop` sequences are always enforced when sent. kiro-cli honors neither over ACP (issue #32). |
-| `ACP_TRUST_TOOLS` | `true` | Auto-approve (`true`) or reject (`false`) tool permission requests |
+| `ACP_TRUST_TOOLS` | `true` | Auto-approve (`true`) or reject (`false`) tool permission requests. Honoured on every engine, but on `v3` only for tools kiro-cli actually asks about — its `permissions.yaml` can pre-approve a tool and skip the request entirely (see the v3 section). |
 | `ACP_SURFACE_TOOL_CALLS` | `false` | How the shims present kiro-cli's built-in tool activity: `false` (default) = inline non-executable reasoning text (interleaved, needs `ACP_SURFACE_THINKING`); `true` = executable `tool_calls`/`tool_use`, name-mapped onto the caller's declared tools by `kind` (`map_kiro_tool_call`). ACP-native route always emits a structured `acp_tool_call`. |
 | `ACP_SURFACE_THINKING` | `true` | Surface kiro-cli reasoning in each API's native shape (OpenAI `reasoning_content` / Responses reasoning items; Anthropic `thinking` blocks). Additive — final answer unchanged. `false` emits only the answer. |
 | `KIRO_MCP_SERVERS` | `` (none) | Inline JSON of MCP servers registered on every `session/new` (ACP `mcpServers` array or `mcp.json` object form). kiro-cli runs them itself (`mcpCapabilities.http`). The only external-tool channel over ACP. |

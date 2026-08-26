@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
@@ -29,6 +30,9 @@ _REAL_PROMPT = ACPClient.prompt
 # Ditto for initialize: the capability-capture tests must exercise the real
 # handshake, not the session-scoped mock the ``test_client`` fixture installs.
 _REAL_INITIALIZE = ACPClient.initialize
+# And stop(): the shutdown-escalation tests must drive the real
+# stdin-close -> SIGTERM -> SIGKILL ladder, not the fixture's no-op mock.
+_REAL_STOP = ACPClient.stop
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +635,264 @@ class TestSpawnArgvConstruction:
         """A blank engine falls back to the explicit v2 pin."""
         client = ACPClient(engine="")
         assert client._build_argv()[:4] == ["kiro-cli", "acp", "--agent-engine", "v2"]
+
+    def test_v3_drops_session_scope_flags(self):
+        """v3 rejects --agent/--model/--effort outright, so they are dropped.
+
+        kiro-cli exits with "the following arguments are not supported with
+        --agent-engine=v3" before writing any JSON-RPC, so forwarding them would
+        break every request rather than degrade (verified live on 2.19.x).
+        """
+        client = ACPClient(
+            engine="v3", agent="planner",
+            initial_model="claude-sonnet-4.6", effort="high",
+        )
+        assert client._build_argv() == ["kiro-cli", "acp", "--agent-engine", "v3"]
+
+    def test_v3_still_appends_extra_args(self):
+        """extra_args stay an operator escape hatch even on v3."""
+        client = ACPClient(engine="v3", agent="planner", extra_args=["--verbose"])
+        assert client._build_argv() == [
+            "kiro-cli", "acp", "--agent-engine", "v3", "--verbose",
+        ]
+
+    @pytest.mark.parametrize("engine", ["v1", "v2"])
+    def test_v1_v2_keep_session_scope_flags(self, engine):
+        """v1/v2 accept the flags, so their argv is unchanged by the v3 gate."""
+        client = ACPClient(
+            engine=engine, agent="planner",
+            initial_model="claude-opus-4.8", effort="max",
+        )
+        assert client._build_argv() == [
+            "kiro-cli", "acp", "--agent-engine", engine,
+            "--agent", "planner", "--model", "claude-opus-4.8", "--effort", "max",
+        ]
+
+    def test_v3_drop_is_logged(self, caplog):
+        """Dropping a flag is surfaced, never silent."""
+        from loguru import logger as _logger
+
+        messages: list[str] = []
+        sink_id = _logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+        try:
+            ACPClient(engine="v3", agent="planner")._build_argv()
+        finally:
+            _logger.remove(sink_id)
+        assert any("--agent" in m and "v3" in m for m in messages)
+
+
+class TestV3RestrictivePostureWarning:
+    """A refusing posture on v3 warns that pre-approved tools cannot be refused.
+
+    ACP_TRUST_TOOLS is enforced from session/request_permission and that works on
+    v3 (a live probe confirmed reject_once blocks the tool). But v3 skips the
+    request entirely for tools its own permissions.yaml allows, so the operator
+    must be told the posture is not airtight.
+    """
+
+    def _warnings(self, **kwargs) -> list[str]:
+        from loguru import logger as _logger
+
+        messages: list[str] = []
+        sink_id = _logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+        try:
+            ACPClient(**kwargs)._warn_restrictive_posture_on_v3()
+        finally:
+            _logger.remove(sink_id)
+        return messages
+
+    def test_v3_with_trust_disabled_warns(self):
+        msgs = self._warnings(engine="v3", trust_tools=False)
+        assert any("permissions.yaml" in m for m in msgs)
+
+    def test_v3_with_deny_rules_warns(self):
+        from kiro.tool_permissions import ToolPermissionPolicy
+
+        policy = ToolPermissionPolicy.from_config("", "Bash(rm -rf *)", default_allow=True)
+        msgs = self._warnings(engine="v3", trust_tools=True, permission_policy=policy)
+        assert any("permissions.yaml" in m for m in msgs)
+
+    def test_v3_fully_trusting_does_not_warn(self):
+        from kiro.tool_permissions import ToolPermissionPolicy
+
+        policy = ToolPermissionPolicy.from_config("", "", default_allow=True)
+        assert self._warnings(
+            engine="v3", trust_tools=True, permission_policy=policy
+        ) == []
+
+    @pytest.mark.parametrize("engine", ["v1", "v2"])
+    def test_v1_v2_never_warn(self, engine):
+        """v1/v2 always ask, so the gateway's refusal is authoritative."""
+        assert self._warnings(engine=engine, trust_tools=False) == []
+
+
+class TestShutdownEscalation:
+    """stop() escalates stdin-close -> SIGTERM -> SIGKILL, reaping each stage.
+
+    Closing stdin is not enough on v3: a live probe showed the process ignoring
+    EOF and staying alive until signalled.
+    """
+
+    def _proc(self, exits_after: str) -> MagicMock:
+        """Build a fake process that only exits at the given stage."""
+        proc = MagicMock()
+        proc.returncode = None
+        proc.stdin = MagicMock()
+        proc.stdin.is_closing.return_value = False
+        state = {"stage": None}
+
+        async def wait():
+            if state["stage"] == exits_after:
+                return 0
+            await asyncio.sleep(3600)
+
+        proc.wait = wait
+        proc.stdin.close = MagicMock(side_effect=lambda: state.__setitem__("stage", "stdin"))
+        proc.terminate = MagicMock(side_effect=lambda: state.__setitem__("stage", "term"))
+        proc.kill = MagicMock(side_effect=lambda: state.__setitem__("stage", "kill"))
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_exit_on_stdin_close_skips_signals(self):
+        """The cooperative v1/v2 path never signals the process."""
+        client = ACPClient()
+        client._proc = self._proc("stdin")
+
+        await _REAL_STOP(client)
+
+        client._proc.stdin.close.assert_called_once()
+        client._proc.terminate.assert_not_called()
+        client._proc.kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sigterm_used_when_stdin_close_ignored(self, monkeypatch):
+        """v3 ignores stdin EOF, so SIGTERM is required — and SIGKILL is not."""
+        monkeypatch.setattr("kiro.acp_client._STOP_STDIN_TIMEOUT", 0.01)
+        client = ACPClient()
+        client._proc = self._proc("term")
+
+        await _REAL_STOP(client)
+
+        client._proc.terminate.assert_called_once()
+        client._proc.kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sigkill_is_last_resort(self, monkeypatch):
+        """A process that ignores SIGTERM is killed and still reaped."""
+        monkeypatch.setattr("kiro.acp_client._STOP_STDIN_TIMEOUT", 0.01)
+        monkeypatch.setattr("kiro.acp_client._STOP_TERM_TIMEOUT", 0.01)
+        monkeypatch.setattr("kiro.acp_client._STOP_KILL_TIMEOUT", 0.01)
+        client = ACPClient()
+        client._proc = self._proc("kill")
+
+        await _REAL_STOP(client)
+
+        client._proc.terminate.assert_called_once()
+        client._proc.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_v3_skips_the_stdin_wait(self):
+        """v3 ignores stdin EOF, so shutdown signals immediately instead of waiting.
+
+        The stdin timeout is left at its real 5s value: if the stage were not
+        skipped this test would take that long, so a regression shows up as a
+        slow test as well as a failed assertion.
+        """
+        client = ACPClient(engine="v3")
+        client._proc = self._proc("term")
+
+        started = time.monotonic()
+        await _REAL_STOP(client)
+        elapsed = time.monotonic() - started
+
+        client._proc.terminate.assert_called_once()
+        assert elapsed < 1.0
+
+    @pytest.mark.asyncio
+    async def test_already_exited_process_is_not_signalled(self):
+        """A process that already exited is left alone."""
+        client = ACPClient()
+        client._proc = self._proc("stdin")
+        client._proc.returncode = 0
+
+        await _REAL_STOP(client)
+
+        client._proc.terminate.assert_not_called()
+        client._proc.kill.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_process_is_safe(self):
+        """stop() before start() must not raise."""
+        await _REAL_STOP(ACPClient())
+
+
+class TestAgentInfoFallback:
+    """initialize() tolerates a missing/None agentInfo (the v3 engine sends none)."""
+
+    @pytest.mark.asyncio
+    async def test_agent_info_is_used_when_present(self):
+        client = ACPClient()
+        client._call = AsyncMock(return_value={
+            "protocolVersion": 1,
+            "agentInfo": {"name": "Kiro CLI Agent", "version": "2.19.1"},
+        })
+        client._probe_cli_version = AsyncMock(return_value="should-not-be-used")
+
+        await _REAL_INITIALIZE(client)
+
+        assert client.agent_name == "Kiro CLI Agent"
+        assert client.agent_version == "2.19.1"
+        client._probe_cli_version.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_agent_info_falls_back_to_cli_version(self):
+        """v3 omits agentInfo entirely, so the binary is asked instead."""
+        client = ACPClient(engine="v3")
+        client._call = AsyncMock(return_value={"protocolVersion": 1})
+        client._probe_cli_version = AsyncMock(return_value="2.19.2")
+
+        await _REAL_INITIALIZE(client)
+
+        assert client.agent_name == "kiro-cli"
+        assert client.agent_version == "2.19.2"
+
+    @pytest.mark.asyncio
+    async def test_null_agent_info_does_not_raise(self):
+        """An explicit null must not become an AttributeError."""
+        client = ACPClient()
+        client._call = AsyncMock(return_value={"protocolVersion": 1, "agentInfo": None})
+        client._probe_cli_version = AsyncMock(return_value=None)
+
+        result = await _REAL_INITIALIZE(client)
+
+        assert result.protocol_version == "1"
+        assert client.agent_version is None
+
+    @pytest.mark.asyncio
+    async def test_version_probe_parses_cli_output(self):
+        """`kiro-cli --version` prints "kiro-cli <version>"."""
+        client = ACPClient()
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"kiro-cli 2.19.2\n", b""))
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            assert await client._probe_cli_version() == "2.19.2"
+
+    @pytest.mark.asyncio
+    async def test_version_probe_failure_is_swallowed(self):
+        """A missing binary degrades the log line, never startup."""
+        client = ACPClient()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(side_effect=OSError("nope"))):
+            assert await client._probe_cli_version() is None
+
+    @pytest.mark.asyncio
+    async def test_version_probe_nonzero_exit_returns_none(self):
+        client = ACPClient()
+        proc = MagicMock()
+        proc.returncode = 1
+        proc.communicate = AsyncMock(return_value=(b"", b"boom"))
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            assert await client._probe_cli_version() is None
 
 
 class TestEngineConfigValidation:

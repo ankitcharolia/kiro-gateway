@@ -51,7 +51,7 @@ import os
 import re as _re
 import uuid
 from asyncio import Queue
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 from loguru import logger
 
@@ -87,6 +87,36 @@ _STOP_REASON_MAP: dict[str, str] = {
     "refusal": "stop",
     "cancelled": "stop",
 }
+
+#: Session-scope ``kiro-cli acp`` flags each engine refuses outright, keyed by
+#: engine string. kiro-cli does not ignore an unsupported flag — it exits with
+#: ``error: the following arguments are not supported with --agent-engine=v3``
+#: before writing any JSON-RPC, so passing one breaks every request. Verified
+#: against a live kiro-cli 2.19.x probe; v3 replaces all of these with the
+#: ``permissions.yaml`` policy engine and per-session ACP methods. v1/v2 accept
+#: them, so their tuples stay empty and their argv is byte-identical to before.
+ENGINE_UNSUPPORTED_SPAWN_FLAGS: dict[str, tuple[str, ...]] = {
+    "v3": ("--agent", "--model", "--effort", "--trust-all-tools", "--trust-tools"),
+}
+
+#: Engines that ignore EOF on stdin and only exit when signalled. Verified
+#: against a live kiro-cli 2.19.x probe: a v3 ``acp`` process stayed alive
+#: indefinitely after stdin was closed, while v1/v2 exit promptly. Listing the
+#: engine here skips straight to SIGTERM so shutdown does not burn
+#: ``_STOP_STDIN_TIMEOUT`` on a stage that cannot succeed.
+ENGINES_IGNORING_STDIN_EOF: frozenset[str] = frozenset({"v3"})
+
+#: Bounded per-stage waits for the stdin-close → SIGTERM → SIGKILL shutdown
+#: escalation in :meth:`ACPClient.stop`. The stdin stage keeps the historical
+#: 5s budget for v1/v2 (which exit there); the signal stages are short because
+#: a process that ignored SIGTERM is not going to flush anything useful.
+_STOP_STDIN_TIMEOUT = 5.0
+_STOP_TERM_TIMEOUT = 3.0
+_STOP_KILL_TIMEOUT = 2.0
+
+#: Bound on the best-effort ``kiro-cli --version`` probe used when the engine
+#: reports no ``agentInfo`` (v3). Informational only, so it stays short.
+_VERSION_PROBE_TIMEOUT = 5.0
 
 
 def format_plan_text(entries: list, description: str = "") -> str:
@@ -484,6 +514,18 @@ class ACPClient:
         # survive the teardown of a disconnected streaming generator and can
         # be cleaned up on stop().
         self._cancel_tasks: set[asyncio.Task] = set()
+        # Agent -> gateway request handlers, scheduled off the read loop so a
+        # handler that shells out (the v3 _kiro/auth/getAccessToken callback runs
+        # `kiro-cli chat _ get-kas-token`) cannot block stdout demultiplexing.
+        # A strong reference is retained because asyncio only weakly references
+        # scheduled tasks: without this set the event loop may garbage-collect an
+        # in-flight handler mid-await, so the agent would wait forever for a
+        # reply that is never written.
+        self._agent_request_tasks: set[asyncio.Task] = set()
+        # Agent identity from initialize. The v3 engine reports no agentInfo, so
+        # these fall back to the binary's own --version (see _probe_cli_version).
+        self._agent_name: str = "kiro-cli"
+        self._agent_version: str | None = None
         self._write_lock = asyncio.Lock()
         self._initialized = False
         # Kept for backward-compatibility with older tests/callers.
@@ -520,26 +562,95 @@ class ACPClient:
 
         Deterministic order: base command, an explicit ``--agent-engine`` pin,
         then the optional ``--agent`` / ``--model`` / ``--effort`` flags (only
-        when set), then any raw ``extra_args`` appended verbatim. With nothing
-        configured this yields ``[command, "acp", "--agent-engine", "v2"]`` — the
-        same process as before plus an explicit engine pin (issue #53).
+        when set *and* supported by the selected engine), then any raw
+        ``extra_args`` appended verbatim. With nothing configured this yields
+        ``[command, "acp", "--agent-engine", "v2"]`` — the same process as before
+        plus an explicit engine pin (issue #53).
+
+        Session-scope flags are engine-gated because ``kiro-cli acp`` **hard
+        rejects** them on the v3 engine rather than ignoring them: verified
+        against a live kiro-cli 2.19.x probe, ``--agent``, ``--model``,
+        ``--effort``, ``--trust-all-tools`` and ``--trust-tools`` each make the
+        process exit immediately with ``error: the following arguments are not
+        supported with --agent-engine=v3``. Forwarding an operator's
+        ``KIRO_ACP_AGENT``/``KIRO_ACP_MODEL``/``KIRO_ACP_EFFORT`` to a v3 session
+        would therefore break *every* request instead of degrading, so the
+        unsupported flags are dropped with a warning and the per-request
+        ``session/set_model`` path continues to select the model.
 
         Returns:
             The argv list to spawn.
         """
         argv = [self._command, "acp", "--agent-engine", self._engine]
-        if self._agent:
-            argv += ["--agent", self._agent]
-        if self._initial_model:
-            argv += ["--model", self._initial_model]
-        if self._effort:
-            argv += ["--effort", self._effort]
+        spawn_flags = (
+            ("--agent", self._agent),
+            ("--model", self._initial_model),
+            ("--effort", self._effort),
+        )
+        dropped: list[str] = []
+        for flag, value in spawn_flags:
+            if not value:
+                continue
+            if flag in ENGINE_UNSUPPORTED_SPAWN_FLAGS.get(self._engine, ()):
+                dropped.append(flag)
+                continue
+            argv += [flag, value]
+        if dropped:
+            logger.warning(
+                f"kiro-cli engine {self._engine} does not accept "
+                f"{', '.join(dropped)} on 'acp'; dropping "
+                f"{'them' if len(dropped) > 1 else 'it'} so the session can "
+                "start (the requested model is still applied per request via "
+                "session/set_model)"
+            )
         argv += self._extra_args
         return argv
+
+    def _warn_restrictive_posture_on_v3(self) -> None:
+        """Warn when a restrictive tool posture cannot be fully guaranteed on v3.
+
+        ``ACP_TRUST_TOOLS`` and :class:`ToolPermissionPolicy` are enforced from
+        ``session/request_permission``, and that is engine-agnostic: verified
+        against a live kiro-cli 2.19.x v3 probe, answering ``reject_once``
+        genuinely blocks the tool (the model reported the command "was rejected,
+        so it didn't run"). So a refusing posture *is* honoured on v3 for every
+        tool kiro-cli asks about.
+
+        What differs on v3 is which tools it asks about. v3 decides that with its
+        own ``permissions.yaml`` policy engine (deny > ask > allow), and a tool
+        that policy already **allows** is executed without ever sending
+        ``session/request_permission`` — so the gateway is never consulted and
+        cannot refuse it. A user-scope ``capability: all -> allow`` rule
+        therefore silently pre-approves everything.
+
+        The gateway cannot close that from here: v3's ``acp`` subcommand rejects
+        ``--trust-all-tools``/``--trust-tools``/``--agent`` (see
+        :data:`ENGINE_UNSUPPORTED_SPAWN_FLAGS`) and ACP exposes no method to push
+        policy, so the only fix is a ``deny`` rule in kiro-cli's own policy —
+        which wins over every ``allow`` regardless of scope. Log it loudly rather
+        than let an operator believe an answer-only deployment is airtight.
+        """
+        if self._engine != "v3":
+            return
+        if self._trust_tools and not self._permission_policy.has_rules:
+            return
+        posture = (
+            "ACP_TRUST_TOOLS=false" if not self._trust_tools
+            else "ACP_TOOL_DENY/ACP_TOOL_ALLOW rules"
+        )
+        logger.warning(
+            f"{posture} is set on the v3 engine: the gateway refuses every tool "
+            "kiro-cli asks about, but v3 skips session/request_permission for "
+            "tools its own permissions.yaml already allows, and those cannot be "
+            "refused from here. For a hard guarantee add a deny rule to "
+            "~/.kiro/settings/permissions.yaml (deny beats allow in every "
+            "scope), or use KIRO_ACP_ENGINE=v2."
+        )
 
     async def start(self) -> None:
         """Spawn ``kiro-cli acp`` and begin reading its stdio."""
         argv = self._build_argv()
+        self._warn_restrictive_posture_on_v3()
         logger.info(f"Spawning ACP subprocess: {' '.join(argv)}")
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -553,7 +664,20 @@ class ACPClient:
         logger.info(f"kiro-cli ACP subprocess started (pid={self._proc.pid})")
 
     async def stop(self) -> None:
-        """Gracefully stop the subprocess and cancel reader tasks."""
+        """Gracefully stop the subprocess and cancel reader tasks.
+
+        Shutdown escalates stdin-close → ``SIGTERM`` → ``SIGKILL``, each with its
+        own bounded wait, because closing stdin is **not** sufficient on every
+        engine: verified against a live kiro-cli 2.19.x probe, a v3 ``acp``
+        process ignores EOF on stdin and stays alive indefinitely (v1/v2 exit
+        promptly). Such engines are listed in
+        :data:`ENGINES_IGNORING_STDIN_EOF` and skip straight to the signal, so
+        shutdown does not stall for a timeout that cannot succeed. Without the
+        ``SIGTERM`` step the old code waited the full timeout and then sent
+        ``SIGKILL`` without reaping, which denied kiro-cli any chance to flush
+        and could leave a zombie behind. Each stage is awaited so the process is
+        reaped before returning.
+        """
         for task in (self._reader_task, self._stderr_task, *self._cancel_tasks):
             if task:
                 task.cancel()
@@ -562,17 +686,73 @@ class ACPClient:
                 except asyncio.CancelledError:
                     pass
         self._cancel_tasks.clear()
+        self._agent_request_tasks.clear()
         if self._proc and self._proc.returncode is None:
+            # Stage 1: EOF on stdin — the cooperative path (v1/v2 exit here).
+            # Skipped for engines known to ignore it, so shutdown is not delayed
+            # by a full timeout that cannot succeed.
+            exited = False
             try:
                 if self._proc.stdin and not self._proc.stdin.is_closing():
                     self._proc.stdin.close()
-                await asyncio.wait_for(self._proc.wait(), timeout=5.0)
-            except (asyncio.TimeoutError, ProcessLookupError, OSError):
-                try:
-                    self._proc.kill()
-                except ProcessLookupError:
-                    pass
+            except (OSError, ProcessLookupError):
+                pass
+            if self._engine in ENGINES_IGNORING_STDIN_EOF:
+                logger.debug(
+                    f"engine {self._engine} ignores stdin EOF; signalling directly"
+                )
+            else:
+                exited = await self._await_exit(_STOP_STDIN_TIMEOUT)
+            if not exited:
+                # Stage 2: SIGTERM — required for v3, which ignores stdin EOF.
+                if not await self._signal_and_wait(
+                    self._proc.terminate, _STOP_TERM_TIMEOUT
+                ):
+                    # Stage 3: SIGKILL — last resort, still reaped below.
+                    logger.warning(
+                        "kiro-cli ignored SIGTERM; sending SIGKILL"
+                    )
+                    await self._signal_and_wait(
+                        self._proc.kill, _STOP_KILL_TIMEOUT
+                    )
         logger.info("kiro-cli ACP subprocess stopped")
+
+    async def _await_exit(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for the subprocess to exit.
+
+        Args:
+            timeout: Seconds to wait.
+
+        Returns:
+            True if the process has exited (or is already gone), else False.
+        """
+        if not self._proc:
+            return True
+        try:
+            await asyncio.wait_for(self._proc.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            return False
+        except (ProcessLookupError, OSError):
+            # Already reaped by the event loop's child watcher.
+            return True
+
+    async def _signal_and_wait(self, signal_fn: Callable[[], None],
+                               timeout: float) -> bool:
+        """Send a termination signal and wait for the process to exit.
+
+        Args:
+            signal_fn: Bound ``terminate``/``kill`` of the subprocess.
+            timeout: Seconds to wait for the exit after signalling.
+
+        Returns:
+            True if the process has exited, else False.
+        """
+        try:
+            signal_fn()
+        except (ProcessLookupError, OSError):
+            return True
+        return await self._await_exit(timeout)
 
     async def initialize(
         self, capabilities: Optional[GatewayCapabilities] = None
@@ -602,7 +782,12 @@ class ACPClient:
         proto = "1"
         if isinstance(result, dict):
             proto = str(result.get("protocolVersion", 1))
-            agent = result.get("agentInfo", {})
+            # v3 omits agentInfo entirely and a malformed agent could send an
+            # explicit null, so neither `result["agentInfo"]` nor the two-arg
+            # `.get` default is safe on its own — normalise to a dict first.
+            agent = result.get("agentInfo")
+            if not isinstance(agent, dict):
+                agent = {}
             # Retain promptCapabilities so the prompt builder can pick a wire
             # representation per capability instead of assuming one: v3
             # advertises embeddedContext=true and reads ACP `resource` blocks,
@@ -613,12 +798,56 @@ class ACPClient:
                 if isinstance(prompt_caps, dict):
                     self._prompt_capabilities = prompt_caps
                     logger.info(f"ACP promptCapabilities: {prompt_caps}")
+            name = agent.get("name") or "kiro-cli"
+            version = agent.get("version")
+            if not version:
+                # The v3 engine reports no agentInfo, so fall back to asking the
+                # binary. Best-effort and cached: a missing version must never
+                # fail startup, it only degrades the log line and the property.
+                version = await self._probe_cli_version()
+            self._agent_name = name
+            self._agent_version = version
             logger.info(
-                f"ACP initialized: agent={agent.get('name', 'unknown')} "
-                f"v{agent.get('version', '?')} protocol={proto}"
+                f"ACP initialized: agent={name} v{version or '?'} "
+                f"protocol={proto} engine={self._engine}"
             )
         self._initialized = True
         return SessionInitResult(session_id="", protocol_version=proto)
+
+    async def _probe_cli_version(self) -> str | None:
+        """Best-effort ``kiro-cli --version`` lookup for engines without agentInfo.
+
+        Returns:
+            The version string (e.g. ``"2.19.2"``) or None when the binary cannot
+            be queried. Never raises: the version is informational only.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._command, "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=_VERSION_PROBE_TIMEOUT
+            )
+        except (OSError, TimeoutError, ValueError) as exc:
+            logger.debug(f"kiro-cli version probe failed: {exc}")
+            return None
+        if proc.returncode != 0:
+            return None
+        # Output is "kiro-cli <version>"; take the last whitespace-separated token.
+        text = stdout.decode("utf-8", errors="replace").strip()
+        return text.split()[-1] if text else None
+
+    @property
+    def agent_name(self) -> str:
+        """Agent name from ``initialize``, or a sensible default."""
+        return self._agent_name
+
+    @property
+    def agent_version(self) -> str | None:
+        """Negotiated agent version, or the probed CLI version, else None."""
+        return self._agent_version
 
     @property
     def supports_embedded_context(self) -> bool:
@@ -1664,8 +1893,13 @@ class ACPClient:
         has_id = msg.get("id") is not None
 
         if method and has_id:
-            # Agent -> gateway request (e.g. session/request_permission).
-            asyncio.create_task(self._handle_agent_request(msg))
+            # Agent -> gateway request (e.g. session/request_permission, or the
+            # v3 auth callback). Scheduled off the read loop so a handler that
+            # shells out never blocks stdout demux, with a strong reference held
+            # until completion so the task cannot be garbage-collected mid-flight.
+            task = asyncio.create_task(self._handle_agent_request(msg))
+            self._agent_request_tasks.add(task)
+            task.add_done_callback(self._agent_request_tasks.discard)
             return
         if method:
             # Notification (no id) such as session/update.
