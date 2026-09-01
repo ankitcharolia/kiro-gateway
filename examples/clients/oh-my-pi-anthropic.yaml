@@ -15,15 +15,15 @@ providers:
     api: anthropic-messages
     disableStrictTools: true   # optional: the gateway now accepts Anthropic's `strict` tool field (validated, inert) — this workaround is no longer required, kept as a harmless no-op
     models:
-      - id: claude-opus-4.8
-        name: Claude Opus 4.8 (thinking)
+      - id: claude-opus-5
+        name: Claude Opus 5 (thinking)
         reasoning: true
         input: [text, image]
         contextWindow: 1000000
         maxTokens: 32000
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
-      - id: claude-sonnet-4.6
-        name: Claude Sonnet 4.6
+      - id: claude-auto
+        name: Claude (auto)
         reasoning: true
         input: [text, image]
         contextWindow: 1000000

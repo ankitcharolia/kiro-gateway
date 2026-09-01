@@ -294,7 +294,7 @@ _(Cursor, Cline, Continue, OpenCode, Hermes-agent, OpenClaw, Oh My Pi, …)_
 |---|---|
 | Base URL | `http://localhost:8000/v1` |
 | API Key | value of `KIRO_GATEWAY_API_KEY` |
-| Model | `claude-sonnet-4.6` (or any Kiro-supported model: `auto`, `claude-opus-4.8`, …) |
+| Model | `auto` (or any id from `GET /v1/models` — see note below) |
 
 ### Anthropic-compatible clients
 
@@ -304,7 +304,26 @@ _(Claude Code, Kilo Code, OpenClaw, Oh My Pi, …)_
 |---|---|
 | Base URL | `http://localhost:8000` |
 | API Key header | `x-api-key: <KIRO_GATEWAY_API_KEY>` |
-| Model | `claude-sonnet-4.6` |
+| Model | `claude-auto` (or any id from `GET /v1/models`) |
+
+> [!IMPORTANT]
+> **Model ids are not fixed — always check `GET /v1/models`.** The catalogue is
+> read live from `kiro-cli` at startup, and Kiro rotates it: ids that existed
+> when this README was written have since been replaced. Prefer the version-free
+> aliases **`auto`** (OpenAI shim) and **`claude-auto`** (Anthropic shim), which
+> stay valid across catalogue changes.
+>
+> ```bash
+> curl -fsS http://localhost:8000/v1/models \
+>   -H "Authorization: Bearer $KIRO_GATEWAY_API_KEY" | jq -r '.data[].id'
+> ```
+>
+> A requested id that isn't in the live catalogue is handled per
+> `MODEL_VALIDATION`: `warn` (default) logs and **silently falls back to the
+> session default** — so a stale id appears to work while giving you a different
+> model; `strict` returns a `404`; `off` forwards it untouched. If you care which
+> model you get, pin an id from the command above and set
+> `MODEL_VALIDATION=strict`.
 
 ### How to integrate an AI harness
 

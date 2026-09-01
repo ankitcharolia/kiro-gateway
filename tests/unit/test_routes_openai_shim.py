@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -36,17 +37,28 @@ def test_openai_models_object_field(sync_client, openai_headers):
 
 
 def test_openai_models_fallback_uses_current_dotted_ids(sync_client, openai_headers):
-    """With no live catalogue, /v1/models serves normalised (hyphenated) model ids.
+    """With no live catalogue, /v1/models serves only version-free aliases.
 
-    kiro-cli reports dotted ids (e.g. claude-sonnet-4.6); the gateway normalises
-    them to hyphenated form (claude-sonnet-4-6) so Claude Code 2.x recognises them.
+    The fallback deliberately contains no pinned, versioned ids. Kiro rotates the
+    catalogue, and a pinned fallback goes stale silently: ``claude-sonnet-4.6``
+    and ``claude-opus-4.8`` were advertised here long after kiro-cli stopped
+    offering them, so a harness that trusted ``GET /v1/models`` was handed dead
+    ids. ``auto`` / ``claude-auto`` survive catalogue changes.
+
+    Normalisation of dotted ids to hyphenated form (for Claude Code 2.x) is
+    covered by the live-catalogue tests below, which is the only path where
+    dotted ids can now appear.
     """
     response = sync_client.get("/v1/models", headers=openai_headers)
     ids = [m["id"] for m in response.json()["data"]]
-    assert "claude-sonnet-4-6" in ids
-    assert "claude-sonnet-4.6" not in ids
-    # The stale dash-style id must no longer be advertised.
-    assert "claude-sonnet-4-5" not in ids
+    # Version-free aliases are served and stay valid across catalogue rotations.
+    assert "auto" in ids
+    assert "claude-auto" in ids
+    # No pinned/versioned id may be advertised from the fallback, in either
+    # dotted or hyphenated spelling.
+    assert not any(re.search(r"\d", i) for i in ids), (
+        f"fallback must not advertise versioned ids, got: {ids}"
+    )
 
 
 def test_openai_models_serves_live_catalogue_when_present(sync_client, openai_headers):

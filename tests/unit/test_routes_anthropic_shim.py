@@ -25,13 +25,18 @@ def test_anthropic_models_endpoint(sync_client, anthropic_headers):
 
 @pytest.mark.asyncio
 async def test_anthropic_list_models_fallback_dotted_ids():
-    """Anthropic list_models falls back to normalised (hyphenated) model ids.
+    """Anthropic list_models falls back to version-free aliases only.
 
     The handler is tested directly because the OpenAI shim also registers
     /v1/models and shadows the Anthropic route in the mounted app.
-    kiro-cli reports dotted ids (e.g. claude-sonnet-4.6); the gateway normalises
-    them to hyphenated form (claude-sonnet-4-6) so Claude Code 2.x recognises them.
+
+    As on the OpenAI shim, the fallback deliberately advertises no pinned,
+    versioned ids: Kiro rotates the catalogue and a pinned fallback goes stale
+    silently (``claude-sonnet-4.6`` / ``claude-opus-4.8`` outlived their
+    availability here). Dotted-to-hyphenated normalisation is exercised by the
+    live-catalogue test below.
     """
+    import re
     from unittest.mock import MagicMock
 
     from kiro.routes_anthropic_shim import list_models
@@ -41,9 +46,10 @@ async def test_anthropic_list_models_fallback_dotted_ids():
     result = await list_models(shim=shim)
 
     ids = [m["id"] for m in result["data"]]
-    assert "claude-sonnet-4-6" in ids
-    assert "claude-sonnet-4.6" not in ids
-    assert "claude-sonnet-4-5" not in ids
+    assert "claude-auto" in ids
+    assert not any(re.search(r"\d", i) for i in ids), (
+        f"fallback must not advertise versioned ids, got: {ids}"
+    )
     assert all(m["type"] == "model" for m in result["data"])
 
 

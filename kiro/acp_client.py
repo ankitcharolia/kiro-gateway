@@ -69,6 +69,7 @@ from kiro.tool_permissions import (
     ToolPermissionPolicy,
     select_option_id,
 )
+from kiro.tool_audit import ToolAuditStore
 
 
 # Map ACP stopReason values to the gateway's normalised finish_reason.
@@ -404,6 +405,12 @@ class ACPClient:
         mcp_servers: Optional[list[dict]] = None,
         mcp_init_timeout: int = 30,
         permission_policy: Optional[ToolPermissionPolicy] = None,
+        tool_audit_ttl: Optional[float] = None,
+        tool_audit_drain_timeout: Optional[float] = None,
+        tool_audit_max_records: Optional[int] = None,
+        tool_audit_max_tools: Optional[int] = None,
+        tool_audit_max_bytes: Optional[int] = None,
+        tool_audit_max_updates: Optional[int] = None,
     ):
         self._command = command
         self._trust_tools = trust_tools
@@ -449,6 +456,33 @@ class ACPClient:
         self._mcp_init_timeout = mcp_init_timeout
         # Max bytes per JSON-RPC line read from kiro-cli stdout (see config).
         self._stdio_limit = stdio_limit
+        self._tool_audit = ToolAuditStore(
+            ttl_seconds=(
+                settings.ACP_TOOL_AUDIT_TTL
+                if tool_audit_ttl is None else tool_audit_ttl
+            ),
+            max_records=(
+                settings.ACP_TOOL_AUDIT_MAX_RECORDS
+                if tool_audit_max_records is None else tool_audit_max_records
+            ),
+            max_tools=(
+                settings.ACP_TOOL_AUDIT_MAX_TOOLS
+                if tool_audit_max_tools is None else tool_audit_max_tools
+            ),
+            max_bytes=(
+                settings.ACP_TOOL_AUDIT_MAX_BYTES
+                if tool_audit_max_bytes is None else tool_audit_max_bytes
+            ),
+            max_updates=(
+                settings.ACP_TOOL_AUDIT_MAX_UPDATES
+                if tool_audit_max_updates is None else tool_audit_max_updates
+            ),
+        )
+        self._tool_audit_drain_timeout = max(
+            0.0,
+            settings.ACP_TOOL_AUDIT_DRAIN_TIMEOUT
+            if tool_audit_drain_timeout is None else tool_audit_drain_timeout,
+        )
         self._proc: Optional[asyncio.subprocess.Process] = None
         # Pending request id -> Future (for initialize / session/new).
         self._pending: dict[str, asyncio.Future] = {}
@@ -463,6 +497,10 @@ class ACPClient:
         # survive the teardown of a disconnected streaming generator and can
         # be cleaned up on stop().
         self._cancel_tasks: set[asyncio.Task] = set()
+        # Post-cancel drain tasks keep the ACP queue alive long enough to capture
+        # late tool updates and the terminal session/prompt result.
+        self._drain_tasks: set[asyncio.Task] = set()
+        self._draining_sessions: set[str] = set()
         self._write_lock = asyncio.Lock()
         self._initialized = False
         # Kept for backward-compatibility with older tests/callers.
@@ -533,7 +571,12 @@ class ACPClient:
 
     async def stop(self) -> None:
         """Gracefully stop the subprocess and cancel reader tasks."""
-        for task in (self._reader_task, self._stderr_task, *self._cancel_tasks):
+        for task in (
+            self._reader_task,
+            self._stderr_task,
+            *self._cancel_tasks,
+            *self._drain_tasks,
+        ):
             if task:
                 task.cancel()
                 try:
@@ -639,9 +682,31 @@ class ACPClient:
             # A malformed/unreachable MCP server makes kiro-cli's session/new
             # block with no error; cap it so the request fails fast instead of
             # stalling for the full ACP_TIMEOUT.
-            result = await self._call(
-                "session/new", params, timeout=self._mcp_init_timeout
-            )
+            #
+            # If that cap trips, do NOT fail the turn. Discovery is on by
+            # default, so a single slow harness MCP server would otherwise make
+            # *every* request return 504 and the gateway unusable — a far worse
+            # outcome than losing MCP tools for one turn. Retry once with no
+            # MCP servers (the same fallback the start-up warm-up already uses)
+            # and log loudly so the cause is visible.
+            try:
+                result = await self._call(
+                    "session/new", params, timeout=self._mcp_init_timeout
+                )
+            except ACPError as exc:
+                if exc.code != -32000 or "timed out" not in str(exc).lower():
+                    raise
+                names = [s.get("name") for s in servers if isinstance(s, dict)]
+                logger.warning(
+                    f"session/new timed out after {self._mcp_init_timeout}s while "
+                    f"registering {len(servers)} MCP server(s) {names}; retrying "
+                    "without MCP servers. This turn has no MCP tools. Fix or remove "
+                    "the slow/unreachable server, or set MCP_DISCOVERY=off / lower "
+                    "MCP_INIT_TIMEOUT."
+                )
+                result = await self._call(
+                    "session/new", {"cwd": workdir, "mcpServers": []}
+                )
         else:
             result = await self._call("session/new", params)
         if not isinstance(result, dict) or "sessionId" not in result:
@@ -911,6 +976,7 @@ class ACPClient:
         if not session_id:
             raise ACPError(-32602, "prompt_stream requires a session_id")
 
+        self._tool_audit.begin(session_id)
         prompt_blocks = self._build_prompt_blocks(params.messages)
         queue: Queue = Queue()
         self._event_queues[session_id] = queue
@@ -1005,11 +1071,14 @@ class ACPClient:
             # every other request (head-of-line blocking). Fire-and-forget so
             # the notification is still dispatched even while this generator is
             # unwinding under cancellation.
+            draining = False
             if prompt_sent and not completed:
+                self._tool_audit.request_cancel(session_id)
                 self._schedule_cancel(session_id)
-            self._event_queues.pop(session_id, None)
-            self._prompt_sessions.pop(req_id, None)
-            self._session_usage.pop(session_id, None)
+                self._schedule_drain(session_id, req_id, queue)
+                draining = True
+            if not draining:
+                self._cleanup_prompt(session_id, req_id)
 
     # ------------------------------------------------------------------
     # Cancellation
@@ -1075,6 +1144,80 @@ class ACPClient:
         task = loop.create_task(self._cancel_quietly(session_id))
         self._cancel_tasks.add(task)
         task.add_done_callback(self._cancel_tasks.discard)
+
+    def _cleanup_prompt(self, session_id: str, req_id: str) -> None:
+        """Release routing and usage state after a prompt is fully settled."""
+        if self._prompt_sessions.get(req_id) == session_id:
+            self._prompt_sessions.pop(req_id, None)
+        self._event_queues.pop(session_id, None)
+        self._session_usage.pop(session_id, None)
+        self._session_metadata.pop(session_id, None)
+
+    def _schedule_drain(
+        self,
+        session_id: str,
+        req_id: str,
+        queue: Queue,
+    ) -> None:
+        """Drain late ACP events after a disconnected prompt is cancelled."""
+        if session_id in self._draining_sessions:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._tool_audit.mark_drain_timeout(session_id)
+            self._cleanup_prompt(session_id, req_id)
+            return
+        self._draining_sessions.add(session_id)
+        task = loop.create_task(
+            self._drain_after_cancel(session_id, req_id, queue)
+        )
+        self._drain_tasks.add(task)
+
+        def _discard_drain(done: asyncio.Task) -> None:
+            self._drain_tasks.discard(done)
+            self._draining_sessions.discard(session_id)
+
+        task.add_done_callback(_discard_drain)
+
+    async def _drain_after_cancel(
+        self,
+        session_id: str,
+        req_id: str,
+        queue: Queue,
+    ) -> None:
+        """Wait briefly for late tool updates and the prompt terminal result.
+
+        The HTTP consumer is gone, so this worker consumes the queue solely to
+        preserve audit state. It never emits a response and never waits longer
+        than ``ACP_TOOL_AUDIT_DRAIN_TIMEOUT``.
+        """
+        deadline = asyncio.get_running_loop().time() + self._tool_audit_drain_timeout
+        try:
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    self._tool_audit.mark_drain_timeout(session_id)
+                    return
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    self._tool_audit.mark_drain_timeout(session_id)
+                    return
+                if event.get("type") in ("done", "error"):
+                    return
+        finally:
+            self._cleanup_prompt(session_id, req_id)
+            self._draining_sessions.discard(session_id)
+
+    def get_tool_audit(self, session_id: str) -> dict[str, Any] | None:
+        """Return the retained redacted audit record for an ACP session.
+
+        This is intentionally an internal accessor; exposing records through a
+        public endpoint would require an additional authentication and privacy
+        policy because even redacted tool metadata can be sensitive.
+        """
+        return self._tool_audit.get(session_id)
 
     @staticmethod
     def _generation_meta(params: PromptParams) -> dict[str, Any]:
@@ -1437,20 +1580,26 @@ class ACPClient:
         if not session_id:
             return
         queue = self._event_queues.get(session_id)
-        if not queue:
-            return
         if msg.get("error"):
             err = msg["error"]
+            self._tool_audit.record_terminal(
+                session_id, reason="error", error=True
+            )
+            self._session_usage.pop(session_id, None)
             self._session_metadata.pop(session_id, None)
-            queue.put_nowait({
-                "type": "error",
-                "message": err.get("message", "ACP prompt error"),
-                "code": err.get("code"),
-                "data": err.get("data"),
-            })
+            if queue:
+                queue.put_nowait({
+                    "type": "error",
+                    "message": err.get("message", "ACP prompt error"),
+                    "code": err.get("code"),
+                    "data": err.get("data"),
+                })
             return
         result = msg.get("result") or {}
-        stop_reason = result.get("stopReason", "end_turn") if isinstance(result, dict) else "end_turn"
+        stop_reason = (
+            result.get("stopReason", "end_turn")
+            if isinstance(result, dict) else "end_turn"
+        )
         usage = self._find_usage(result)
         # Merge anything captured from session/update notifications (result
         # wins per key when both are present).
@@ -1468,7 +1617,9 @@ class ACPClient:
         metadata = self._session_metadata.pop(session_id, {})
         if metadata:
             done_event["metadata"] = metadata
-        queue.put_nowait(done_event)
+        self._tool_audit.record_terminal(session_id, reason=str(stop_reason))
+        if queue:
+            queue.put_nowait(done_event)
 
     @staticmethod
     def _normalize_usage_keys(usage: Any) -> dict:
@@ -1678,12 +1829,33 @@ class ACPClient:
             return
 
         session_id = params.get("sessionId", "")
+        update = params.get("update", {})
+        kind = update.get("sessionUpdate")
+
+        # Audit independently of the HTTP response queue. A disconnected
+        # consumer may have removed that queue, but the ACP reader can still
+        # observe a late tool update during the bounded drain window.
+        if session_id and kind == "tool_call":
+            self._tool_audit.record_tool_call(
+                session_id,
+                str(update.get("toolCallId") or "unknown-tool"),
+                name=str(update.get("title") or update.get("kind") or "tool"),
+                kind=str(update.get("kind") or ""),
+                arguments=update.get("rawInput") or {},
+                content=update.get("content") or [],
+            )
+        elif session_id and kind == "tool_call_update":
+            self._tool_audit.record_tool_update(
+                session_id,
+                str(update.get("toolCallId") or "unknown-tool"),
+                status=str(update.get("status") or ""),
+                output=self._extract_tool_output(update.get("rawOutput")),
+                content=update.get("content") or [],
+            )
+
         queue = self._event_queues.get(session_id)
         if not queue:
             return
-
-        update = params.get("update", {})
-        kind = update.get("sessionUpdate")
 
         # kiro-cli may attach token usage to an update or its params/_meta
         # (this is the same data its interactive /usage view shows). Capture it
@@ -1849,15 +2021,66 @@ class ACPClient:
         params = msg.get("params", {})
 
         if method == "session/request_permission":
+            tool_call = params.get("toolCall", {})
+            if not isinstance(tool_call, dict):
+                tool_call = {}
+            session_id = str(params.get("sessionId") or "")
+            tool_id = str(
+                tool_call.get("toolCallId")
+                or tool_call.get("id")
+                or req_id
+                or "unknown-tool"
+            )
+            if session_id:
+                self._tool_audit.record_permission_request(
+                    session_id,
+                    tool_id,
+                    name=str(tool_call.get("title") or tool_call.get("kind") or "tool"),
+                    kind=str(tool_call.get("kind") or ""),
+                    arguments=tool_call.get("rawInput") or {},
+                )
             option_id = self._select_permission_option(
                 params.get("options", []), params
             )
+            option_text = str(option_id).lower()
+            allowed = self._permission_option_allowed(
+                params.get("options", []), option_text
+            )
+            if session_id:
+                self._tool_audit.record_permission_result(
+                    session_id,
+                    tool_id,
+                    allowed=allowed,
+                    option_id=str(option_id),
+                )
             await self._respond(req_id, {"outcome": {"outcome": "selected", "optionId": option_id}})
             return
 
         # We advertise no fs/terminal capabilities, so kiro-cli should never
         # ask us to perform them. If it does, decline cleanly.
         await self._respond_error(req_id, -32601, f"{method} not supported by gateway")
+
+    @staticmethod
+    def _permission_option_allowed(options: list[dict], option_id: str) -> bool:
+        """Classify the selected permission option without trusting its id alone."""
+        selected = str(option_id).lower()
+        for option in options or []:
+            if str(option.get("optionId", "")).lower() != selected:
+                continue
+            descriptor = (
+                f"{option.get('kind', '')} {option.get('optionId', '')}"
+            ).lower()
+            if "reject" in descriptor or "deny" in descriptor:
+                return False
+            if "allow" in descriptor:
+                return True
+        # Conventional fallback ids are used when the agent sends no usable
+        # option. Unknown custom ids fail closed for the audit classification.
+        if selected.startswith(("reject", "deny")):
+            return False
+        if selected.startswith("allow"):
+            return True
+        return False
 
     def _select_permission_option(self, options: list[dict],
                                   params: Optional[dict] = None) -> str:

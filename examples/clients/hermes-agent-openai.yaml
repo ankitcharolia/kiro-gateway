@@ -1,23 +1,23 @@
 # Put the following in ~/.hermes/config.yaml
 #
 # For thinking/reasoning + tool-activity display (like kiro-cli's activity view):
-#   1. Use claude-opus-4.8 — kiro-cli emits thinking for opus but NOT for sonnet.
+#   1. Use claude-opus-5 — kiro-cli emits thinking for opus but NOT for sonnet.
 #   2. Set streaming.enabled: true — required for live interleaved display.
 #   3. Set display.show_reasoning: true — shows the thinking panel in the UI.
 model:
   provider: kiro
-  default: claude-opus-4.8      # opus emits thinking; change to auto or sonnet if speed is preferred
+  default: claude-opus-5      # opus emits thinking; change to auto or sonnet if speed is preferred
   base_url: http://127.0.0.1:8000/v1
   context_length: 1000000
 providers:
   kiro:
     base_url: http://127.0.0.1:8000/v1
     api_key: ${KIRO_GATEWAY_API_KEY}
-    model: claude-opus-4.8
+    model: claude-opus-5
 
 fallback_providers:
   - provider: kiro
-    model: claude-sonnet-4.6
+    model: claude-auto
   - provider: kiro
     model: auto
 

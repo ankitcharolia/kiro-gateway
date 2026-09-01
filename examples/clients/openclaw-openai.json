@@ -7,8 +7,8 @@
         "apiKey": "change-me",
         "api": "openai-completions",
         "models": [
-          { "id": "claude-opus-4.8",   "name": "Claude Opus 4.8 (thinking)" },
-          { "id": "claude-sonnet-4.6", "name": "Claude Sonnet 4.6" },
+          { "id": "claude-opus-5",   "name": "Claude Opus 5 (thinking)" },
+          { "id": "claude-auto", "name": "Claude (auto)" },
           { "id": "auto",              "name": "Auto" }
         ]
       }
@@ -17,12 +17,12 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "kiro/claude-opus-4.8",
-        "fallbacks": ["kiro/claude-sonnet-4.6", "kiro/auto"]
+        "primary": "kiro/claude-opus-5",
+        "fallbacks": ["kiro/claude-auto", "kiro/auto"]
       },
       "models": {
-        "kiro/claude-opus-4.8":   { "alias": "opus"   },
-        "kiro/claude-sonnet-4.6": { "alias": "sonnet" },
+        "kiro/claude-opus-5":   { "alias": "opus"   },
+        "kiro/claude-auto": { "alias": "sonnet" },
         "kiro/auto":              { "alias": "auto"   }
       }
     }

@@ -48,12 +48,17 @@ HIDDEN_MODELS: List[str] = [m.strip() for m in _hidden_raw.split(",") if m.strip
 
 # Fallback model list advertised by ``GET /v1/models`` before a live list has
 # been discovered from ``session/new``. kiro-cli reports the authoritative list
-# (with dotted version IDs such as ``claude-sonnet-4.6``) on every session; that
-# live list supersedes this fallback at runtime. Override with the KIRO_MODELS
-# env var (comma-separated) if you need to pin a different default set.
-_models_raw: str = os.environ.get(
-    "KIRO_MODELS", "auto,claude-opus-4.8,claude-sonnet-4.6"
-)
+# on every session and that live list supersedes this fallback at runtime, so
+# this is only ever seen when the start-up warm-up session fails.
+#
+# Only the **version-free aliases** are listed here on purpose. Kiro rotates the
+# catalogue and pinned ids go stale: ``claude-sonnet-4.6`` and
+# ``claude-opus-4.8`` were both advertised by this fallback long after kiro-cli
+# had stopped offering them, so a harness that trusted ``GET /v1/models`` was
+# handed dead ids. ``auto`` / ``claude-auto`` stay valid across catalogue
+# changes. Override with the KIRO_MODELS env var (comma-separated) to pin a
+# different set.
+_models_raw: str = os.environ.get("KIRO_MODELS", "auto,claude-auto")
 DEFAULT_KIRO_MODELS: List[str] = [m.strip() for m in _models_raw.split(",") if m.strip()]
 
 # How to handle a requested model that is not in the live kiro-cli catalogue
@@ -158,6 +163,27 @@ ACP_STDIO_MAX_BYTES: int = int(
 # invocation when this is true, otherwise it rejects the request. Disable
 # (ACP_TRUST_TOOLS=false) to run the agent in a read/answer-only posture.
 ACP_TRUST_TOOLS: bool = os.environ.get("ACP_TRUST_TOOLS", "true").lower() != "false"
+
+# Bounded auditability for built-in tool execution. The gateway records what
+# kiro-cli reports, not a transaction log or rollback mechanism. Finalized
+# records are retained only for this TTL; active records are bounded by the
+# maximum session count and each tool's update history is capped.
+ACP_TOOL_AUDIT_TTL: float = float(os.environ.get("ACP_TOOL_AUDIT_TTL", "300"))
+ACP_TOOL_AUDIT_DRAIN_TIMEOUT: float = float(
+    os.environ.get("ACP_TOOL_AUDIT_DRAIN_TIMEOUT", "5")
+)
+ACP_TOOL_AUDIT_MAX_RECORDS: int = int(
+    os.environ.get("ACP_TOOL_AUDIT_MAX_RECORDS", "256")
+)
+ACP_TOOL_AUDIT_MAX_TOOLS: int = int(
+    os.environ.get("ACP_TOOL_AUDIT_MAX_TOOLS", "128")
+)
+ACP_TOOL_AUDIT_MAX_BYTES: int = int(
+    os.environ.get("ACP_TOOL_AUDIT_MAX_BYTES", str(1024 * 1024))
+)
+ACP_TOOL_AUDIT_MAX_UPDATES: int = int(
+    os.environ.get("ACP_TOOL_AUDIT_MAX_UPDATES", "32")
+)
 
 # Whether to surface kiro-cli's OWN built-in tool activity (web search, file
 # edits, command execution, …) to the OpenAI/Anthropic shims as executable
@@ -507,6 +533,22 @@ class _Settings:
     )
     ACP_STDIO_MAX_BYTES: int = field(default_factory=lambda: ACP_STDIO_MAX_BYTES)
     ACP_TRUST_TOOLS: bool = field(default_factory=lambda: ACP_TRUST_TOOLS)
+    ACP_TOOL_AUDIT_TTL: float = field(default_factory=lambda: ACP_TOOL_AUDIT_TTL)
+    ACP_TOOL_AUDIT_DRAIN_TIMEOUT: float = field(
+        default_factory=lambda: ACP_TOOL_AUDIT_DRAIN_TIMEOUT
+    )
+    ACP_TOOL_AUDIT_MAX_RECORDS: int = field(
+        default_factory=lambda: ACP_TOOL_AUDIT_MAX_RECORDS
+    )
+    ACP_TOOL_AUDIT_MAX_TOOLS: int = field(
+        default_factory=lambda: ACP_TOOL_AUDIT_MAX_TOOLS
+    )
+    ACP_TOOL_AUDIT_MAX_BYTES: int = field(
+        default_factory=lambda: ACP_TOOL_AUDIT_MAX_BYTES
+    )
+    ACP_TOOL_AUDIT_MAX_UPDATES: int = field(
+        default_factory=lambda: ACP_TOOL_AUDIT_MAX_UPDATES
+    )
     ACP_TOOL_DENY: str = field(default_factory=lambda: ACP_TOOL_DENY)
     ACP_TOOL_ALLOW: str = field(default_factory=lambda: ACP_TOOL_ALLOW)
     ACP_SURFACE_TOOL_CALLS: bool = field(default_factory=lambda: ACP_SURFACE_TOOL_CALLS)

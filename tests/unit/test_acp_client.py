@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 import pytest
 import pytest_asyncio
 
-from kiro.acp_client import ACPClient
+from kiro.acp_client import ACPClient, ACPError
 from kiro.acp_models import PromptMessage, PromptParams, ACPToolDefinition
 
 # Capture the genuine new_session implementation at import time. The
@@ -529,6 +529,52 @@ class TestMcpServerRegistration:
 
         assert seen["timeout"] == 120.0
 
+    @pytest.mark.asyncio
+    async def test_mcp_timeout_retries_session_without_servers(self):
+        """A timed-out MCP registration falls back to an MCP-free session."""
+        servers = [{"type": "http", "name": "slow", "url": "u", "headers": []}]
+        client = ACPClient(mcp_servers=servers, mcp_init_timeout=7)
+        calls: list[tuple[str, dict, float]] = []
+
+        async def fake_call(method, params, timeout=120.0):
+            if method == "session/new":
+                calls.append((method, params, timeout))
+                if len(calls) == 1:
+                    raise ACPError(-32000, "ACP session/new timed out after 7s")
+                return {"sessionId": "fallback"}
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        session_id = await _REAL_NEW_SESSION(client)
+
+        assert session_id == "fallback"
+        assert len(calls) == 2
+        assert calls[0][1]["mcpServers"] == servers
+        assert calls[0][2] == 7
+        assert calls[1][1]["mcpServers"] == []
+        assert calls[1][2] == 120.0
+
+    @pytest.mark.asyncio
+    async def test_mcp_non_timeout_error_is_not_swallowed(self):
+        """A non-timeout session/new error is propagated without a retry."""
+        client = ACPClient(
+            mcp_servers=[{"type": "http", "name": "svc", "url": "u", "headers": []}]
+        )
+        calls = 0
+
+        async def fake_call(method, params, timeout=120.0):
+            nonlocal calls
+            if method == "session/new":
+                calls += 1
+                raise ACPError(-32602, "invalid MCP configuration")
+            return {}
+
+        client._call = fake_call  # type: ignore[assignment]
+        with pytest.raises(ACPError, match="invalid MCP configuration"):
+            await _REAL_NEW_SESSION(client)
+
+        assert calls == 1
+
 
 class TestStdioBufferLimit:
     """The stdio read buffer must be large enough for big ACP lines."""
@@ -737,7 +783,7 @@ class TestCancellation:
     @pytest.mark.asyncio
     async def test_prompt_stream_cancels_on_early_close(self):
         """Closing the stream before a terminal event triggers session/cancel."""
-        client = ACPClient()
+        client = ACPClient(tool_audit_drain_timeout=0.01)
         written = self._capture_writes(client)
 
         params = PromptParams(
@@ -766,7 +812,11 @@ class TestCancellation:
         msg = json.loads(cancels[0])
         assert msg["params"] == {"sessionId": "s1"}
         assert "id" not in msg
-        # The session bookkeeping is cleaned up.
+        for _ in range(100):
+            await asyncio.sleep(0.001)
+            if not client._drain_tasks:
+                break
+        # The session bookkeeping is cleaned up after the drain window.
         assert "s1" not in client._event_queues
 
     @pytest.mark.asyncio
@@ -843,6 +893,193 @@ class TestCancellation:
         client = ACPClient()
         client._schedule_cancel("")
         assert client._cancel_tasks == set()
+
+
+# ---------------------------------------------------------------------------
+# Tool execution audit and post-cancel drain.
+# ---------------------------------------------------------------------------
+
+class TestToolExecutionAudit:
+    """Late ACP tool events remain observable after the HTTP stream closes."""
+
+    @pytest.mark.asyncio
+    async def test_permission_request_is_audited_and_redacted(self):
+        """Permission decisions retain no obvious credential values."""
+        client = ACPClient()
+        written = TestCancellation._capture_writes(client)
+
+        await client._handle_agent_request({
+            "id": "permission-1",
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "audit-permission",
+                "options": [{"optionId": "allow_once", "kind": "allow_once"}],
+                "toolCall": {
+                    "toolCallId": "tool-permission",
+                    "title": "Running: curl",
+                    "kind": "execute",
+                    "rawInput": {
+                        "api_key": "do-not-retain",
+                        "command": "curl -H 'Authorization: Bearer abcdefghijklmnop'",
+                    },
+                },
+            },
+        })
+
+        audit = client.get_tool_audit("audit-permission")
+        assert audit is not None
+        tool = audit["tools"][0]
+        assert tool["permission"] == "allowed"
+        assert tool["status"] == "permission_granted"
+        assert tool["arguments"]["api_key"] == "[REDACTED]"
+        assert "do-not-retain" not in json.dumps(audit)
+        assert "abcdefghijklmnop" not in json.dumps(audit)
+        assert json.loads(written[0])["result"]["outcome"]["optionId"] == "allow_once"
+
+    @pytest.mark.asyncio
+    async def test_denied_permission_is_audited_as_not_started(self):
+        """A custom reject option id is classified from its ACP kind."""
+        client = ACPClient(trust_tools=False)
+        TestCancellation._capture_writes(client)
+
+        await client._handle_agent_request({
+            "id": "permission-denied",
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "audit-denied",
+                "options": [{"optionId": "no_thanks", "kind": "reject_once"}],
+                "toolCall": {
+                    "toolCallId": "tool-denied",
+                    "title": "Running: rm -rf /tmp/demo",
+                    "kind": "execute",
+                    "rawInput": {"command": "rm -rf /tmp/demo"},
+                },
+            },
+        })
+
+        audit = client.get_tool_audit("audit-denied")
+        assert audit is not None
+        assert audit["tools"][0]["permission"] == "denied"
+        assert audit["tools"][0]["status"] == "permission_denied"
+
+        """A late completed update is retained after cancellation races."""
+        client = ACPClient(tool_audit_drain_timeout=0.2)
+        written = TestCancellation._capture_writes(client)
+        params = PromptParams(
+            session_id="audit-late", messages=[PromptMessage(role="user", content="hi")]
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+
+        async def feed_tool_call() -> None:
+            for _ in range(1000):
+                if "audit-late" in client._event_queues:
+                    client._handle_notification({
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": "audit-late",
+                            "update": {
+                                "sessionUpdate": "tool_call",
+                                "toolCallId": "tool-late",
+                                "title": "Running: echo hi",
+                                "kind": "execute",
+                                "rawInput": {"command": "echo hi"},
+                            },
+                        },
+                    })
+                    return
+                await asyncio.sleep(0)
+            raise AssertionError("prompt queue never appeared")
+
+        feeder = asyncio.create_task(feed_tool_call())
+        assert await gen.__anext__() == {
+            "type": "tool_call",
+            "id": "tool-late",
+            "name": "Running: echo hi",
+            "kind": "execute",
+            "arguments": {"command": "echo hi"},
+            "content": [],
+        }
+        await feeder
+        await gen.aclose()
+        req_id = next(iter(client._prompt_sessions))
+
+        # A second tool announcement arrives after the cancellation request.
+        await asyncio.sleep(0.01)
+        client._handle_notification({
+            "method": "session/update",
+            "params": {
+                "sessionId": "audit-late",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tool-after-cancel",
+                    "title": "Running: late command",
+                    "kind": "execute",
+                    "rawInput": {"command": "late command"},
+                },
+            },
+        })
+
+        # These arrive after the HTTP consumer disappeared; the drain worker
+        # consumes them while the audit store records them independently.
+        client._handle_notification({
+            "method": "session/update",
+            "params": {
+                "sessionId": "audit-late",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tool-late",
+                    "status": "completed",
+                    "rawOutput": {"items": [{"Text": "hi"}]},
+                },
+            },
+        })
+        client._finish_prompt(
+            req_id,
+            {"result": {"stopReason": "cancelled"}},
+        )
+
+        for _ in range(100):
+            await asyncio.sleep(0.001)
+            if not client._drain_tasks:
+                break
+        audit = client.get_tool_audit("audit-late")
+        assert audit is not None
+        assert audit["status"] == "cancelled_after_start"
+        tools = {tool["id"]: tool for tool in audit["tools"]}
+        assert tools["tool-late"]["status"] == "completed"
+        assert tools["tool-after-cancel"]["status"] == "cancelled_after_start"
+        assert tools["tool-after-cancel"]["cancel_race"] == "started_after_cancel"
+        assert audit["drain_status"] == "terminal"
+        assert not client._event_queues
+        assert not client._prompt_sessions
+        assert any('"session/cancel"' in line for line in written)
+
+    @pytest.mark.asyncio
+    async def test_missing_terminal_result_expires_drain_as_unknown(self):
+        """A drain without a terminal ACP result is explicitly unknown."""
+        client = ACPClient(tool_audit_drain_timeout=0.01)
+        params = PromptParams(
+            session_id="audit-timeout", messages=[PromptMessage(role="user", content="hi")]
+        )
+        gen = _REAL_PROMPT_STREAM(client, params)
+        feeder = asyncio.create_task(
+            TestCancellation._drive_until_queue(
+                client, "audit-timeout", [{"type": "text", "content": "hi"}]
+            )
+        )
+        assert await gen.__anext__() == {"type": "text", "content": "hi"}
+        await feeder
+        await gen.aclose()
+
+        for _ in range(100):
+            await asyncio.sleep(0.001)
+            if not client._drain_tasks:
+                break
+        audit = client.get_tool_audit("audit-timeout")
+        assert audit is not None
+        assert audit["status"] == "unknown"
+        assert audit["drain_status"] == "timeout"
+        assert "audit-timeout" not in client._event_queues
 
 
 # ---------------------------------------------------------------------------

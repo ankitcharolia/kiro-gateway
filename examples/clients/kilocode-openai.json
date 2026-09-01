@@ -1,8 +1,8 @@
 // Put this configuration in ~/.config/kilo/kilo.jsonc
 //
 // IMPORTANT — for thinking/reasoning + tool-activity display:
-//   - Select "Claude Opus 4.8" in Kilo Code's model picker.
-//     kiro-cli emits thinking for opus but NOT for claude-sonnet-4.6 (verified).
+//   - Select "Claude Opus 5" in Kilo Code's model picker.
+//     kiro-cli emits thinking for opus but NOT for claude-auto (verified).
 //   - Kilo Code streams by default — no extra setting needed.
 //   - The gateway surfaces reasoning via reasoning_content (ACP_SURFACE_THINKING=true,
 //     the gateway default).
@@ -24,8 +24,8 @@
         "apiKey": "change-me"
       },
       "models": {
-        "claude-opus-4.8": {
-          "name": "Claude Opus 4.8 (thinking)",
+        "claude-opus-5": {
+          "name": "Claude Opus 5 (thinking)",
           "attachment": true,
           "reasoning": true,
           "tool_call": true,
@@ -39,8 +39,8 @@
             "max":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 32000 } } }
           }
         },
-        "claude-sonnet-4.6": {
-          "name": "Claude Sonnet 4.6",
+        "claude-auto": {
+          "name": "Claude (auto)",
           "attachment": true,
           "reasoning": false,
           "tool_call": true,

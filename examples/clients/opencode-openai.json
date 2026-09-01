@@ -1,7 +1,7 @@
 // Put this configuration in ~/.config/opencode/opencode.json
 //
 // OpenCode streams by default — no extra config needed for live reasoning display.
-// Use claude-opus-4.8 to see thinking; kiro-cli does NOT emit thinking for sonnet.
+// Use claude-opus-5 to see thinking; kiro-cli does NOT emit thinking for sonnet.
 //
 // Per-model capability flags (custom OpenAI-compatible providers are NOT in
 // OpenCode's models.dev database, so OpenCode reads capabilities from THIS
@@ -28,8 +28,8 @@
         "apiKey": "change-me"
       },
       "models": {
-        "claude-opus-4.8": {
-          "name": "Claude Opus 4.8 (thinking)",
+        "claude-opus-5": {
+          "name": "Claude Opus 5 (thinking)",
           "attachment": true,
           "reasoning": true,
           "tool_call": true,
@@ -42,8 +42,8 @@
             "max":    { "options": { "thinking": { "type": "enabled", "budgetTokens": 32000 } } }
           }
         },
-        "claude-sonnet-4.6": {
-          "name": "Claude Sonnet 4.6",
+        "claude-auto": {
+          "name": "Claude (auto)",
           "attachment": true,
           "reasoning": false,
           "tool_call": true,
